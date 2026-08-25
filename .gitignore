@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 本地数据（照片与人脸特征库，不上传）
+photo.jpg
+photo2.jpg
+face_db.npz
