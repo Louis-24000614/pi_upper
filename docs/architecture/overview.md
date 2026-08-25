@@ -76,11 +76,13 @@ flowchart TB
 
 上位机内部服务之间：摄像头帧与识别结果走 WebSocket 二进制帧（沿用 arcface-lite `/ws/recognize` 的模式：JPEG 进、JSON 出）。事件上报走 WebSocket JSON。
 
-上位机 ↔ 下位机：**TBD**，建议串口（UART）定长帧：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`，双方各维护一份协议文档，改协议两边同步更新。若下位机有以太网，UDP JSON 也行，省掉编解码。
+上位机 ↔ 下位机：下位机为 STM32（IMU 用 ICM42688，由下位机队友负责）。物理链路用一对 **DAPLink 无线串口模块**做透传：香橙派侧 USB 插入识别为 `/dev/ttyACM*`（CDC ACM 免驱），STM32 侧接 UART（TX/RX 交叉、共地、3.3V 电平）。模块配对方式（点对点 vs WiFi AP 模式）需到手实测确认。
+
+协议为串口定长帧：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`。无线链路有丢包，必须带 CRC 校验、心跳与超时重连；图像不走串口。协议预留"姿态上报"指令字，让 STM32 把 ICM42688 解算的俯仰/偏航角转发给控制台显示。双方各维护一份协议文档，改协议两边同步更新。
 
 ## 技术选型
 
-推理加速：RK3588 自带 6 TOPS NPU，`objdetect` 用 **RKNN-Toolkit-Lite2** 部署 YOLOv8n/YOLOv5s 级别的量化模型，NPU 上可跑到实时；arcface-lite 继续用 onnxruntime CPU（已验证够用，不与 NPU 抢资源）。
+推理加速：RK3588 自带 6 TOPS NPU，`objdetect` 用 **RKNN-Toolkit-Lite2** 部署自训的 YOLO 量化模型。训练链路：4070Ti 主机训练 YOLOv8 → 导出 ONNX → 主机上 RKNN-Toolkit2 量化转换 → `.rknn` 放入 `models/` → 板端加载推理。arcface-lite 继续用 onnxruntime CPU（已验证够用，不与 NPU 抢资源）。
 
 不引入 ROS 2：模块少、团队人手紧，微服务架构的运维成本低于 ROS；若后期需要 SLAM/导航再评估（Nav2 是唯一值得引入 ROS 的理由）。
 
@@ -103,8 +105,8 @@ flowchart TB
 对照任务书/与队友对齐后修订本文：
 
 - 比赛任务与评分点：侦察目标是什么（人？特定物体？二维码/文字？）、有无自主巡检/避障要求、有无时间限制。
-- 车体传感器清单：除 D435i、USB 摄像头外是否有雷达、IMU、麦克风、扬声器。
-- 下位机主控与物理接口：串口还是网口？波特率？协议由谁定稿。
+- 车体传感器清单：除 D435i、USB 摄像头外是否有雷达、麦克风、扬声器（IMU 已确认为 ICM42688，在下位机）。
+- DAPLink 无线串口模块的配对模式（点对点透传 vs WiFi AP），到手后实测确认。
 - 操作端形态：浏览器控制台是否符合规则，还是要求指定平台/上位机软件。
-- 是否需要语音交互（若需要，可从 Radish 迁移 ASR/TTS 微服务）。
-- `models/` 里模型的来源（自训还是官方权重），目标类别集合。
+- 语音要哪种形态：ASR（机器人听懂指令，可从 Radish 迁移 sherpa-onnx SenseVoice 方案）、TTS 播报（建议 Piper，Radish 现用的 Qwen3-TTS-0.6B 对 RK3588 太重）、还是远程喊话（浏览器采集人声下行到喇叭，与 TTS 是两条链路）。
+- 自训检测模型的目标类别集合与数据采集/标注分工。
