@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Model files are large and prepared per-machine (see docs/architecture/overview.md)
+models/*
+!models/README.md
