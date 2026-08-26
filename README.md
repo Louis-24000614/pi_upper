@@ -1,0 +1,109 @@
+# 侦察机器人上位机（robot-upper）
+
+本仓库为侦察机器人上位机程序，运行在 **香橙派 Orange Pi 5 Plus**（RK3588）上，主要负责视觉识别、导航规划、状态管理、Qt 调试界面以及与 STM32 下位机通信。
+
+## Contents
+
+- [运行环境](#运行环境)
+- [硬件说明](#硬件说明)
+- [上位机主要功能](#上位机主要功能)
+- [软件结构](#软件结构)
+- [构建与运行](#构建与运行)
+- [与下位机通信](#与下位机通信)
+- [文档](#文档)
+
+## 运行环境
+
+- 主控板：Orange Pi 5 Plus（RK3588，NPU 6 TOPS）
+- 系统：Ubuntu 22.04
+- ROS 版本：ROS 2 Humble
+- 开发语言：C++ / Qt
+- 主要依赖：OpenCV、Qt、RKNN Runtime、ROS 2 Humble
+
+## 硬件说明
+
+本项目使用两个 USB 摄像头，分工明确。
+
+### 前视导航摄像头
+
+用于道路识别、障碍物识别和视觉导航。
+
+- 130 万像素，USB 2.0，**全局快门**，最高 180 FPS
+- 支持 1280×1024 / 1280×960 / 1280×720，视场角约 63.3°，UVC 兼容
+
+### 侧向识别摄像头
+
+用于侧边目标识别、嫌疑人识别和物体识别。
+
+- 最高分辨率 3852×2172，USB 2.0，滚动快门
+- 支持 MJPG / YUY2，常用模式 1280×720 @ 60 FPS
+- 支持自动曝光、自动白平衡、自动增益
+
+### 其他
+
+- 下位机：STM32（IMU 为 ICM42688，由下位机侧负责解算）
+- 上下位机链路：DAPLink 无线串口透传模块，香橙派侧识别为 `/dev/ttyACM*`
+- 扬声器：语音播报输出（USB 声卡或 3.5mm）
+
+## 上位机主要功能
+
+- Qt 调试界面
+- 双摄像头图像采集
+- YOLO-seg 道路分割
+- YOLO-seg 障碍物识别
+- 物体识别
+- ArcFace 嫌疑人人脸识别
+- 视觉导航
+- BEV 鸟瞰图转换
+- 局部栅格地图生成
+- 局部路径规划
+- 机器人任务状态机
+- 语音播报
+- 与 STM32 下位机串口通信
+
+## 软件结构
+
+上位机采用 **"C++ 后端 + Qt 调试界面"** 的结构。Qt 只负责显示和调试，不直接承担核心控制逻辑——所有感知、规划、通信逻辑在后端模块中实现，脱离界面也能跑。
+
+```text
+robot-upper/
+├── ui/              # Qt 界面
+├── camera/          # 摄像头采集
+├── vision/          # 视觉识别
+├── navigation/      # 视觉导航与路径规划
+├── state/           # 状态机
+├── control/         # 串口通信
+├── config/          # 配置文件
+├── models/          # 模型文件（不入 git，各机器自行准备）
+├── assets/          # 音频等资源
+└── docs/            # 文档
+```
+
+推理加速走 RK3588 的 NPU：YOLO 系列模型在 4070Ti 主机上训练，导出 ONNX 后经 RKNN-Toolkit2 量化转换为 `.rknn`，板端用 RKNN Runtime（rknn-toolkit-lite2 / librknnrt）加载推理。模型文件统一放 `models/`，不提交到仓库。
+
+## 构建与运行
+
+基于 ROS 2 Humble + colcon 的标准工作流（骨架建立后补充各节点的具体启动说明）：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build
+source install/setup.bash
+```
+
+## 与下位机通信
+
+串口定长帧协议：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`，带心跳与超时重连。下位机定时上报姿态角（ICM42688 融合解算）、编码器速度、电量与异常事件标志（碰撞/翻车/卡死）；上位机下发运动指令与模式切换。协议细则见 `docs/` 下的通信契约文档（待定稿）。
+
+## 文档
+
+手写文档统一放 `docs/`，文档地图见 `docs/doc_layout.md`：
+
+- `docs/conventions.md` — 编码与文档规范
+- `docs/architecture/overview.md` — 总体架构规划
+- `docs/architecture/layout.md` — 仓库目录结构
+- `docs/api/face.md` — 人脸识别接口契约
+
+### 当前仓库状态
+
+`arcface-lite/` 为嫌疑人脸识别的 Python 参考实现（InsightFace buffalo_sc，CPU 可跑，含 HTTP/WebSocket 接口与文档），用于先行验证识别效果与建库流程；按本 README 的软件结构推进时，各模块以 C++/ROS 2 节点形式落地，arcface-lite 可作为独立服务保留或用 RKNN 重写后并入 `vision/`。
