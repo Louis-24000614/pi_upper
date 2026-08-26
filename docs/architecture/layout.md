@@ -5,6 +5,7 @@
 ```mermaid
 flowchart TD
   root["pi_upper/"]
+  root --> uart["uart/<br/>下位机串口通信模块（C++）"]
   root --> vision["vision/<br/>视觉相关模块"]
   vision --> af["arcface-lite/<br/>轻量人脸识别服务（FastAPI + InsightFace）"]
   root --> docs["docs/<br/>手写文档（规范、API 契约、模块文档）"]
@@ -12,6 +13,8 @@ flowchart TD
 ```
 
 当前顶层目录：
+
+`uart/` — 与 STM32 下位机的串口通信模块，内部分 `proto/`（纯协议编解码）与 `link/`（串口、时钟、会话状态机）两层。模块文档见 `docs/reference/comm/uart.md`，线协议见下位机仓库的 `UART_PROTOCOL.md`，上位机侧实现约定见 `docs/api/uart.md`。
 
 `vision/arcface-lite/` — 人脸识别服务与测试客户端，模块文档见 `docs/reference/perception/arcface-lite.md`，上手步骤见其 `README.md`。
 

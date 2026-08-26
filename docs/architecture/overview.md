@@ -14,7 +14,7 @@
 
 ## 系统定位
 
-上位机负责"看、认、报、控"：采集两路相机画面，跑 AI 推理（道路分割、障碍物/物体检测、人脸识别），做视觉导航与局部路径规划，通过 Qt 调试界面呈现状态，并经无线串口与 STM32 下位机交换指令与状态。
+上位机负责"看、认、报、控"：采集两路相机画面，跑 AI 推理（道路分割、障碍物/物体检测、人脸识别），做视觉导航与局部路径规划，通过 Qt 调试界面呈现状态，并经串口与 STM32 下位机交换指令与状态。
 
 技术路线：**纯 C++ / Qt 单体应用，不使用 ROS**。采集、推理、规划、通信各自跑在独立线程，Qt 只做显示与调试，不参与核心控制逻辑。唯一的例外是 `vision/arcface-lite/`（已有的 Python 人脸识别服务）：现阶段作为独立进程保留，C++ 侧通过 HTTP 调用；待 YOLO 链路打通后再评估是否用 RKNN 重写并入视觉模块。
 
@@ -28,7 +28,7 @@ flowchart TB
     vis["vision<br/>YOLO-seg 道路/障碍物 · 物体识别（RKNN NPU）"]
     nav["navigation<br/>BEV 变换 · 局部栅格地图 · 路径规划"]
     st["state<br/>任务状态机"]
-    bridge["bridge<br/>串口通信线程"]
+    uart["uart<br/>串口通信线程（COBS + CRC32C）"]
     audio["audio<br/>语音播报"]
   end
 
@@ -37,12 +37,12 @@ flowchart TB
   cam --> vis --> nav
   face["arcface-lite（独立 Python 服务）<br/>嫌疑人识别 HTTP 调用"] <-.-> vis
   nav --> st
-  st --> bridge
+  st --> uart
   st --> audio
   vis --> ui
   nav --> ui
   st --> ui
-  bridge <-- "DAPLink 无线串口<br/>0xAA55 帧 + CRC8 + 心跳" --> mcu["STM32 下位机<br/>电机 · 编码器 · ICM42688"]
+  uart <-- "杜邦线直连<br/>921600 8N1 · 0xA55A 帧 + CRC32C" --> mcu["STM32H743 下位机<br/>电机 · 编码器 · ICM42688"]
 ```
 
 线程模型：相机采集、推理、规划、串口各一条线程，UI 跑主线程；跨线程通信用 Qt 信号槽（QueuedConnection）或线程安全队列，帧数据只传指针/索引不拷贝。
@@ -61,7 +61,7 @@ flowchart TB
 
 `state` — 任务状态机。按比赛流程串联各阶段（启动、巡航、识别、告警、返航等，具体状态集合 TBD，随任务书定稿），仲裁手动遥控与自主导航的指令来源。
 
-`bridge` — 串口通信。帧编解码、CRC8 校验、心跳与超时重连、指令下发与状态解析。传输层抽象成接口（串口 / TCP 可切换），适配 DAPLink 模块的两种可能形态。
+`uart` — 串口通信。COBS 分帧、CRC32C 校验、消息编解码、会话与 ARM 状态机、50 Hz 速度下发与遥测解析。传输层抽象成 `Transport` 接口，串口实现之外提供内存 fake，便于无硬件单测。
 
 `audio` — 语音播报。预录音频文件播放为主（`aplay` 或 Qt Multimedia）；任务书若要求动态播报再叠 Piper TTS。
 
@@ -71,9 +71,11 @@ flowchart TB
 
 进程内模块之间：C++ 接口直调 + Qt 信号槽跨线程；图像帧用带时间戳的共享帧缓冲（读最新、写加锁），避免每帧拷贝。
 
-上位机 ↔ 下位机：下位机为 STM32（IMU 用 ICM42688，姿态解算在下位机完成）。物理链路用一对 DAPLink 无线串口模块透传：香橙派侧 USB 插入识别为 `/dev/ttyACM*`（CDC ACM 免驱），STM32 侧接 UART（TX/RX 交叉、共地、3.3V 电平）。模块配对方式（点对点 vs WiFi AP 模式）需到手实测确认，若为 WiFi 形态则 bridge 传输层切到 TCP。
+上位机 ↔ 下位机：下位机为 STM32H743VIT6（IMU 用 ICM42688，姿态解算在下位机完成）。物理链路是杜邦线直连——香橙派 40 针的 UART TX/RX/GND 对接 STM32 的 USART3（PD9 收、PD8 发），TX/RX 交叉、必须共地、双方都是 3.3 V TTL，不得接入 5 V 或 RS-232 电平。串口参数 921600 8N1，无流控。
 
-协议为串口定长帧：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`。无线链路有丢包，必须带 CRC 校验、心跳与超时重连；下位机收不到运动指令超时自动刹车（安全底线）。数据需求结论：姿态角（pitch/roll/yaw）与编码器速度持续上报（约 10Hz），电量低频上报，加速度只以事件标志位形式出现（碰撞/翻车，下位机检测），里程计字段预留。协议定稿后写成 `docs/api/` 下的契约文档，双方同步维护。
+协议以下位机仓库的 `RC/UART_PROTOCOL.md` 为唯一权威：`COBS(帧头 || payload || CRC32C) || 0x00`，帧头含 `0xA55A` 魔数、协议版本、消息 ID、序号、payload 长度和微秒时间戳。安全模型由下位机主导——上位机先 `HELLO_REQ` 取 `boot_id`，`config_valid=1` 才允许发起 `ARM_REQUEST`，操作者现场短按 K2 确认后上位机从 `SYSTEM_STATUS` 读到 `arm_token`，随后必须以 50 Hz 持续发送带 token 的 `CMD_VEL`（零速也要发）；超过 250 ms 没有有效命令下位机立即安全停车并锁存通信故障。遥测方向按 `ODOM_STATE` 50 Hz、`IMU_STATE` 200 Hz、`SYSTEM_STATUS` 10 Hz 上报，故障以 `FAULT_EVENT` 事件推送。
+
+上位机侧的实现约定（设备路径、termios 设置、会话状态机、重连与超时策略）写在 `docs/api/uart.md`，不重抄线协议细节。协议本身的任何改动由双方在 `RC/UART_PROTOCOL.md` 同步。
 
 ## 技术选型
 
@@ -81,13 +83,15 @@ flowchart TB
 
 视觉：OpenCV 负责采集与图像处理；YOLO-seg / 检测模型在训练主机上训练，ONNX 导出后经 RKNN-Toolkit2 量化，板端用 RKNN Runtime C++ API（librknnrt）推理，NPU 独占给 vision 模块。人脸识别继续沿用 arcface-lite（onnxruntime CPU），不与 NPU 抢资源。
 
-串口：POSIX termios 直读 `/dev/ttyACM*` 或 Qt SerialPort，二选一随骨架定；协议栈与传输层分离，便于串口/TCP 切换与无硬件单测。
+串口：POSIX termios 以 raw 方式直读 `/dev/ttyS*`，不引入 Qt SerialPort，避免通信层依赖 Qt 事件循环。协议栈与传输层分离，传输层背后可以是真实串口或内存 fake，保证编解码和会话逻辑能脱离硬件单测。
 
-不引入 ROS 2：题目规模下 ROS 的构建与运维成本大于收益；Qt 自带线程与信号槽足以支撑本架构。
+50 Hz 的 `CMD_VEL` 下发跑在独立线程里，用 `steady_clock` 自行补偿周期，不挂在 Qt 事件循环上——Linux 非实时，事件循环抖动容易踩下位机 250 ms 的命令看门狗。
+
+不引入 ROS 2：题目规模下 ROS 的构建与运维成本大于收益；Qt 自带线程与信号槽足以支撑本架构。下位机仓库的文档里假定上位机跑 ROS 2 Humble 并实现一个串口桥接节点，但协议本身不依赖 ROS，纯 C++ 实现等价，这一点需要与下位机队友对齐说法。
 
 ## 开发顺序
 
-1. **bridge + 协议约定**——和队友把指令表定下来，模拟收发跑通（无硬件单测），DAPLink 到手即联调。
+1. **uart**——协议已由下位机定稿，按 `RC/UART_PROTOCOL.md` 自底向上实现 COBS/CRC32C、帧编解码、消息编解码、会话状态机，用协议第 10 节的黄金测试向量做无硬件单测，接线后即可联调建链与遥测。
 2. **camera + ui 出图**——双路采集跑通，Qt 界面能看到两路画面，帧率达标。
 3. **vision 第一刀**——先在 PC 上训练/转换一个检测模型，板端 RKNN 推理出框，叠加到画面。
 4. **navigation**——BEV + 栅格地图 + 局部规划，仿真数据先行，再接真实相机。
@@ -101,6 +105,7 @@ flowchart TB
 对照任务书/与队友对齐后修订本文：
 
 - 比赛任务与评分点：场地形态、道路/障碍物规格、识别目标类别、有无自主与遥控的模式要求、时间限制——直接决定 `state` 状态机的状态集合与 `vision` 的类别表。
-- DAPLink 无线串口模块的配对模式（点对点透传 vs WiFi AP），到手后实测确认。
+- 香橙派 40 针上具体启用哪一路 UART、对应的物理针脚编号和设备节点名（`/dev/ttyS*`）。当前系统里没有任何 `/dev/ttyS*`，说明 UART overlay 还没开启，需要查 Orange Pi 5 Plus 的针脚定义后在 `/boot/orangepiEnv.txt` 里加 overlay 并重启，运行用户还要加入 `dialout` 组。实际接线前不阻塞代码开发。
+- 下位机的电机、编码器引脚和底盘机械参数尚未绑定，固件当前上报 `config_valid=0` 并拒绝 ARM。联调初期只能验证建链、时间同步和遥测解析，运动控制要等对方补齐参数。
 - 自训模型的目标类别集合与数据采集/标注分工（训练在 4070Ti 主机上进行）。
 - 除双 USB 摄像头外是否还有雷达等传感器接入上位机。

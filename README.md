@@ -40,8 +40,8 @@
 
 ### 其他
 
-- 下位机：STM32（IMU 为 ICM42688，由下位机侧负责解算）
-- 上下位机链路：DAPLink 无线串口透传模块，香橙派侧识别为 `/dev/ttyACM*`
+- 下位机：STM32H743VIT6（IMU 为 ICM42688，由下位机侧负责解算）
+- 上下位机链路：杜邦线直连 UART，香橙派 40 针 TX/RX/GND 对接 STM32 的 USART3（PD8/PD9），3.3 V TTL，921600 8N1
 - 扬声器：语音播报输出（USB 声卡或 3.5mm）
 
 ## 上位机主要功能
@@ -77,7 +77,9 @@ cmake --build build -j
 
 ## 与下位机通信
 
-串口定长帧协议：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`，带心跳与超时重连。下位机定时上报姿态角（ICM42688 融合解算）、编码器速度、电量与异常事件标志（碰撞/翻车/卡死）；上位机下发运动指令与模式切换。协议细则见 `docs/` 下的通信契约文档（待定稿）。
+杜邦线直连 UART，921600 8N1，二进制帧 `COBS(帧头 || payload || CRC32C) || 0x00`，帧头魔数 `0xA55A`。上位机建链后取 `boot_id`，经操作者按键确认拿到 `arm_token`，再以 50 Hz 下发 `CMD_VEL`（零速也必须持续发，250 ms 断流下位机自动安全停车）；下位机回传里程计、IMU、系统状态与故障事件。
+
+线协议以下位机仓库的 `UART_PROTOCOL.md` 为唯一权威，上位机侧的实现约定见 `docs/api/uart.md`。
 
 ## 文档
 
@@ -86,6 +88,7 @@ cmake --build build -j
 - `docs/conventions.md` — 编码与文档规范
 - `docs/architecture/overview.md` — 总体架构规划
 - `docs/api/face.md` — 人脸识别接口契约
+- `docs/api/uart.md` — 下位机串口通信的上位机侧实现约定
 
 ### 当前仓库状态
 
