@@ -50,11 +50,13 @@ class CameraCaptureThread(QThread):
     """一个物理 V4L2 摄像头对应一个采集线程。"""
 
     frame_ready = Signal(str, object, float)
+    camera_opened = Signal(str, str, int, int, float)
     camera_error = Signal(str, str)
 
     def __init__(self, device_path: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.device_path = device_path
+        self.latest_frame = None
         self._running = True
 
     def run(self) -> None:
@@ -62,6 +64,19 @@ class CameraCaptureThread(QThread):
         if not capture.isOpened():
             self.camera_error.emit(self.device_path, "摄像头打开失败")
             return
+
+        # UVC 摄像头默认常回落到带宽占用较高、帧率较低的 YUYV。
+        # 优先请求本项目常用的 MJPG 720p；不支持时由驱动自然回退。
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        capture.set(cv2.CAP_PROP_FPS, 60)
+        fourcc_value = int(capture.get(cv2.CAP_PROP_FOURCC))
+        pixel_format = "".join(chr((fourcc_value >> (8 * index)) & 0xFF) for index in range(4)).strip()
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        requested_fps = float(capture.get(cv2.CAP_PROP_FPS))
+        self.camera_opened.emit(self.device_path, pixel_format or "--", width, height, requested_fps)
 
         frame_count = 0
         fps_started = time.monotonic()
@@ -74,6 +89,7 @@ class CameraCaptureThread(QThread):
                     self.camera_error.emit(self.device_path, "读取画面失败")
                     self.msleep(30)
                     continue
+                self.latest_frame = frame
                 frame_count += 1
                 elapsed = time.monotonic() - fps_started
                 if elapsed >= 1.0:
@@ -100,6 +116,7 @@ class MainWindow(QMainWindow):
         self.capture_threads: dict[str, CameraCaptureThread] = {}
         self.physical_frames: dict[str, object] = {}
         self.physical_fps: dict[str, float] = {}
+        self.physical_formats: dict[str, str] = {}
         self.camera_errors: dict[str, str] = {}
         self.control_widgets: dict[str, QWidget] = {}
         self.role_sources: dict[str, str | None] = {
@@ -118,13 +135,15 @@ class MainWindow(QMainWindow):
     def recognition_frame(self):
         """供后续识别算法使用的最新原始 OpenCV BGR Frame。"""
         source = self.role_sources["recognition_camera"]
-        return self.physical_frames.get(source) if source else None
+        thread = self.capture_threads.get(source) if source else None
+        return thread.latest_frame if thread and thread.latest_frame is not None else self.physical_frames.get(source)
 
     @property
     def navigation_frame(self):
         """供后续导航算法使用的最新原始 OpenCV BGR Frame。"""
         source = self.role_sources["navigation_camera"]
-        return self.physical_frames.get(source) if source else None
+        thread = self.capture_threads.get(source) if source else None
+        return thread.latest_frame if thread and thread.latest_frame is not None else self.physical_frames.get(source)
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -146,7 +165,7 @@ class MainWindow(QMainWindow):
         self.sidebar_buttons = QButtonGroup(self)
         self.sidebar_buttons.setExclusive(True)
         for index, text in enumerate((
-            "切换", "调参", "摄像机参数", "运行", "任务", "视觉", "导航", "状态",
+            "切换", "调参", "摄像机参数", "运行", "任务", "状态",
         )):
             button = QPushButton(text)
             button.setObjectName("navButton")
@@ -174,7 +193,7 @@ class MainWindow(QMainWindow):
 
     def _build_camera_area(self) -> QWidget:
         container = QWidget()
-        layout = QVBoxLayout(container)
+        layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 6, 0)
         layout.setSpacing(8)
         recognition_panel, self.recognition_view, self.recognition_device, self.recognition_fps = self._camera_panel(
@@ -209,7 +228,7 @@ class MainWindow(QMainWindow):
         view.setObjectName("cameraView")
         view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         view.setMinimumHeight(170)
-        view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         layout.addLayout(header)
         layout.addWidget(view, 1)
         return panel, view, device, fps
@@ -224,7 +243,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._scrollable(self._build_input_page()))
         for builder in (
             self._build_camera_page, self._build_run_page, self._build_task_page,
-            self._build_vision_page, self._build_navigation_page, self._build_status_page,
+            self._build_status_page,
         ):
             self.pages.addWidget(self._scrollable(builder()))
         self.pages.currentChanged.connect(self._sync_sidebar_button)
@@ -333,20 +352,6 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
-    def _build_vision_page(self) -> QWidget:
-        page, layout = self._page()
-        layout.addWidget(self._title("视觉状态"))
-        for heading, rows in (
-            ("识别摄像头", (("目标检测", "未加载"), ("人脸识别", "未加载"), ("FPS", "--"))),
-            ("导航摄像头", (("道路分割", "未加载"), ("路径辅助", "未加载"), ("FPS", "--"))),
-        ):
-            section = QLabel(heading)
-            section.setObjectName("sectionTitle")
-            layout.addWidget(section)
-            layout.addLayout(self._info_grid(tuple((name, self._value(value)) for name, value in rows)))
-        layout.addStretch(1)
-        return page
-
     def _build_camera_page(self) -> QWidget:
         """保留独立的 V4L2 摄像机参数页；与“调参”页没有复用关系。"""
         page, layout = self._page()
@@ -396,23 +401,41 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
-    def _build_navigation_page(self) -> QWidget:
-        page, layout = self._page()
-        layout.addWidget(self._title("导航状态"))
-        layout.addLayout(self._info_grid(tuple((name, self._value(value)) for name, value in (
-            ("当前位置", "--"), ("目标点", "--"), ("方向", "--"),
-            ("线速度", "--"), ("角速度", "--"), ("规划状态", "未启动"),
-        ))))
-        layout.addStretch(1)
-        return page
-
     def _build_status_page(self) -> QWidget:
         page, layout = self._page()
         layout.addWidget(self._title("系统状态"))
-        layout.addLayout(self._info_grid(tuple((name, self._value(value)) for name, value in (
-            ("识别摄像头", "检测中"), ("导航摄像头", "检测中"),
-            ("STM32", "未连接"), ("RKNN", "未加载"),
-        ))))
+
+        devices_title = QLabel("设备")
+        devices_title.setObjectName("sectionTitle")
+        layout.addWidget(devices_title)
+        self.status_recognition_camera = self._value("检测中")
+        self.status_navigation_camera = self._value("检测中")
+        layout.addLayout(self._info_grid((
+            ("识别摄像头", self.status_recognition_camera),
+            ("导航摄像头", self.status_navigation_camera),
+            ("STM32", self._value("未连接")),
+            ("RKNN", self._value("未加载")),
+        )))
+
+        vision_title = QLabel("视觉")
+        vision_title.setObjectName("sectionTitle")
+        layout.addWidget(vision_title)
+        layout.addLayout(self._info_grid((
+            ("目标检测", self._value("未加载")),
+            ("人脸识别", self._value("未加载")),
+            ("道路分割", self._value("未加载")),
+            ("路径辅助", self._value("未加载")),
+        )))
+
+        navigation_title = QLabel("导航")
+        navigation_title.setObjectName("sectionTitle")
+        layout.addWidget(navigation_title)
+        layout.addLayout(self._info_grid((
+            ("当前位置", self._value("--")), ("目标点", self._value("--")),
+            ("方向", self._value("--")), ("线速度", self._value("--")),
+            ("角速度", self._value("--")), ("规划状态", self._value("未启动")),
+        )))
+
         layout.addWidget(QLabel("运行日志"))
         self.log_output = QPlainTextEdit()
         self.log_output.setObjectName("logOutput")
@@ -608,11 +631,20 @@ class MainWindow(QMainWindow):
         for path in paths:
             thread = CameraCaptureThread(path, self)
             thread.frame_ready.connect(self._on_frame_ready)
+            thread.camera_opened.connect(self._on_camera_opened)
             thread.camera_error.connect(self._on_camera_error)
             self.capture_threads[path] = thread
             thread.start()
         self._update_camera_ui()
         self._refresh_camera_controls()
+
+    def _on_camera_opened(self, path: str, pixel_format: str, width: int, height: int, fps: float) -> None:
+        self.physical_formats[path] = f"{pixel_format} · {width}×{height} @ {fps:.0f} FPS"
+        if self.camera_selector.currentData() == path:
+            self.device_format.setText(pixel_format)
+            self.device_resolution.setText(f"{width} × {height}")
+            self.device_fps.setText(f"{fps:.1f}")
+        self._update_camera_ui()
 
     def _on_frame_ready(self, path: str, frame: object, fps: float) -> None:
         self.physical_frames[path] = frame
@@ -635,7 +667,8 @@ class MainWindow(QMainWindow):
         height, width, channels = rgb.shape
         image = QImage(rgb.data, width, height, channels * width, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(image).scaled(
-            view.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            view.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
         )
         view.setPixmap(pixmap)
         view.setText("")
@@ -645,6 +678,8 @@ class MainWindow(QMainWindow):
         self._update_role_ui("navigation_camera", self.navigation_view, self.navigation_device, self.navigation_fps)
         self.footer_recognition.setText(f"识别：{self._role_status('recognition_camera')}")
         self.footer_navigation.setText(f"导航：{self._role_status('navigation_camera')}")
+        self.status_recognition_camera.setText(self._role_detail_status("recognition_camera"))
+        self.status_navigation_camera.setText(self._role_detail_status("navigation_camera"))
         recognition_path = self.role_sources["recognition_camera"] or "未连接"
         navigation_path = self.role_sources["navigation_camera"] or "未连接"
         self.mapping_notice.setText(f"识别摄像头 → {recognition_path}\n导航摄像头 → {navigation_path}")
@@ -675,6 +710,16 @@ class MainWindow(QMainWindow):
             return f"{path} · {self.camera_errors[path]}"
         fps = self.physical_fps.get(path, 0.0)
         return f"{path} · {fps:.1f} FPS" if fps else f"{path} · -- FPS"
+
+    def _role_detail_status(self, role: str) -> str:
+        path = self.role_sources[role]
+        if not path:
+            return "未连接"
+        if path in self.camera_errors:
+            return f"{path} · {self.camera_errors[path]}"
+        camera_format = self.physical_formats.get(path, "格式读取中")
+        fps = self.physical_fps.get(path, 0.0)
+        return f"{path} · {camera_format} · 实际 {fps:.1f} FPS" if fps else f"{path} · {camera_format}"
 
     def _select_task(self, task: str) -> None:
         self.current_task = task
