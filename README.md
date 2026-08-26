@@ -1,4 +1,4 @@
-# 侦察机器人上位机（robot-upper）
+# 侦察机器人上位机（pi_upper）
 
 本仓库为侦察机器人上位机程序，运行在 **香橙派 Orange Pi 5 Plus**（RK3588）上，主要负责视觉识别、导航规划、状态管理、Qt 调试界面以及与 STM32 下位机通信。
 
@@ -16,9 +16,8 @@
 
 - 主控板：Orange Pi 5 Plus（RK3588，NPU 6 TOPS）
 - 系统：Ubuntu 22.04
-- ROS 版本：ROS 2 Humble
 - 开发语言：C++ / Qt
-- 主要依赖：OpenCV、Qt、RKNN Runtime、ROS 2 Humble
+- 主要依赖：OpenCV、Qt、RKNN Runtime（librknnrt）
 
 ## 硬件说明
 
@@ -63,32 +62,17 @@
 
 ## 软件结构
 
-上位机采用 **"C++ 后端 + Qt 调试界面"** 的结构。Qt 只负责显示和调试，不直接承担核心控制逻辑——所有感知、规划、通信逻辑在后端模块中实现，脱离界面也能跑。
+上位机采用 **"C++ 后端 + Qt 调试界面"** 的单体应用结构，不使用 ROS。Qt 只负责显示和调试，不直接承担核心控制逻辑——采集、推理、规划、通信各自跑在独立线程中，脱离界面也能运行。
 
-```text
-robot-upper/
-├── ui/              # Qt 界面
-├── camera/          # 摄像头采集
-├── vision/          # 视觉识别
-├── navigation/      # 视觉导航与路径规划
-├── state/           # 状态机
-├── control/         # 串口通信
-├── config/          # 配置文件
-├── models/          # 模型文件（不入 git，各机器自行准备）
-├── assets/          # 音频等资源
-└── docs/            # 文档
-```
-
-推理加速走 RK3588 的 NPU：YOLO 系列模型在 4070Ti 主机上训练，导出 ONNX 后经 RKNN-Toolkit2 量化转换为 `.rknn`，板端用 RKNN Runtime（rknn-toolkit-lite2 / librknnrt）加载推理。模型文件统一放 `models/`，不提交到仓库。
+推理加速走 RK3588 的 NPU：YOLO 系列模型在训练主机上训练，导出 ONNX 后经 RKNN-Toolkit2 量化转换为 `.rknn`，板端用 RKNN Runtime 加载推理。模型文件统一放 `models/`，不提交到仓库。
 
 ## 构建与运行
 
-基于 ROS 2 Humble + colcon 的标准工作流（骨架建立后补充各节点的具体启动说明）：
+CMake + Qt 标准工作流（项目骨架建立后补充具体说明）：
 
 ```bash
-source /opt/ros/humble/setup.bash
-colcon build
-source install/setup.bash
+cmake -B build
+cmake --build build -j
 ```
 
 ## 与下位机通信
@@ -101,9 +85,8 @@ source install/setup.bash
 
 - `docs/conventions.md` — 编码与文档规范
 - `docs/architecture/overview.md` — 总体架构规划
-- `docs/architecture/layout.md` — 仓库目录结构
 - `docs/api/face.md` — 人脸识别接口契约
 
 ### 当前仓库状态
 
-`arcface-lite/` 为嫌疑人脸识别的 Python 参考实现（InsightFace buffalo_sc，CPU 可跑，含 HTTP/WebSocket 接口与文档），用于先行验证识别效果与建库流程；按本 README 的软件结构推进时，各模块以 C++/ROS 2 节点形式落地，arcface-lite 可作为独立服务保留或用 RKNN 重写后并入 `vision/`。
+`arcface-lite/` 为嫌疑人脸识别的 Python 参考实现（InsightFace buffalo_sc，CPU 可跑，含 HTTP/WebSocket 接口与文档），用于先行验证识别效果与建库流程。主体工程按纯 C++/Qt 推进后，人脸识别可继续以独立服务方式被调用（HTTP），或后续用 RKNN 重写并入视觉模块。

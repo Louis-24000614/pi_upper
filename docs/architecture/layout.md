@@ -15,4 +15,4 @@ flowchart TD
 
 `docs/` — 手写文档，文档地图见 `docs/doc_layout.md`。
 
-后续新增模块（例如运动控制、语音）在顶层新建文件夹，并按 `docs/conventions.md` 的要求在 `docs/reference/<layer>/` 下补一篇模块文档。
+后续新增的代码模块归属上位机 C++/Qt 单体工程，物理目录结构随骨架搭建时确定并更新本文；独立服务（如 arcface-lite）仍保持顶层独立文件夹，并按 `docs/conventions.md` 的要求在 `docs/reference/<layer>/` 下补一篇模块文档。

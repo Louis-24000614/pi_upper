@@ -1,6 +1,6 @@
 # 上位机总体架构（规划）
 
-杭州侦察机器人 —— 上位机（香橙派 RK3588）侧的模块划分、通信边界与开发顺序。本文是规划稿，标注 **TBD** 的条目需要对照任务书或与下位机队友确认后修订。
+杭州侦察机器人 —— 上位机（香橙派 Orange Pi 5 Plus / RK3588）侧的模块划分、通信边界与开发顺序。本文是规划稿，标注 **TBD** 的条目需要对照任务书或与下位机队友确认后修订。
 
 ## Contents
 
@@ -14,99 +14,93 @@
 
 ## 系统定位
 
-上位机负责"看、认、报、控"：采集相机画面，跑 AI 推理（目标检测、人脸识别），把告警与画面上报给操作端，并把操作端的指令转发给下位机。所有需要算力的任务集中在上位机；下位机（队友负责）只管底盘运动与本体的实时控制，双方通过串口/网口交换精简指令。
+上位机负责"看、认、报、控"：采集两路相机画面，跑 AI 推理（道路分割、障碍物/物体检测、人脸识别），做视觉导航与局部路径规划，通过 Qt 调试界面呈现状态，并经无线串口与 STM32 下位机交换指令与状态。
 
-设计取向沿用 arcface-lite 已验证的路线：**无 ROS 依赖的独立微服务**，进程间用 HTTP/WebSocket 通信，每个模块可单独启动、单独测试。这让上位机任意模块挂了不影响其他模块，也让队友复刻环境时不用装 ROS。
+技术路线：**纯 C++ / Qt 单体应用，不使用 ROS**。采集、推理、规划、通信各自跑在独立线程，Qt 只做显示与调试，不参与核心控制逻辑。唯一的例外是 `arcface-lite/`（已有的 Python 人脸识别服务）：现阶段作为独立进程保留，C++ 侧通过 HTTP 调用；待 YOLO 链路打通后再评估是否用 RKNN 重写并入视觉模块。
 
 ## 总体架构
 
 ```mermaid
 flowchart TB
-  subgraph op["操作端（浏览器）"]
-    ui["Web 控制台<br/>视频画面 · 遥控 · 告警"]
+  subgraph app["pi_upper 上位机进程（C++ / Qt）"]
+    ui["ui<br/>Qt 调试界面（只显示/调试）"]
+    cam["camera<br/>双路 UVC 采集线程"]
+    vis["vision<br/>YOLO-seg 道路/障碍物 · 物体识别（RKNN NPU）"]
+    nav["navigation<br/>BEV 变换 · 局部栅格地图 · 路径规划"]
+    st["state<br/>任务状态机"]
+    bridge["bridge<br/>串口通信线程"]
+    audio["audio<br/>语音播报"]
   end
 
-  subgraph up["上位机 pi_upper（香橙派 RK3588）"]
-    srv["webserver<br/>静态页面 + 反向代理/汇聚"]
-    cam["camera<br/>采集 + JPEG 推流"]
-    det["objdetect<br/>目标检测（RKNN/NPU）"]
-    face["arcface-lite ✅<br/>人脸识别 :20004"]
-    bridge["bridge<br/>上下位机通信"]
-    alarm["alarm<br/>事件汇聚与上报"]
-  end
-
-  subgraph low["下位机（队友）"]
-    mcu["底盘 MCU<br/>电机 · 编码器 · IMU"]
-  end
-
-  camusb["USB 摄像头"] --> cam
-  d435["RealSense D435i"] --> cam
-  cam -- "MJPEG / WS" --> ui
-  cam --> det
-  cam --> face
-  det -- "目标事件" --> alarm
-  face -- "人脸事件" --> alarm
-  alarm -- "WS 推送" --> ui
-  ui -- "运动指令" --> srv --> bridge
-  bridge <-- "串口/UDP（TBD）" --> mcu
-  mcu -- "状态回传" --> bridge --> alarm
+  camfront["前视导航摄像头<br/>全局快门 180FPS"] --> cam
+  camside["侧向识别摄像头<br/>720p60"] --> cam
+  cam --> vis --> nav
+  face["arcface-lite（独立 Python 服务）<br/>嫌疑人识别 HTTP 调用"] <-.-> vis
+  nav --> st
+  st --> bridge
+  st --> audio
+  vis --> ui
+  nav --> ui
+  st --> ui
+  bridge <-- "DAPLink 无线串口<br/>0xAA55 帧 + CRC8 + 心跳" --> mcu["STM32 下位机<br/>电机 · 编码器 · ICM42688"]
 ```
+
+线程模型：相机采集、推理、规划、串口各一条线程，UI 跑主线程；跨线程通信用 Qt 信号槽（QueuedConnection）或线程安全队列，帧数据只传指针/索引不拷贝。
 
 ## 模块划分
 
-每个模块是 `pi_upper/` 下的一个顶层文件夹，独立进程、独立端口，配一篇 `docs/reference/<layer>/<module>.md`。
+逻辑模块如下（物理目录结构随骨架搭建时再定，不提前锁死）：
 
-`arcface-lite/`（已有）— 人脸识别服务，HTTP + WebSocket，端口 20004。侦察场景中负责"认出库里的人"，其余人脸报 Unknown。
+`ui` — Qt 调试界面。显示两路画面与识别叠加、BEV 地图与规划轨迹、状态机当前状态、下位机回传的姿态/速度/电量，提供手动遥控与调试按钮。只做显示和调试入口。
 
-`camera/` — 视频采集与推流。统一接管 USB 摄像头与 D435i，对内提供取帧接口（供检测/识别服务消费），对外提供 MJPEG over HTTP 或 WebSocket 图传给 Web 控制台。把"相机在哪台机器上"这件事对上层屏蔽掉。
+`camera` — 双路 UVC 采集。前视导航相机（全局快门，优先 1280×720 高帧率）与侧向识别相机（MJPG 720p60）各自独立线程，对内发布帧。
 
-`objdetect/` — 目标检测服务。侦察的核心感知，检测人/车辆/特定目标物（类别集合 TBD，取决于任务书），输出类别 + bbox + 置信度。模型文件放 `models/`（大文件不入 git）。
+`vision` — 视觉识别。YOLO-seg 道路分割与障碍物识别（RKNN）、物体识别（RKNN）；嫌疑人脸识别现阶段调用 arcface-lite 的 HTTP 接口。输出语义结果（车道区域、障碍物框、目标类别、bbox）。
 
-`bridge/` — 上下位机通信桥。把 Web 控制台的运动指令（前进/转向/速度）翻译成下位机帧协议下发；把下位机回传的状态（电量、里程、故障码）解析后转 WebSocket 上报。协议格式与队友共同定义，定义后写成 `docs/api/` 下的契约文档。
+`navigation` — 视觉导航。BEV 鸟瞰变换、局部栅格地图生成、局部路径规划，输出期望速度/角速度给状态机。
 
-`alarm/` — 事件汇聚。订阅检测/识别/下位机的事件流，做去抖与优先级合并（同一人 3 秒内只报一次之类），统一推给 Web 控制台并落盘事件日志。
+`state` — 任务状态机。按比赛流程串联各阶段（启动、巡航、识别、告警、返航等，具体状态集合 TBD，随任务书定稿），仲裁手动遥控与自主导航的指令来源。
 
-`webserver/` + `webui/` — Web 控制台后端与前端。视频画面、遥控面板、告警列表三合一；前端可参考 Radish 的 `webui/`（Vite + TS SPA）裁剪重建。
+`bridge` — 串口通信。帧编解码、CRC8 校验、心跳与超时重连、指令下发与状态解析。传输层抽象成接口（串口 / TCP 可切换），适配 DAPLink 模块的两种可能形态。
 
-`models/` — 模型文件统一存放处（RKNN/ONNX），体积大不入库，各机器自行准备，README 记录每个模型的来源与版本。
+`audio` — 语音播报。预录音频文件播放为主（`aplay` 或 Qt Multimedia）；任务书若要求动态播报再叠 Piper TTS。
+
+`arcface-lite/`（仓库内已有）— 独立 Python 人脸识别服务，HTTP/WebSocket 接口已文档化（见 `docs/api/face.md`）。
 
 ## 通信契约
 
-操作端 ↔ 上位机：HTTP REST + WebSocket，风格与 `docs/api/face.md` 一致（统一信封 `{status, message, data}`）。图传走独立通道（MJPEG 流或二进制 WS 帧），不进信封。
+进程内模块之间：C++ 接口直调 + Qt 信号槽跨线程；图像帧用带时间戳的共享帧缓冲（读最新、写加锁），避免每帧拷贝。
 
-上位机内部服务之间：摄像头帧与识别结果走 WebSocket 二进制帧（沿用 arcface-lite `/ws/recognize` 的模式：JPEG 进、JSON 出）。事件上报走 WebSocket JSON。
+上位机 ↔ 下位机：下位机为 STM32（IMU 用 ICM42688，姿态解算在下位机完成）。物理链路用一对 DAPLink 无线串口模块透传：香橙派侧 USB 插入识别为 `/dev/ttyACM*`（CDC ACM 免驱），STM32 侧接 UART（TX/RX 交叉、共地、3.3V 电平）。模块配对方式（点对点 vs WiFi AP 模式）需到手实测确认，若为 WiFi 形态则 bridge 传输层切到 TCP。
 
-上位机 ↔ 下位机：下位机为 STM32（IMU 用 ICM42688，由下位机队友负责）。物理链路用一对 **DAPLink 无线串口模块**做透传：香橙派侧 USB 插入识别为 `/dev/ttyACM*`（CDC ACM 免驱），STM32 侧接 UART（TX/RX 交叉、共地、3.3V 电平）。模块配对方式（点对点 vs WiFi AP 模式）需到手实测确认。
-
-协议为串口定长帧：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`。无线链路有丢包，必须带 CRC 校验、心跳与超时重连；图像不走串口。协议预留"姿态上报"指令字，让 STM32 把 ICM42688 解算的俯仰/偏航角转发给控制台显示。双方各维护一份协议文档，改协议两边同步更新。
+协议为串口定长帧：`帧头 0xAA55 | 指令字 | 长度 | 数据 | CRC8`。无线链路有丢包，必须带 CRC 校验、心跳与超时重连；下位机收不到运动指令超时自动刹车（安全底线）。数据需求结论：姿态角（pitch/roll/yaw）与编码器速度持续上报（约 10Hz），电量低频上报，加速度只以事件标志位形式出现（碰撞/翻车，下位机检测），里程计字段预留。协议定稿后写成 `docs/api/` 下的契约文档，双方同步维护。
 
 ## 技术选型
 
-推理加速：RK3588 自带 6 TOPS NPU，`objdetect` 用 **RKNN-Toolkit-Lite2** 部署自训的 YOLO 量化模型。训练链路：4070Ti 主机训练 YOLOv8 → 导出 ONNX → 主机上 RKNN-Toolkit2 量化转换 → `.rknn` 放入 `models/` → 板端加载推理。arcface-lite 继续用 onnxruntime CPU（已验证够用，不与 NPU 抢资源）。
+语言与框架：C++17，Qt（Widgets 起步够用，调试界面不必上 QML）。构建用 CMake。格式化用 clang-format（Google 风格，100 列），仓库根提交 `.clang-format`。
 
-不引入 ROS 2：模块少、团队人手紧，微服务架构的运维成本低于 ROS；若后期需要 SLAM/导航再评估（Nav2 是唯一值得引入 ROS 的理由）。
+视觉：OpenCV 负责采集与图像处理；YOLO-seg / 检测模型在训练主机上训练，ONNX 导出后经 RKNN-Toolkit2 量化，板端用 RKNN Runtime C++ API（librknnrt）推理，NPU 独占给 vision 模块。人脸识别继续沿用 arcface-lite（onnxruntime CPU），不与 NPU 抢资源。
 
-图传先用 MJPEG over HTTP：实现半天、浏览器原生支持、局域网内延迟可接受；若任务书对延迟/帧率有硬指标再升级 WebRTC。
+串口：POSIX termios 直读 `/dev/ttyACM*` 或 Qt SerialPort，二选一随骨架定；协议栈与传输层分离，便于串口/TCP 切换与无硬件单测。
 
-语言：AI 服务与桥接用 Python 3.10（与 arcface-lite 一致）；Web 前端 TypeScript。
+不引入 ROS 2：题目规模下 ROS 的构建与运维成本大于收益；Qt 自带线程与信号槽足以支撑本架构。
 
 ## 开发顺序
 
-1. **bridge + 协议约定**——和队友把上下位机协议定下来，先让控制台能遥控车动起来（最小闭环）。
-2. **camera + webui 画面**——操作端能看到实时画面，侦察的基本形态就有了。
-3. **objdetect**——接入检测模型，画面叠加识别框，事件进 alarm。
-4. **arcface-lite 接入 alarm**——特定人员告警（服务现成，只差事件接线和 Web 展示）。
-5. **完善**：事件日志、录像/截图存证、电量显示等，按任务书评分点排优先级。
+1. **bridge + 协议约定**——和队友把指令表定下来，模拟收发跑通（无硬件单测），DAPLink 到手即联调。
+2. **camera + ui 出图**——双路采集跑通，Qt 界面能看到两路画面，帧率达标。
+3. **vision 第一刀**——先在 PC 上训练/转换一个检测模型，板端 RKNN 推理出框，叠加到画面。
+4. **navigation**——BEV + 栅格地图 + 局部规划，仿真数据先行，再接真实相机。
+5. **state 状态机 + 人脸告警**——串起比赛流程；arcface-lite 接入识别嫌疑人事件。
+6. **完善**：语音播报、事件日志、截图存证等，按任务书评分点排优先级。
 
-每一步交付都遵循 `docs/conventions.md`：代码 + 模块文档 + API 契约同一个 commit。
+每一步交付遵循 `docs/conventions.md`：代码 + 模块文档 + 必要的契约文档同一个 commit。
 
 ## 待确认项
 
 对照任务书/与队友对齐后修订本文：
 
-- 比赛任务与评分点：侦察目标是什么（人？特定物体？二维码/文字？）、有无自主巡检/避障要求、有无时间限制。
-- 车体传感器清单：除 D435i、USB 摄像头外是否有雷达、麦克风、扬声器（IMU 已确认为 ICM42688，在下位机）。
+- 比赛任务与评分点：场地形态、道路/障碍物规格、识别目标类别、有无自主与遥控的模式要求、时间限制——直接决定 `state` 状态机的状态集合与 `vision` 的类别表。
 - DAPLink 无线串口模块的配对模式（点对点透传 vs WiFi AP），到手后实测确认。
-- 操作端形态：浏览器控制台是否符合规则，还是要求指定平台/上位机软件。
-- ~~语音形态~~ 已确认不做 ASR（题目无语音交互需求）。仅当任务书要求喊话/警示音时再评估音频下行或 Piper TTS，优先级最低。
-- 自训检测模型的目标类别集合与数据采集/标注分工。
+- 自训模型的目标类别集合与数据采集/标注分工（训练在 4070Ti 主机上进行）。
+- 除双 USB 摄像头外是否还有雷达等传感器接入上位机。
