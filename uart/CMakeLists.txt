@@ -3,8 +3,7 @@
 #
 # uart_proto —— 纯协议编解码。无 IO、无状态、无时间、无 Qt，只依赖标准库。
 add_library(uart_proto
-  proto/crc32c.cpp
-  proto/cobs.cpp
+  proto/crc8.cpp
   proto/frame.cpp
   proto/codec.cpp
 )

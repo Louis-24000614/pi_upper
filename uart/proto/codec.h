@@ -1,8 +1,8 @@
 /// @file
 /// 消息层：各消息 payload 的字段级序列化与反序列化。
 ///
-/// 字段偏移与单位对应下位机仓库 UART_PROTOCOL.md 第 5、6 节。本层只做字节与结构体
-/// 之间的转换，不涉及状态、时间和安全判断——那些属于 sess 层。
+/// 字段偏移与单位对应下位机仓库 UART_PROTOCOL.md（协议 v2）第 6、7 节。本层只做
+/// 字节与结构体之间的转换，不涉及状态、时间和安全判断——那些属于 sess 层。
 ///
 /// 长度约定：解码函数要求 payload 长度**严格相等**，不接受多余字节。协议规定长度
 /// 不符应回 ACK_BAD_PAYLOAD，因此这里返回 false 而不是尽力解析。
@@ -23,12 +23,16 @@
 
 namespace uart {
 
-/// 各消息的 payload 长度，单位字节。长度为 0 的消息（HELLO_REQ、DISARM、
-/// RESET_ODOM、CLEAR_FAULT_REQUEST）不需要编解码函数，直接发空 payload。
+/// 各消息的 payload 长度，单位字节。长度为 0 的消息（DISARM、RESET_ODOM、
+/// CLEAR_FAULT_REQUEST）不需要编解码函数，直接发空 payload。
+///
+/// v2 与 v1 的差异：HELLO_REQ 从 0 字节变成 1 字节（带协议版本），
+/// ACK 从 8 字节变成 6 字节（去掉了 uint16 序号）。
+constexpr size_t kSizeHelloReq = 1;
 constexpr size_t kSizeTimeSyncReq = 8;
 constexpr size_t kSizeArmRequest = 4;
 constexpr size_t kSizeCmdVel = 12;
-constexpr size_t kSizeAck = 8;
+constexpr size_t kSizeAck = 6;
 constexpr size_t kSizeHelloInfo = 16;
 constexpr size_t kSizeTimeSyncResp = 24;
 constexpr size_t kSizeOdomState = 52;
@@ -40,12 +44,14 @@ constexpr size_t kSizeFaultEvent = 12;
 /// 编码函数统一返回写入的字节数，0 表示缓冲不足或字段非法。
 /// 解码函数统一返回是否成功，失败时 @p out 的内容未定义。
 
+size_t EncodeHelloReq(const HelloReq& msg, uint8_t* dst, size_t cap);
 size_t EncodeTimeSyncReq(const TimeSyncReq& msg, uint8_t* dst, size_t cap);
 size_t EncodeArmRequest(const ArmRequest& msg, uint8_t* dst, size_t cap);
 
 /// 编码 CMD_VEL。线速度或角速度为 NaN/Inf 时返回 0，拒绝下发。
 size_t EncodeCmdVel(const CmdVel& msg, uint8_t* dst, size_t cap);
 
+bool DecodeHelloReq(const uint8_t* payload, size_t len, HelloReq* out);
 bool DecodeTimeSyncReq(const uint8_t* payload, size_t len, TimeSyncReq* out);
 bool DecodeArmRequest(const uint8_t* payload, size_t len, ArmRequest* out);
 bool DecodeCmdVel(const uint8_t* payload, size_t len, CmdVel* out);

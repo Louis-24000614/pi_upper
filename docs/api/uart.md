@@ -29,7 +29,7 @@
 
 ## 串口设置
 
-以 raw 模式打开，921600 8N1，无校验位，无硬件流控，无软件流控（关闭 `IXON`/`IXOFF`），关闭所有 CR/LF 转换（清 `ICRNL`/`INLCR`/`ONLCR`/`OPOST`），关闭规范模式与回显（清 `ICANON`/`ECHO`/`ISIG`）。协议是二进制的，任何字节改写都会破坏 COBS 分帧和 CRC。
+以 raw 模式打开，921600 8N1，无校验位，无硬件流控，无软件流控（关闭 `IXON`/`IXOFF`），关闭所有 CR/LF 转换（清 `ICRNL`/`INLCR`/`ONLCR`/`OPOST`），关闭规范模式与回显（清 `ICANON`/`ECHO`/`ISIG`）。协议是二进制的，任何字节改写都会破坏分帧和 CRC。
 
 读取用非阻塞或短超时轮询：`VMIN = 0`、`VTIME = 1`（100 ms 上限），配合 `poll()` 等待可读，避免忙等占满一个核心。写入按整帧一次性 `write()`，短写要循环补齐。
 
@@ -37,9 +37,11 @@
 
 ## 线协议
 
-一帧是 `COBS(帧头 || payload || CRC32C) || 0x00`。帧头 18 字节，含魔数 `0xA55A`、协议主版本、消息 ID、flags、reserved、16 位序号、payload 长度和发送方单调微秒时间戳。CRC 为 CRC-32C（Castagnoli，反射多项式 `0x82F63B78`，初值与终值异或均为全 `1`），覆盖未编码的帧头与 payload，小端写入帧尾。所有多字节整数小端，浮点为 IEEE-754 binary32。
+当前协议版本为 **2**。一帧是 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`，总长 `LENGTH + 5`。`LENGTH` 只算 payload，上限 128。CRC 为 CRC-8/ATM（多项式 `0x07`，初值 `0x00`，输入输出均不反射，最终不异或，检查值 `CRC8("123456789") = 0xF4`），覆盖 `TYPE + LENGTH + PAYLOAD`，同步字不参与计算。所有多字节整数小端，浮点为 IEEE-754 binary32。
 
-字段级细节见 `UART_PROTOCOL.md` 第 3 至第 6 节。上位机需要处理的消息：下发方向 `HELLO_REQ`、`TIME_SYNC_REQ`、`ARM_REQUEST`、`DISARM`、`CMD_VEL`、`RESET_ODOM`、`CLEAR_FAULT_REQUEST`；接收方向 `ACK`、`HELLO_INFO`、`TIME_SYNC_RESP`、`ODOM_STATE`、`IMU_STATE`、`IMU_DEBUG`、`SYSTEM_STATUS`、`FAULT_EVENT`。
+v2 相比 v1 去掉了 COBS 转义、结束符、18 字节帧头、序号和通用时间戳。因此 payload 里可以出现任意字节（包括 `55 AA`），接收端必须严格按 `LENGTH` 取数据，不能靠搜索同步字来定帧尾；协议版本号从帧头移到了 `HELLO_REQ` 的 payload 里。
+
+字段级细节见 `UART_PROTOCOL.md` 第 2、3、6、7 节。上位机需要处理的消息：下发方向 `HELLO_REQ`、`TIME_SYNC_REQ`、`ARM_REQUEST`、`DISARM`、`CMD_VEL`、`RESET_ODOM`、`CLEAR_FAULT_REQUEST`；接收方向 `ACK`、`HELLO_INFO`、`TIME_SYNC_RESP`、`ODOM_STATE`、`IMU_STATE`、`IMU_DEBUG`、`SYSTEM_STATUS`、`FAULT_EVENT`。
 
 序列化必须逐字节写入，**不允许**把 C++ 结构体直接 `memcpy` 上线——对齐、填充和 ABI 差异会让两端字节布局不一致。
 
@@ -84,19 +86,21 @@ ARM 必须有操作者现场按键确认，上位机无法单方面使能。`con
 
 ## 错误处理与重连
 
-以 `0x00` 作为帧边界逐字节收帧，不依赖读取块的边界。COBS 解码失败、长度不等于 `18 + payload_length + 4`、魔数或版本不符都计入格式错误并丢弃；CRC 不匹配计入 CRC 错误并静默丢弃。坏帧中的 token、速度和时间戳一律不得沿用。
+用六状态机（等 `0x55`、等 `0xAA`、读 TYPE、读 LENGTH、读 PAYLOAD、读 CRC）逐字节收帧，不依赖读取块的边界。`LENGTH > 128` 计入溢出并重新搜索 `55 AA`；CRC 不匹配计入 CRC 错误并静默丢弃。坏帧中的 token 与速度一律不得沿用。
 
-编码缓冲溢出时丢弃到下一个 `0x00` 重新同步。串口读写返回错误或设备消失时关闭并按退避策略重开，重开后必须重新 `HELLO_REQ`——重连不会恢复旧 token。
+帧收到一半断流超过 **20 ms**（字节间超时，与固件的 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` 一致）时必须丢弃残帧。不做这一步的话，残帧会与后续字节拼出长度和内容都错位、但 CRC 恰好自洽的"合法"帧。
+
+串口读写返回错误或设备消失时关闭并按退避策略重开，重开后必须重新 `HELLO_REQ`——重连不会恢复旧 token。
 
 超过约 1 s 没收到任何有效帧时，把本地链路状态置为断开并通知上层。清故障需要下位机侧长按 K2，上位机的 `CLEAR_FAULT_REQUEST` 只表达意图，不会绕过现场确认。
 
-对 `ACK` 用 `request_sequence` 与 `request_type` 配对响应，重试次数要设上限，避免无限重发管理命令。
+**ACK 配对**：v2 没有序号，`ACK` 只能按 `request_type` 配对。因此同一时刻只允许一个在途的管理请求，收到响应或超时后才能发下一个，否则无法判断收到的 ACK 属于哪一次。协议同时要求上位机**不要自动重发非幂等管理命令**——超时只释放名额，重试与否由上层决定。`HELLO_REQ` 是例外：它幂等，且由 `HELLO_INFO` 而非 `ACK` 回应，可以按重试周期持续发送。`DISARM` 也不受名额限制，停车动作必须随时能发出。
 
 ## Testing
 
 编解码与会话逻辑全部要求无硬件可测：传输层背后换成内存 fake，时钟可注入。
 
-最关键的一组用例来自 `UART_PROTOCOL.md` 第 10 节的黄金测试向量——`HELLO_REQ`、零速 `CMD_VEL` 两条帧要能字节级复现，第三条故意保留旧 CRC 的坏帧必须被判为 CRC 错误且不产生任何副作用。CRC 实现用 `123456789` 校验值 `0xE3069283` 自检。
+最关键的一组用例来自 `UART_PROTOCOL.md` 的黄金帧——`55 AA 01 01 02 70`（`HELLO_REQ`）和零速 `CMD_VEL` 要能字节级复现，第三条故意保留旧 CRC 的坏帧（token 首字节 `78` 改成 `79`）必须被判为 CRC 错误且不产生任何副作用。CRC 实现用 `CRC8("123456789") = 0xF4` 自检。
 
 具体测试清单与结果记录在 `docs/reference/comm/uart.md` 的 Testing 一节。
 

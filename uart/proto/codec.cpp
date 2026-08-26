@@ -33,6 +33,22 @@ AckResult ToAckResult(uint8_t value) {
 
 }  // namespace
 
+size_t EncodeHelloReq(const HelloReq& msg, uint8_t* dst, size_t cap) {
+  if (cap < kSizeHelloReq) {
+    return 0;
+  }
+  dst[0] = msg.protocol_version;
+  return kSizeHelloReq;
+}
+
+bool DecodeHelloReq(const uint8_t* payload, size_t len, HelloReq* out) {
+  if (len != kSizeHelloReq) {
+    return false;
+  }
+  out->protocol_version = payload[0];
+  return true;
+}
+
 size_t EncodeTimeSyncReq(const TimeSyncReq& msg, uint8_t* dst, size_t cap) {
   if (cap < kSizeTimeSyncReq) {
     return 0;
@@ -95,10 +111,9 @@ size_t EncodeAck(const Ack& msg, uint8_t* dst, size_t cap) {
   if (cap < kSizeAck) {
     return 0;
   }
-  PutU16(dst + 0, msg.request_sequence);
-  dst[2] = msg.request_type;
-  dst[3] = static_cast<uint8_t>(msg.result);
-  PutU32(dst + 4, msg.arm_token);
+  dst[0] = msg.request_type;
+  dst[1] = static_cast<uint8_t>(msg.result);
+  PutU32(dst + 2, msg.arm_token);
   return kSizeAck;
 }
 
@@ -106,10 +121,9 @@ bool DecodeAck(const uint8_t* payload, size_t len, Ack* out) {
   if (len != kSizeAck) {
     return false;
   }
-  out->request_sequence = GetU16(payload + 0);
-  out->request_type = payload[2];
-  out->result = ToAckResult(payload[3]);
-  out->arm_token = GetU32(payload + 4);
+  out->request_type = payload[0];
+  out->result = ToAckResult(payload[1]);
+  out->arm_token = GetU32(payload + 2);
   return true;
 }
 

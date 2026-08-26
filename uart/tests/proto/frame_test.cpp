@@ -1,42 +1,55 @@
 /// @file
-/// 帧层单元测试。核心是 UART_PROTOCOL.md 第 10 节的三条黄金测试向量——它们是
-/// 上位机实现与固件实现交叉校验的唯一硬标准，字节级不一致就说明两端对不上。
+/// 帧层单元测试。核心是 UART_PROTOCOL.md 里的黄金帧——它们是上位机实现与固件实现
+/// 交叉校验的唯一硬标准，字节级不一致就说明两端对不上。
+///
+/// v2 的重点测试对象与 v1 不同：不再有 COBS 和分隔符，改为验证定长字段定帧、
+/// payload 里出现 `55 AA` 不误判、以及字节间超时后的重新同步。
 
 #include "proto/frame.h"
 
 #include <cstring>
+
+#include "proto/crc8.h"
 #include <vector>
 
 #include "check.h"
 
 namespace {
 
-using uart::DecodeRawFrame;
 using uart::EncodeFrame;
-using uart::FrameError;
-using uart::Header;
-using uart::kMaxEncodedSize;
+using uart::kInterByteTimeoutUs;
+using uart::kMaxFrameSize;
 using uart::kMaxPayloadSize;
 using uart::Reassembler;
 
-/// 协议 10.1：HELLO_REQ，版本 1，消息 0x01，序号 1，时间戳 0，空 payload。
-const std::vector<uint8_t> kGoldenHelloReq = {0x05, 0x5A, 0xA5, 0x01, 0x01, 0x01, 0x02, 0x01,
-                                             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-                                             0x01, 0x01, 0x05, 0xD0, 0xB5, 0xF9, 0xAB, 0x00};
+/// 文档 6.1：HELLO_REQ，payload 为单字节协议版本 2。
+const std::vector<uint8_t> kGoldenHelloReq = {0x55, 0xAA, 0x01, 0x01, 0x02, 0x70};
 
-/// 协议 10.2：零速 CMD_VEL，消息 0x12，序号 2，时间戳 0，token 0x12345678，v 与 ω 均为 0.0f。
-const std::vector<uint8_t> kGoldenCmdVel = {
-    0x05, 0x5A, 0xA5, 0x01, 0x12, 0x01, 0x02, 0x02, 0x02, 0x0C, 0x01, 0x01,
-    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x05, 0x78, 0x56, 0x34, 0x12, 0x01,
-    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x05, 0x17, 0x78, 0x7C, 0x17, 0x00};
+/// 文档 6.5：零速 CMD_VEL，token 0x12345678，v 与 ω 均为 0.0f。
+const std::vector<uint8_t> kGoldenCmdVel = {0x55, 0xAA, 0x12, 0x0C, 0x78, 0x56, 0x34, 0x12, 0x00,
+                                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xCD};
 
-/// 协议 10.3：在 10.2 的已编码帧上把消息类型改成 0x13 却保留旧 CRC。
-/// 接收端必须判为 CRC 错误，且绝不能执行 RESET_ODOM。
+/// 文档第 9 节：把 token 首字节从 0x78 改成 0x79 却保留原 CRC 0xCD。
 std::vector<uint8_t> MakeGoldenCrcError() {
   std::vector<uint8_t> bad = kGoldenCmdVel;
-  bad[4] = 0x13;
+  bad[4] = 0x79;
   return bad;
 }
+
+/// 收帧结果的记录器，省掉每个用例都写一遍 lambda 捕获。
+struct Sink {
+  int calls = 0;
+  uint8_t msg_type = 0;
+  std::vector<uint8_t> payload;
+
+  Reassembler::FrameHandler Handler() {
+    return [this](uint8_t type, const uint8_t* data, size_t len) {
+      ++calls;
+      msg_type = type;
+      payload.assign(data, data + len);
+    };
+  }
+};
 
 void ExpectBytes(const uint8_t* got, size_t got_len, const std::vector<uint8_t>& want,
                  const char* what) {
@@ -50,199 +63,234 @@ void ExpectBytes(const uint8_t* got, size_t got_len, const std::vector<uint8_t>&
                uart::test::Hex(want.data(), want.size()).c_str());
 }
 
-/// 编码方向：装配出的字节流必须与黄金向量完全一致。
+/// 编码方向：装配出的字节流必须与黄金帧完全一致。
 void TestEncodeGoldenVectors() {
-  uint8_t buf[kMaxEncodedSize] = {};
+  uint8_t buf[kMaxFrameSize] = {};
 
-  Header hello;
-  hello.msg_type = 0x01;
-  hello.sequence = 1;
-  size_t len = EncodeFrame(hello, nullptr, 0, buf, sizeof(buf));
+  const uint8_t hello_payload[1] = {0x02};
+  size_t len = EncodeFrame(0x01, hello_payload, sizeof(hello_payload), buf, sizeof(buf));
   ExpectBytes(buf, len, kGoldenHelloReq, "encode HELLO_REQ");
 
   // CMD_VEL payload：token(u32) + linear_x(f32) + angular_z(f32)，均小端。
   const uint8_t payload[12] = {0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0};
-  Header cmd;
-  cmd.msg_type = 0x12;
-  cmd.sequence = 2;
-  len = EncodeFrame(cmd, payload, sizeof(payload), buf, sizeof(buf));
+  len = EncodeFrame(0x12, payload, sizeof(payload), buf, sizeof(buf));
   ExpectBytes(buf, len, kGoldenCmdVel, "encode zero CMD_VEL");
 }
 
-/// 解码方向：黄金向量喂进收帧状态机，应解出正确的帧头与 payload。
+/// 解码方向：黄金帧喂进收帧状态机，应解出正确的类型与 payload。
 void TestDecodeGoldenVectors() {
   Reassembler rx;
-  int calls = 0;
-  Header seen;
-  std::vector<uint8_t> seen_payload;
+  Sink sink;
+  const auto handler = sink.Handler();
 
-  const auto handler = [&](const Header& header, const uint8_t* payload, size_t payload_len) {
-    ++calls;
-    seen = header;
-    seen_payload.assign(payload, payload + payload_len);
-  };
+  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(), 0, handler);
+  CHECK(sink.calls == 1);
+  CHECK(sink.msg_type == 0x01);
+  CHECK(sink.payload.size() == 1);
+  if (sink.payload.size() == 1) {
+    CHECK(sink.payload[0] == uart::kProtocolVersion);
+  }
 
-  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(), handler);
-  CHECK(calls == 1);
-  CHECK(seen.msg_type == 0x01);
-  CHECK(seen.version == 1);
-  CHECK(seen.sequence == 1);
-  CHECK(seen.payload_length == 0);
-  CHECK(seen.timestamp_us == 0);
-
-  rx.Feed(kGoldenCmdVel.data(), kGoldenCmdVel.size(), handler);
-  CHECK(calls == 2);
-  CHECK(seen.msg_type == 0x12);
-  CHECK(seen.sequence == 2);
-  CHECK(seen.payload_length == 12);
-  CHECK(seen_payload.size() == 12);
-  if (seen_payload.size() == 12) {
-    CHECK(seen_payload[0] == 0x78 && seen_payload[3] == 0x12);
+  rx.Feed(kGoldenCmdVel.data(), kGoldenCmdVel.size(), 0, handler);
+  CHECK(sink.calls == 2);
+  CHECK(sink.msg_type == 0x12);
+  CHECK(sink.payload.size() == 12);
+  if (sink.payload.size() == 12) {
+    CHECK(sink.payload[0] == 0x78 && sink.payload[3] == 0x12);
   }
   CHECK(rx.stats().frames == 2);
   CHECK(rx.stats().crc_errors == 0);
-  CHECK(rx.stats().format_errors == 0);
 }
 
-/// 协议 10.3：坏 CRC 必须计入 crc_errors 且不产生任何回调。
+/// 坏 CRC 必须计入 crc_errors 且不产生任何回调。
 void TestGoldenCrcErrorIsRejected() {
   const std::vector<uint8_t> bad = MakeGoldenCrcError();
   Reassembler rx;
-  int calls = 0;
-  rx.Feed(bad.data(), bad.size(), [&](const Header&, const uint8_t*, size_t) { ++calls; });
-  CHECK(calls == 0);
+  Sink sink;
+  rx.Feed(bad.data(), bad.size(), 0, sink.Handler());
+  CHECK(sink.calls == 0);
   CHECK(rx.stats().crc_errors == 1);
   CHECK(rx.stats().frames == 0);
-  CHECK(rx.stats().format_errors == 0);
 }
 
 /// 逐字节喂入必须与整块喂入等价：真实串口读到的分片边界是任意的。
 void TestByteAtATimeFeed() {
   Reassembler rx;
-  int calls = 0;
-  const auto handler = [&](const Header&, const uint8_t*, size_t) { ++calls; };
+  Sink sink;
+  const auto handler = sink.Handler();
   for (uint8_t byte : kGoldenCmdVel) {
-    rx.Feed(&byte, 1, handler);
+    rx.Feed(&byte, 1, 0, handler);
   }
-  CHECK(calls == 1);
+  CHECK(sink.calls == 1);
   CHECK(rx.stats().frames == 1);
 }
 
-/// 任意长度 payload 的编解码往返，覆盖到 kMaxPayloadSize 上限。
-void TestRoundTripAllLengths() {
-  uint8_t buf[kMaxEncodedSize] = {};
-  for (size_t payload_len = 0; payload_len <= kMaxPayloadSize; ++payload_len) {
-    std::vector<uint8_t> payload(payload_len);
-    for (size_t i = 0; i < payload_len; ++i) {
-      // 刻意掺入 0x00，让 COBS 在每个长度上都真正干活。
-      payload[i] = static_cast<uint8_t>(i % 3 == 0 ? 0 : i);
-    }
+/// 两帧粘在一起、以及帧被切成任意两段，都必须能正确解出。
+void TestSplitAndConcatenated() {
+  std::vector<uint8_t> two = kGoldenHelloReq;
+  two.insert(two.end(), kGoldenCmdVel.begin(), kGoldenCmdVel.end());
 
-    Header header;
-    header.msg_type = 0x90;
-    header.sequence = static_cast<uint16_t>(payload_len);
-    header.timestamp_us = 0x0102030405060708ull;
-    const size_t len = EncodeFrame(header, payload.data(), payload_len, buf, sizeof(buf));
-    CHECK(len > 0);
+  Reassembler rx;
+  Sink sink;
+  rx.Feed(two.data(), two.size(), 0, sink.Handler());
+  CHECK(sink.calls == 2);
 
-    Reassembler rx;
-    int calls = 0;
-    rx.Feed(buf, len, [&](const Header& got, const uint8_t* got_payload, size_t got_len) {
-      ++calls;
-      CHECK(got.msg_type == 0x90);
-      CHECK(got.sequence == payload_len);
-      CHECK(got.timestamp_us == 0x0102030405060708ull);
-      CHECK(got_len == payload_len);
-      if (got_len == payload_len && payload_len > 0) {
-        CHECK(std::memcmp(got_payload, payload.data(), payload_len) == 0);
-      }
-    });
-    CHECK(calls == 1);
+  for (size_t cut = 1; cut < two.size(); ++cut) {
+    Reassembler split_rx;
+    Sink split_sink;
+    const auto handler = split_sink.Handler();
+    split_rx.Feed(two.data(), cut, 0, handler);
+    split_rx.Feed(two.data() + cut, two.size() - cut, 0, handler);
+    CHECK(split_sink.calls == 2);
   }
 }
 
-void TestEncodeRejectsOversizePayload() {
-  uint8_t buf[kMaxEncodedSize] = {};
+/// v2 不用转义，payload 里可以出现同步字。接收端必须严格按 LENGTH 取数据，
+/// 不能把 payload 内部的 55 AA 当成新帧的开始。
+void TestSyncBytesInsidePayload() {
+  const uint8_t payload[] = {0x55, 0xAA, 0x55, 0xAA, 0x00, 0x55, 0xAA};
+  uint8_t buf[kMaxFrameSize] = {};
+  const size_t len = EncodeFrame(0x90, payload, sizeof(payload), buf, sizeof(buf));
+  CHECK(len == sizeof(payload) + uart::kFrameOverhead);
+
+  Reassembler rx;
+  Sink sink;
+  rx.Feed(buf, len, 0, sink.Handler());
+  CHECK(sink.calls == 1);
+  CHECK(sink.payload.size() == sizeof(payload));
+  if (sink.payload.size() == sizeof(payload)) {
+    CHECK(std::memcmp(sink.payload.data(), payload, sizeof(payload)) == 0);
+  }
+}
+
+/// 同步字前的垃圾数据要被跳过；连续的 0x55 不能让状态机错过真正的 55 AA。
+void TestResyncFromGarbage() {
+  Reassembler rx;
+  Sink sink;
+  const auto handler = sink.Handler();
+
+  const uint8_t garbage[] = {0x00, 0xFF, 0x55, 0x55, 0x55};
+  rx.Feed(garbage, sizeof(garbage), 0, handler);
+  CHECK(sink.calls == 0);
+
+  // 上面最后一个 0x55 已经进入等待第二同步字的状态，紧接一个 AA 就应开始收帧。
+  // 因此这里只喂黄金帧去掉首字节 0x55 的剩余部分。
+  rx.Feed(kGoldenHelloReq.data() + 1, kGoldenHelloReq.size() - 1, 0, handler);
+  CHECK(sink.calls == 1);
+  CHECK(sink.msg_type == 0x01);
+}
+
+/// 帧收到一半断流超过字节间超时：残帧必须丢弃，否则会与后续字节拼出错位的"合法"帧。
+void TestInterByteTimeout() {
+  Reassembler rx;
+  Sink sink;
+  const auto handler = sink.Handler();
+
+  // 只喂半帧。
+  rx.Feed(kGoldenCmdVel.data(), 6, 1000, handler);
+  CHECK(sink.calls == 0);
+
+  // 超时之后补上剩余字节：残帧已被丢弃，这些字节凑不出一帧。
+  rx.Feed(kGoldenCmdVel.data() + 6, kGoldenCmdVel.size() - 6, 1000 + kInterByteTimeoutUs + 1,
+          handler);
+  CHECK(sink.calls == 0);
+  CHECK(rx.stats().timeouts == 1);
+
+  // 超时不应破坏状态机，之后的完整帧仍要能收。
+  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(), 2000000, handler);
+  CHECK(sink.calls == 1);
+}
+
+/// 超时窗口内的分片是正常现象，不能误丢。
+void TestNoTimeoutWithinWindow() {
+  Reassembler rx;
+  Sink sink;
+  const auto handler = sink.Handler();
+  rx.Feed(kGoldenCmdVel.data(), 6, 1000, handler);
+  rx.Feed(kGoldenCmdVel.data() + 6, kGoldenCmdVel.size() - 6, 1000 + kInterByteTimeoutUs, handler);
+  CHECK(sink.calls == 1);
+  CHECK(rx.stats().timeouts == 0);
+}
+
+/// 所有合法 payload 长度的编解码往返，含 0 和上限 128。
+void TestRoundTripAllLengths() {
+  uint8_t buf[kMaxFrameSize] = {};
+  for (size_t payload_len = 0; payload_len <= kMaxPayloadSize; ++payload_len) {
+    std::vector<uint8_t> payload(payload_len);
+    for (size_t i = 0; i < payload_len; ++i) {
+      payload[i] = static_cast<uint8_t>(i);
+    }
+
+    const size_t len = EncodeFrame(0x90, payload.data(), payload_len, buf, sizeof(buf));
+    CHECK(len == payload_len + uart::kFrameOverhead);
+
+    Reassembler rx;
+    Sink sink;
+    rx.Feed(buf, len, 0, sink.Handler());
+    CHECK(sink.calls == 1);
+    CHECK(sink.msg_type == 0x90);
+    CHECK(sink.payload.size() == payload_len);
+    if (sink.payload.size() == payload_len && payload_len > 0) {
+      CHECK(std::memcmp(sink.payload.data(), payload.data(), payload_len) == 0);
+    }
+  }
+}
+
+void TestEncodeRejectsBadArguments() {
+  uint8_t buf[kMaxFrameSize] = {};
   const std::vector<uint8_t> payload(kMaxPayloadSize + 1, 0xAB);
-  Header header;
-  header.msg_type = 0x90;
-  CHECK(EncodeFrame(header, payload.data(), payload.size(), buf, sizeof(buf)) == 0);
+  // payload 超过 128 字节。
+  CHECK(EncodeFrame(0x90, payload.data(), payload.size(), buf, sizeof(buf)) == 0);
+  // 目标缓冲不足。
+  CHECK(EncodeFrame(0x90, payload.data(), 8, buf, 8) == 0);
+  // 长度非 0 时 payload 不能为空指针。
+  CHECK(EncodeFrame(0x90, nullptr, 4, buf, sizeof(buf)) == 0);
 }
 
-/// 帧头各字段的非法值分别归入哪一类错误。
-void TestDecodeRawFrameErrors() {
-  uint8_t buf[kMaxEncodedSize] = {};
-  Header header;
-  header.msg_type = 0x01;
-  header.sequence = 1;
-  const size_t encoded_len = EncodeFrame(header, nullptr, 0, buf, sizeof(buf));
-  CHECK(encoded_len > 0);
-
-  // 从已编码帧还原出原始帧，便于逐字段做破坏性测试。
-  uint8_t raw[uart::kMaxDecodedSize] = {};
-  const size_t raw_len = uart::CobsDecode(buf, encoded_len - 1, raw, sizeof(raw));
-  CHECK(raw_len == uart::kHeaderSize + uart::kCrcSize);
-
-  Header out;
-  const uint8_t* payload = nullptr;
-  CHECK(DecodeRawFrame(raw, raw_len, &out, &payload) == FrameError::kOk);
-
-  // 长度不足。
-  CHECK(DecodeRawFrame(raw, uart::kHeaderSize, &out, &payload) == FrameError::kLength);
-
-  // 魔数错误。
-  uint8_t broken[uart::kMaxDecodedSize] = {};
-  std::memcpy(broken, raw, raw_len);
-  broken[0] = 0x00;
-  CHECK(DecodeRawFrame(broken, raw_len, &out, &payload) == FrameError::kMagic);
-
-  // reserved 非 0。
-  std::memcpy(broken, raw, raw_len);
-  broken[5] = 0x01;
-  CHECK(DecodeRawFrame(broken, raw_len, &out, &payload) == FrameError::kReserved);
-
-  // payload_length 与实际长度不符。
-  std::memcpy(broken, raw, raw_len);
-  broken[8] = 0x04;
-  CHECK(DecodeRawFrame(broken, raw_len, &out, &payload) == FrameError::kLength);
-
-  // 版本不匹配不由帧层拒绝，需要读出来交给会话层判断。
-  std::memcpy(broken, raw, raw_len);
-  broken[2] = 0x02;
-  CHECK(DecodeRawFrame(broken, raw_len, &out, &payload) == FrameError::kCrc);
-}
-
-/// 连续分隔符与空帧不应计入错误，这是重新同步时的正常现象。
-void TestEmptyFramesIgnored() {
+/// LENGTH 字段超过上限：计一次溢出并重新找同步字，不能按超长长度去读后续字节。
+void TestOversizeLengthField() {
   Reassembler rx;
-  int calls = 0;
-  const uint8_t zeros[] = {0x00, 0x00, 0x00};
-  rx.Feed(zeros, sizeof(zeros), [&](const Header&, const uint8_t*, size_t) { ++calls; });
-  CHECK(calls == 0);
-  CHECK(rx.stats().format_errors == 0);
-  CHECK(rx.stats().crc_errors == 0);
+  Sink sink;
+  const auto handler = sink.Handler();
 
-  // 空帧之后仍应能正常收帧。
-  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(),
-          [&](const Header&, const uint8_t*, size_t) { ++calls; });
-  CHECK(calls == 1);
-}
-
-/// 超长垃圾数据应计一次溢出，并在下一个分隔符处重新同步。
-void TestOverflowResync() {
-  Reassembler rx;
-  int calls = 0;
-  const auto handler = [&](const Header&, const uint8_t*, size_t) { ++calls; };
-
-  const std::vector<uint8_t> garbage(kMaxEncodedSize + 64, 0xAB);
-  rx.Feed(garbage.data(), garbage.size(), handler);
+  const uint8_t bad[] = {0x55, 0xAA, 0x90, 0xFF};
+  rx.Feed(bad, sizeof(bad), 0, handler);
   CHECK(rx.stats().overflows == 1);
-  CHECK(calls == 0);
+  CHECK(sink.calls == 0);
 
-  const uint8_t delimiter = 0x00;
-  rx.Feed(&delimiter, 1, handler);
-  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(), handler);
-  CHECK(calls == 1);
+  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(), 0, handler);
+  CHECK(sink.calls == 1);
+  CHECK(rx.stats().frames == 1);
+}
+
+/// 坏帧的最后一个字节恰好是 0x55 时，紧随其后的帧仍要能收到。
+void TestResyncWhenBadCrcByteIsSync() {
+  Reassembler rx;
+  Sink sink;
+  const auto handler = sink.Handler();
+
+  // 构造一帧 CRC 位置为 0x55 的坏帧，紧接一个完整的黄金帧。
+  std::vector<uint8_t> stream = {0x55, 0xAA, 0x11, 0x00, 0x55};
+  CHECK(uart::Crc8(stream.data() + 2, 2) != 0x55);
+  stream.insert(stream.end(), kGoldenHelloReq.begin() + 1, kGoldenHelloReq.end());
+
+  rx.Feed(stream.data(), stream.size(), 0, handler);
+  CHECK(rx.stats().crc_errors == 1);
+  CHECK(sink.calls == 1);
+  CHECK(sink.msg_type == 0x01);
+}
+
+/// Reset 丢弃残帧但保留统计。
+void TestReset() {
+  Reassembler rx;
+  Sink sink;
+  const auto handler = sink.Handler();
+
+  rx.Feed(kGoldenHelloReq.data(), kGoldenHelloReq.size(), 0, handler);
+  rx.Feed(kGoldenCmdVel.data(), 6, 0, handler);
+  rx.Reset();
+  rx.Feed(kGoldenCmdVel.data() + 6, kGoldenCmdVel.size() - 6, 0, handler);
+  CHECK(sink.calls == 1);
   CHECK(rx.stats().frames == 1);
 }
 
@@ -253,10 +301,15 @@ int main() {
   TestDecodeGoldenVectors();
   TestGoldenCrcErrorIsRejected();
   TestByteAtATimeFeed();
+  TestSplitAndConcatenated();
+  TestSyncBytesInsidePayload();
+  TestResyncFromGarbage();
+  TestInterByteTimeout();
+  TestNoTimeoutWithinWindow();
   TestRoundTripAllLengths();
-  TestEncodeRejectsOversizePayload();
-  TestDecodeRawFrameErrors();
-  TestEmptyFramesIgnored();
-  TestOverflowResync();
+  TestEncodeRejectsBadArguments();
+  TestOversizeLengthField();
+  TestResyncWhenBadCrcByteIsSync();
+  TestReset();
   return uart::test::Finish("frame");
 }

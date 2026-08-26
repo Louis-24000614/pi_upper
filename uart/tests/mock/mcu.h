@@ -20,11 +20,9 @@ namespace uart::test {
 /// 假下位机。不实现任何安全逻辑，只做协议层面的收发，具体回什么由测试决定。
 class FakeMcu {
  public:
-  /// 从上位机收到的一帧。
+  /// 从上位机收到的一帧。v2 的帧头只有类型和长度，没有序号与时间戳。
   struct Received {
     uint8_t type = 0;
-    uint16_t sequence = 0;
-    uint64_t timestamp_us = 0;
     std::vector<uint8_t> payload;
   };
 
@@ -32,12 +30,10 @@ class FakeMcu {
   void Drain(FakePort& port) {
     const std::vector<uint8_t> bytes = port.tx();
     port.ClearTx();
-    rx_.Feed(bytes.data(), bytes.size(),
-             [this](const Header& header, const uint8_t* payload, size_t len) {
+    rx_.Feed(bytes.data(), bytes.size(), now_us_,
+             [this](uint8_t type, const uint8_t* payload, size_t len) {
                Received got;
-               got.type = header.msg_type;
-               got.sequence = header.sequence;
-               got.timestamp_us = header.timestamp_us;
+               got.type = type;
                got.payload.assign(payload, payload + len);
                received_.push_back(std::move(got));
              });
@@ -107,10 +103,10 @@ class FakeMcu {
   }
 
   /// 用指定协议版本发一帧 HELLO_INFO，用于测试版本不兼容的处理。
-  void SendHelloInfoWithVersion(FakePort& port, const HelloInfo& msg, uint8_t version) {
-    uint8_t payload[kSizeHelloInfo] = {};
-    EncodeHelloInfo(msg, payload, sizeof(payload));
-    Emit(port, MsgType::kHelloInfo, payload, sizeof(payload), version);
+  /// v2 的版本号在 HELLO_INFO 的 payload 里，不再在帧头。
+  void SendHelloInfoWithVersion(FakePort& port, HelloInfo msg, uint8_t version) {
+    msg.protocol_version = version;
+    SendHelloInfo(port, msg);
   }
 
   /// 直接注入任意字节，用于构造坏帧。
@@ -120,22 +116,15 @@ class FakeMcu {
   void set_now_us(uint64_t us) { now_us_ = us; }
 
  private:
-  void Emit(FakePort& port, MsgType type, const uint8_t* payload, size_t len,
-            uint8_t version = kProtocolVersion) {
-    Header header;
-    header.version = version;
-    header.msg_type = static_cast<uint8_t>(type);
-    header.sequence = next_sequence_++;
-    header.timestamp_us = now_us_;
-
-    uint8_t frame[kMaxEncodedSize] = {};
-    const size_t frame_len = EncodeFrame(header, payload, len, frame, sizeof(frame));
+  void Emit(FakePort& port, MsgType type, const uint8_t* payload, size_t len) {
+    uint8_t frame[kMaxFrameSize] = {};
+    const size_t frame_len =
+        EncodeFrame(static_cast<uint8_t>(type), payload, len, frame, sizeof(frame));
     port.PushRx(frame, frame_len);
   }
 
   Reassembler rx_;
   std::vector<Received> received_;
-  uint16_t next_sequence_ = 1;
   uint64_t now_us_ = 0;
 };
 

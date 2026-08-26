@@ -91,7 +91,7 @@ void TestHelloRetryUntilAnswered() {
 
   // 上位机发出的帧本身必须合法。
   CHECK(f.mcu.stats().crc_errors == 0);
-  CHECK(f.mcu.stats().format_errors == 0);
+  CHECK(f.mcu.stats().overflows == 0);
 }
 
 /// config_valid=0 时不得发起 ARM。协议规定这是安全检查，不允许绕过。
@@ -453,16 +453,19 @@ void TestVersionMismatchDoesNotConnect() {
   f.Tick(1);
 
   HelloInfo info;
-  info.protocol_version = 2;
   info.boot_id = kBootId;
   info.config_valid = 1;
   info.remote_state = RemoteState::kDisarmed;
-  f.mcu.SendHelloInfoWithVersion(f.port, info, /*version=*/2);
+  // 下位机报了一个和本端不一致的版本。v2 把版本号放在 HELLO_INFO 的 payload 里，
+  // 所以这一帧本身是合法的，能被解出来，只是不该让上位机认为建链成功。
+  f.mcu.SendHelloInfoWithVersion(f.port, info, kProtocolVersion + 1);
   f.Tick(1);
 
   CHECK(f.session.link_state() == LinkState::kConnecting);
   CHECK(f.session.boot_id() == 0);
   CHECK(!f.session.RequestArm());
+  CHECK(f.session.peer_protocol_version() == kProtocolVersion + 1);
+  CHECK(f.session.diagnostics().version_mismatches == 1);
 }
 
 /// 坏帧不能影响会话状态，且必须计入诊断。
@@ -472,11 +475,9 @@ void TestBadFrameDoesNotDisturbSession() {
   f.Arm();
   const uint32_t token_before = f.session.arm_token();
 
-  // 协议 10.3 的坏 CRC 帧（把 CMD_VEL 的类型改成 RESET_ODOM 却保留旧 CRC）。
-  const std::vector<uint8_t> bad = {0x05, 0x5A, 0xA5, 0x01, 0x13, 0x01, 0x02, 0x02, 0x02,
-                                    0x0C, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-                                    0x05, 0x78, 0x56, 0x34, 0x12, 0x01, 0x01, 0x01, 0x01,
-                                    0x01, 0x01, 0x01, 0x05, 0x17, 0x78, 0x7C, 0x17, 0x00};
+  // 文档第 9 节的坏 CRC 黄金帧：token 首字节改成 0x79 但保留原 CRC 0xCD。
+  const std::vector<uint8_t> bad = {0x55, 0xAA, 0x12, 0x0C, 0x79, 0x56, 0x34, 0x12, 0x00,
+                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xCD};
   f.mcu.SendRaw(f.port, bad);
   f.Tick(1);
 
@@ -493,6 +494,97 @@ void TestWorksWithByteAtATimeReads() {
   CHECK(f.session.link_state() == LinkState::kConnected);
   f.Arm();
   CHECK(f.session.arm_token() == kToken);
+}
+
+/// v2 没有序号，ACK 只能按类型配对，所以同一时刻只允许一个在途管理请求。
+/// 第二个请求必须被拒，否则收到 ACK 时无法判断它回应的是哪一次。
+void TestOneOutstandingRequestAtATime() {
+  Fixture f;
+  f.Connect();
+
+  CHECK(f.session.RequestClearFault());
+  CHECK(f.session.request_pending());
+  // 在途期间的第二个请求被拒，且没有真的发上线。
+  f.mcu.ClearReceived();
+  CHECK(!f.session.RequestResetOdom());
+  f.Tick(1);
+  CHECK(f.mcu.CountOf(MsgType::kResetOdom) == 0);
+  CHECK(f.session.diagnostics().requests_refused_busy == 1);
+
+  // 收到对应类型的 ACK 后名额释放。
+  Ack ack;
+  ack.request_type = static_cast<uint8_t>(MsgType::kClearFaultRequest);
+  ack.result = AckResult::kPending;
+  f.mcu.SendAck(f.port, ack);
+  f.Tick(1);
+  CHECK(!f.session.request_pending());
+  CHECK(f.session.RequestResetOdom());
+}
+
+/// 类型对不上的 ACK 不能把在途请求误清掉。CMD_VEL 出错时也会回 ACK，
+/// 它不占名额，更不该顶掉正在等的管理请求。
+void TestMismatchedAckDoesNotClearPending() {
+  Fixture f;
+  f.Connect();
+
+  CHECK(f.session.RequestClearFault());
+  Ack ack;
+  ack.request_type = static_cast<uint8_t>(MsgType::kCmdVel);
+  ack.result = AckResult::kBadToken;
+  f.mcu.SendAck(f.port, ack);
+  f.Tick(1);
+
+  CHECK(f.session.request_pending());
+  CHECK(f.session.telemetry().has_ack);
+}
+
+/// ACK 迟迟不来时要超时放开名额，让上层能重试；但协议要求上位机自己不重发，
+/// 所以超时只清标志，不产生新的请求帧。
+void TestPendingRequestTimesOut() {
+  Fixture f;
+  f.Connect();
+
+  CHECK(f.session.RequestClearFault());
+  // 先把请求帧收掉再清计数，这样后面统计到的就只有超时之后新发的帧。
+  f.Tick(1);
+  f.mcu.ClearReceived();
+
+  f.Tick(f.session.config().ack_timeout_ms + 1);
+  CHECK(!f.session.request_pending());
+  CHECK(f.session.diagnostics().ack_timeouts == 1);
+  CHECK(f.mcu.CountOf(MsgType::kClearFaultRequest) == 0);
+}
+
+/// DISARM 是停车动作，安全优先：即使有在途管理请求也必须能发出去。
+void TestDisarmIsNotBlockedByPendingRequest() {
+  Fixture f;
+  f.Connect();
+
+  CHECK(f.session.RequestClearFault());
+  CHECK(f.session.request_pending());
+  f.mcu.ClearReceived();
+
+  CHECK(f.session.RequestDisarm());
+  f.Tick(1);
+  CHECK(f.mcu.CountOf(MsgType::kDisarm) == 1);
+}
+
+/// HELLO_REQ 在 v2 里带一个字节的协议版本，且因为幂等、由 HELLO_INFO 回应，
+/// 不占在途请求名额，可以按重试周期一直发。
+void TestHelloReqCarriesVersion() {
+  Fixture f;
+  f.session.Start();
+  f.Tick(1);
+
+  const FakeMcu::Received* hello = f.mcu.Last(MsgType::kHelloReq);
+  CHECK(hello != nullptr);
+  if (hello != nullptr) {
+    CHECK(hello->payload.size() == kSizeHelloReq);
+    if (hello->payload.size() == kSizeHelloReq) {
+      CHECK(hello->payload[0] == kProtocolVersion);
+    }
+  }
+  CHECK(!f.session.request_pending());
 }
 
 }  // namespace
@@ -518,5 +610,10 @@ int main() {
   TestVersionMismatchDoesNotConnect();
   TestBadFrameDoesNotDisturbSession();
   TestWorksWithByteAtATimeReads();
+  TestOneOutstandingRequestAtATime();
+  TestMismatchedAckDoesNotClearPending();
+  TestPendingRequestTimesOut();
+  TestDisarmIsNotBlockedByPendingRequest();
+  TestHelloReqCarriesVersion();
   return uart::test::Finish("sess");
 }
