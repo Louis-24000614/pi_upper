@@ -13,6 +13,8 @@ graph LR
 
 When a module-specific note under `docs/` conflicts with this file, the module doc wins for that folder only.
 
+**Language.** This repository writes in-code comments, doc comments, and hand-written `docs/` files in **Chinese**. Keep identifiers, type names, wire field names, commit prefixes, and section headings in English so tooling and cross-repo references stay stable. Where a language section below says comments must be English, this rule overrides it.
+
 ---
 
 ## Inline documentation (functions and types)
@@ -328,7 +330,7 @@ Target **Python 3.12** unless the repository pins another version. Pin the runti
 
 Follow the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html), except **indent with 2 spaces** (not 4).
 
-Type hints on public functions. Docstrings on modules, classes, and public methods — Google docstring format is fine. All in-code comments, docstrings, and inline notes must be written in English. Add inline comments for non-obvious algorithm choices, numerical assumptions, async/concurrency behavior, hardware assumptions, or failure handling. Do not comment obvious assignments or direct framework calls.
+Type hints on public functions. Docstrings on modules, classes, and public methods — Google docstring format is fine. Comments and docstrings are written in Chinese per the language rule at the top of this file. Add inline comments for non-obvious algorithm choices, numerical assumptions, async/concurrency behavior, hardware assumptions, or failure handling. Do not comment obvious assignments or direct framework calls.
 
 Set type checking to at least **standard** (pyright/pylance). Prefer `[tool.pyright]` in `pyproject.toml` so the mode applies in any editor:
 
