@@ -68,7 +68,7 @@ curl -X POST http://127.0.0.1:20004/api/v1/register \
 
 可选环境变量：`DB_PATH`（人脸库路径，默认 `./face_db.npz`）、`FACE_THRESHOLD`（余弦相似度阈值，默认 0.45）、`DET_W`/`DET_H`（检测输入尺寸，默认 320）、`MODEL_NAME`（默认 `buffalo_sc`）。
 
-健康检查：`curl http://127.0.0.1:20004/health`。完整接口见 [../docs/api/face.md](../docs/api/face.md)。
+健康检查：`curl http://127.0.0.1:20004/health`。完整接口见 [../../docs/api/face.md](../../docs/api/face.md)。
 
 ## 运行客户端
 

@@ -8,4 +8,4 @@
 - `docs/api/face.md` — arcface-lite 服务的 HTTP REST 与 WebSocket 线协议契约。
 - `docs/reference/perception/arcface-lite.md` — arcface-lite 模块文档：架构、设计取舍、API 与测试方法。
 
-各模块上手步骤（安装、注册人脸、运行）写在模块目录自己的 `README.md` 里，例如 `arcface-lite/README.md`。
+各模块上手步骤（安装、注册人脸、运行）写在模块目录自己的 `README.md` 里，例如 `vision/arcface-lite/README.md`。

@@ -89,4 +89,4 @@ cmake --build build -j
 
 ### 当前仓库状态
 
-`arcface-lite/` 为嫌疑人脸识别的 Python 参考实现（InsightFace buffalo_sc，CPU 可跑，含 HTTP/WebSocket 接口与文档），用于先行验证识别效果与建库流程。主体工程按纯 C++/Qt 推进后，人脸识别可继续以独立服务方式被调用（HTTP），或后续用 RKNN 重写并入视觉模块。
+`vision/arcface-lite/` 为嫌疑人脸识别的 Python 参考实现（InsightFace buffalo_sc，CPU 可跑，含 HTTP/WebSocket 接口与文档），用于先行验证识别效果与建库流程。主体工程按纯 C++/Qt 推进后，人脸识别可继续以独立服务方式被调用（HTTP），或后续用 RKNN 重写并入视觉模块。

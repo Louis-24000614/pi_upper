@@ -16,7 +16,7 @@
 
 上位机负责"看、认、报、控"：采集两路相机画面，跑 AI 推理（道路分割、障碍物/物体检测、人脸识别），做视觉导航与局部路径规划，通过 Qt 调试界面呈现状态，并经无线串口与 STM32 下位机交换指令与状态。
 
-技术路线：**纯 C++ / Qt 单体应用，不使用 ROS**。采集、推理、规划、通信各自跑在独立线程，Qt 只做显示与调试，不参与核心控制逻辑。唯一的例外是 `arcface-lite/`（已有的 Python 人脸识别服务）：现阶段作为独立进程保留，C++ 侧通过 HTTP 调用；待 YOLO 链路打通后再评估是否用 RKNN 重写并入视觉模块。
+技术路线：**纯 C++ / Qt 单体应用，不使用 ROS**。采集、推理、规划、通信各自跑在独立线程，Qt 只做显示与调试，不参与核心控制逻辑。唯一的例外是 `vision/arcface-lite/`（已有的 Python 人脸识别服务）：现阶段作为独立进程保留，C++ 侧通过 HTTP 调用；待 YOLO 链路打通后再评估是否用 RKNN 重写并入视觉模块。
 
 ## 总体架构
 
@@ -65,7 +65,7 @@ flowchart TB
 
 `audio` — 语音播报。预录音频文件播放为主（`aplay` 或 Qt Multimedia）；任务书若要求动态播报再叠 Piper TTS。
 
-`arcface-lite/`（仓库内已有）— 独立 Python 人脸识别服务，HTTP/WebSocket 接口已文档化（见 `docs/api/face.md`）。
+`vision/arcface-lite/`（仓库内已有）— 独立 Python 人脸识别服务，HTTP/WebSocket 接口已文档化（见 `docs/api/face.md`）。
 
 ## 通信契约
 
