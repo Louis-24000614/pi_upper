@@ -1,3 +1,6 @@
+# C++ build
+build/
+
 # Python
 __pycache__/
 *.pyc
