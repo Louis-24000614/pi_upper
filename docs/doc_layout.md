@@ -9,5 +9,8 @@
 - `docs/api/uart.md` — 下位机串口通信在上位机侧的实现约定（线协议以下位机仓库的 `UART_PROTOCOL.md` 为权威）。
 - `docs/reference/comm/uart.md` — uart 模块文档：分层架构、设计取舍、API 与测试方法。
 - `docs/reference/perception/arcface-lite.md` — arcface-lite 模块文档：架构、设计取舍、API 与测试方法。
+- `docs/reference/perception/ipm_proto.md` — IPM/中心线 Python 原型：运行方式、模块与配置。
+- `docs/superpowers/specs/2026-08-29-visual-nav-road-follow-design.md` — Stage-1 视觉寻线设计规格。
+- `docs/superpowers/specs/2026-08-29-ipm-centerline-proto-design.md` — IPM/中心线原型设计规格。
 
 各模块上手步骤（安装、注册人脸、运行）写在模块目录自己的 `README.md` 里，例如 `vision/arcface-lite/README.md`。
