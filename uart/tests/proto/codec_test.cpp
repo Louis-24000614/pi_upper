@@ -18,7 +18,8 @@ using namespace uart;  // NOLINT(build/namespaces) 测试内为了少写前缀
 static_assert(kSizeTimeSyncReq == 8, "TIME_SYNC_REQ payload 应为 8 字节");
 static_assert(kSizeArmRequest == 4, "ARM_REQUEST payload 应为 4 字节");
 static_assert(kSizeCmdVel == 12, "CMD_VEL payload 应为 12 字节");
-static_assert(kSizeAck == 8, "ACK payload 应为 8 字节");
+static_assert(kSizeAck == 6, "ACK payload 应为 6 字节");
+static_assert(kSizeHelloReq == 1, "HELLO_REQ payload 应为 1 字节");
 static_assert(kSizeHelloInfo == 16, "HELLO_INFO payload 应为 16 字节");
 static_assert(kSizeTimeSyncResp == 24, "TIME_SYNC_RESP payload 应为 24 字节");
 static_assert(kSizeOdomState == 52, "ODOM_STATE payload 应为 52 字节");
@@ -158,20 +159,19 @@ void TestHelloInfoRoundTrip() {
 
 void TestAckRoundTrip() {
   Ack msg;
-  msg.request_sequence = 0x1234;
   msg.request_type = static_cast<uint8_t>(MsgType::kArmRequest);
   msg.result = AckResult::kDeniedConfig;
   msg.arm_token = 0xA1B2C3D4;
 
   uint8_t buf[kSizeAck] = {};
   CHECK(EncodeAck(msg, buf, sizeof(buf)) == kSizeAck);
-  CHECK(buf[0] == 0x34 && buf[1] == 0x12);
-  CHECK(buf[2] == 0x10);
-  CHECK(buf[3] == 3);
+  // v2 的 ACK 没有序号：request_type 在偏移 0，result 在偏移 1，token 从偏移 2 起。
+  CHECK(buf[0] == 0x10);
+  CHECK(buf[1] == 3);
+  CHECK(buf[2] == 0xD4 && buf[5] == 0xA1);
 
   Ack back;
   CHECK(DecodeAck(buf, sizeof(buf), &back));
-  CHECK(back.request_sequence == msg.request_sequence);
   CHECK(back.request_type == msg.request_type);
   CHECK(back.result == AckResult::kDeniedConfig);
   CHECK(back.arm_token == msg.arm_token);
@@ -351,7 +351,7 @@ void TestUnknownEnumsAreConservative() {
   CHECK(out.remote_state == RemoteState::kDisconnected);
 
   uint8_t ack[kSizeAck] = {};
-  ack[3] = 200;
+  ack[1] = 200;  // result 字段，v2 里位于偏移 1。
   Ack ack_out;
   CHECK(DecodeAck(ack, sizeof(ack), &ack_out));
   CHECK(ack_out.result == AckResult::kUnsupported);

@@ -1,8 +1,8 @@
 /// @file
 /// 消息 ID、枚举常量与各消息的进程内表示。
 ///
-/// 字段定义对应下位机仓库 UART_PROTOCOL.md 第 4 至第 6 节。这里的结构体只在
-/// 进程内使用，**不允许**直接 memcpy 上线，序列化由 codec 层逐字节完成。
+/// 字段定义对应下位机仓库 UART_PROTOCOL.md（协议 v2）第 5 至第 7 节。这里的结构体
+/// 只在进程内使用，**不允许**直接 memcpy 上线，序列化由 codec 层逐字节完成。
 ///
 /// 本文件不含任何逻辑，只有数据定义；语义约束（哪些状态允许 ARM、token 何时失效）
 /// 属于 sess 层。
@@ -11,6 +11,8 @@
 #define UART_PROTO_MSG_H_
 
 #include <cstdint>
+
+#include "proto/frame.h"
 
 namespace uart {
 
@@ -86,6 +88,13 @@ enum ImuFlag : uint32_t {
 /// SYSTEM_STATUS 中 command_age_ms 的"无有效命令"取值。
 constexpr uint32_t kCommandAgeNone = 0xFFFFFFFFu;
 
+/// HELLO_REQ (0x01)
+///
+/// v2 把协议版本从帧头移到了这里，所以建链请求不再是空 payload。
+struct HelloReq {
+  uint8_t protocol_version = kProtocolVersion;
+};
+
 /// TIME_SYNC_REQ (0x02)
 struct TimeSyncReq {
   /// 主机单调时间，纳秒。注意与 MCU 侧的微秒单位不同。
@@ -108,8 +117,10 @@ struct CmdVel {
 };
 
 /// ACK (0x80)
+///
+/// v2 去掉了序号，因此只能按 `request_type` 配对响应。这意味着同一类型的管理请求
+/// 不能并发发送——必须等到响应或超时才发下一个，否则无法判断收到的是哪一次的回复。
 struct Ack {
-  uint16_t request_sequence = 0;
   uint8_t request_type = 0;
   AckResult result = AckResult::kOk;
   /// 无有效 token 时为 0。

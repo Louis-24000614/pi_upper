@@ -1,0 +1,256 @@
+# 赛题图 3 先验拓扑（行列命名 v2）
+#
+# 节点名 = 行_列
+#   - 行：从上往下增大（离开出发区）
+#   - 列：从左往右
+#       _1 左侧巡逻格
+#       _2 中间偏左十字路口
+#       _3 中间偏右十字路口
+#       _4 右侧巡逻格
+#   - 0_0：出发区
+#
+# 与图 3 巡逻点位置的大致对应（拓扑名 ≠ 播报点号）：
+#   1_1≈①  1_4≈⑫
+#   2_1≈②  2_4≈⑪
+#   3_1≈③  3_4≈⑩
+#   4_1≈④  4_4≈⑨
+#   5_1≈⑤  5_2≈⑥  5_3≈⑦  5_4≈⑧
+#
+# 每一横档（如 ②↔⑪）中间是两个十字：*_2 与 *_3，不是单点、也不是整图只有两个口。
+#
+# 坐标：原点场地左下角，x 右、y 上，单位米；约 3.2×4.4 m。仅供调试画图。
+# 边 id 必须加引号，格式 "{u}__{v}"（端点名字典序较小者在前）。
+# 隧道：右侧通往 ⑨⑩⑪ 一带阴影通道初标，场测按实场四段改。
+# blocked 为运行时状态，勿写入本文件。
+
+meta:
+  name: figure3_rowcol_v2
+  field_size_m: { width: 3.2, height: 4.4 }
+  naming: row_col
+  columns:
+    "1": left_patrol_or_bottom
+    "2": mid_left_cross_or_bottom
+    "3": mid_right_cross_or_bottom
+    "4": right_patrol_or_bottom
+  notes: >
+    中间双十字列（_2/_3）竖向连通形成中央格网。
+    若实场某横档不是双十字，删除对应节点/边即可。
+
+nodes:
+  "0_0": { x: 1.60, y: 4.20, role: start }
+
+  # 行 1（≈① / 两十字 / ≈⑫）
+  "1_1": { x: 0.40, y: 3.60, role: patrol_slot }
+  "1_2": { x: 1.20, y: 3.60, role: junction }
+  "1_3": { x: 2.00, y: 3.60, role: junction }
+  "1_4": { x: 2.80, y: 3.60, role: patrol_slot }
+
+  # 行 2（≈② / 两十字 / ≈⑪）
+  "2_1": { x: 0.40, y: 2.80, role: patrol_slot }
+  "2_2": { x: 1.20, y: 2.80, role: junction }
+  "2_3": { x: 2.00, y: 2.80, role: junction }
+  "2_4": { x: 2.80, y: 2.80, role: patrol_slot }
+
+  # 行 3（≈③ / 两十字 / ≈⑩）
+  "3_1": { x: 0.40, y: 2.00, role: patrol_slot }
+  "3_2": { x: 1.20, y: 2.00, role: junction }
+  "3_3": { x: 2.00, y: 2.00, role: junction }
+  "3_4": { x: 2.80, y: 2.00, role: patrol_slot }
+
+  # 行 4（≈④ / 两十字 / ≈⑨）
+  "4_1": { x: 0.40, y: 1.20, role: patrol_slot }
+  "4_2": { x: 1.20, y: 1.20, role: junction }
+  "4_3": { x: 2.00, y: 1.20, role: junction }
+  "4_4": { x: 2.80, y: 1.20, role: patrol_slot }
+
+  # 行 5 底边（≈⑤⑥⑦⑧，四格均为巡逻位置）
+  "5_1": { x: 0.40, y: 0.40, role: patrol_slot }
+  "5_2": { x: 1.20, y: 0.40, role: patrol_slot }
+  "5_3": { x: 2.00, y: 0.40, role: patrol_slot }
+  "5_4": { x: 2.80, y: 0.40, role: patrol_slot }
+
+edges:
+  # --- 出发区接到第 1 行两个十字 ---
+  - id: "0_0__1_2"
+    u: "0_0"
+    v: "1_2"
+    length_m: 0.65
+    bidirectional: true
+  - id: "0_0__1_3"
+    u: "0_0"
+    v: "1_3"
+    length_m: 0.65
+    bidirectional: true
+
+  # --- 各行横边：左点 — 左十字 — 右十字 — 右点 ---
+  - id: "1_1__1_2"
+    u: "1_1"
+    v: "1_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "1_2__1_3"
+    u: "1_2"
+    v: "1_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "1_3__1_4"
+    u: "1_3"
+    v: "1_4"
+    length_m: 0.80
+    bidirectional: true
+
+  - id: "2_1__2_2"
+    u: "2_1"
+    v: "2_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "2_2__2_3"
+    u: "2_2"
+    v: "2_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "2_3__2_4"
+    u: "2_3"
+    v: "2_4"
+    length_m: 0.80
+    bidirectional: true
+    tunnel: true # 通往 ≈⑪
+
+  - id: "3_1__3_2"
+    u: "3_1"
+    v: "3_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "3_2__3_3"
+    u: "3_2"
+    v: "3_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "3_3__3_4"
+    u: "3_3"
+    v: "3_4"
+    length_m: 0.80
+    bidirectional: true
+    tunnel: true # 通往 ≈⑩
+
+  - id: "4_1__4_2"
+    u: "4_1"
+    v: "4_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "4_2__4_3"
+    u: "4_2"
+    v: "4_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "4_3__4_4"
+    u: "4_3"
+    v: "4_4"
+    length_m: 0.80
+    bidirectional: true
+    tunnel: true # 通往 ≈⑨
+
+  - id: "5_1__5_2"
+    u: "5_1"
+    v: "5_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "5_2__5_3"
+    u: "5_2"
+    v: "5_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "5_3__5_4"
+    u: "5_3"
+    v: "5_4"
+    length_m: 0.80
+    bidirectional: true
+
+  # --- 左列竖边 ---
+  - id: "1_1__2_1"
+    u: "1_1"
+    v: "2_1"
+    length_m: 0.80
+    bidirectional: true
+  - id: "2_1__3_1"
+    u: "2_1"
+    v: "3_1"
+    length_m: 0.80
+    bidirectional: true
+  - id: "3_1__4_1"
+    u: "3_1"
+    v: "4_1"
+    length_m: 0.80
+    bidirectional: true
+  - id: "4_1__5_1"
+    u: "4_1"
+    v: "5_1"
+    length_m: 0.80
+    bidirectional: true
+
+  # --- 中间左十字列竖边 ---
+  - id: "1_2__2_2"
+    u: "1_2"
+    v: "2_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "2_2__3_2"
+    u: "2_2"
+    v: "3_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "3_2__4_2"
+    u: "3_2"
+    v: "4_2"
+    length_m: 0.80
+    bidirectional: true
+  - id: "4_2__5_2"
+    u: "4_2"
+    v: "5_2"
+    length_m: 0.80
+    bidirectional: true
+
+  # --- 中间右十字列竖边 ---
+  - id: "1_3__2_3"
+    u: "1_3"
+    v: "2_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "2_3__3_3"
+    u: "2_3"
+    v: "3_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "3_3__4_3"
+    u: "3_3"
+    v: "4_3"
+    length_m: 0.80
+    bidirectional: true
+  - id: "4_3__5_3"
+    u: "4_3"
+    v: "5_3"
+    length_m: 0.80
+    bidirectional: true
+
+  # --- 右列竖边（含第四段隧道初标）---
+  - id: "1_4__2_4"
+    u: "1_4"
+    v: "2_4"
+    length_m: 0.80
+    bidirectional: true
+  - id: "2_4__3_4"
+    u: "2_4"
+    v: "3_4"
+    length_m: 0.80
+    bidirectional: true
+  - id: "3_4__4_4"
+    u: "3_4"
+    v: "4_4"
+    length_m: 0.80
+    bidirectional: true
+  - id: "4_4__5_4"
+    u: "4_4"
+    v: "5_4"
+    length_m: 0.80
+    bidirectional: true
+    tunnel: true

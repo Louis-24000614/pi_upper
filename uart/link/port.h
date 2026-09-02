@@ -50,7 +50,7 @@ struct SerialConfig {
 /// POSIX termios 串口。
 ///
 /// 以 raw 模式打开：关闭 CR/LF 转换、回显、规范模式和软硬件流控。协议是二进制的，
-/// 任何字节改写都会破坏 COBS 分帧和 CRC 校验。
+/// 任何字节改写都会破坏分帧和 CRC 校验。
 ///
 /// 析构会自动关闭，不需要手动 @ref Close。
 class SerialPort : public Transport {

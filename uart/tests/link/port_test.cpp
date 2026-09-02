@@ -41,7 +41,7 @@ bool OpenPty(int* master_fd, std::string* slave_path) {
 }
 
 /// 二进制透传：协议帧里会出现 0x00、0x0A、0x0D，以及软件流控的 XON/XOFF
-/// （0x11/0x13）。这些字节被改写或吞掉的话，COBS 分帧和 CRC 全部失效，
+/// （0x11/0x13）。这些字节被改写或吞掉的话，分帧和 CRC 全部失效，
 /// 而且现象是随机丢帧，极难定位。这条测试就是盯住这个。
 void TestSerialRawPassThrough() {
   int master = -1;

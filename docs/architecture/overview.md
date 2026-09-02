@@ -28,7 +28,7 @@ flowchart TB
     vis["vision<br/>YOLO-seg 道路/障碍物 · 物体识别（RKNN NPU）"]
     nav["navigation<br/>BEV 变换 · 局部栅格地图 · 路径规划"]
     st["state<br/>任务状态机"]
-    uart["uart<br/>串口通信线程（COBS + CRC32C）"]
+    uart["uart<br/>串口通信线程（55AA 定长帧 + CRC8）"]
     audio["audio<br/>语音播报"]
   end
 
@@ -42,7 +42,7 @@ flowchart TB
   vis --> ui
   nav --> ui
   st --> ui
-  uart <-- "杜邦线直连<br/>921600 8N1 · 0xA55A 帧 + CRC32C" --> mcu["STM32H743 下位机<br/>电机 · 编码器 · ICM42688"]
+  uart <-- "杜邦线直连<br/>921600 8N1 · 55AA 帧 + CRC8" --> mcu["STM32H743 下位机<br/>电机 · 编码器 · ICM42688"]
 ```
 
 线程模型：相机采集、推理、规划、串口各一条线程，UI 跑主线程；跨线程通信用 Qt 信号槽（QueuedConnection）或线程安全队列，帧数据只传指针/索引不拷贝。
@@ -61,7 +61,7 @@ flowchart TB
 
 `state` — 任务状态机。按比赛流程串联各阶段（启动、巡航、识别、告警、返航等，具体状态集合 TBD，随任务书定稿），仲裁手动遥控与自主导航的指令来源。
 
-`uart` — 串口通信。COBS 分帧、CRC32C 校验、消息编解码、会话与 ARM 状态机、50 Hz 速度下发与遥测解析。传输层抽象成 `Transport` 接口，串口实现之外提供内存 fake，便于无硬件单测。
+`uart` — 串口通信。定长字段分帧、CRC8 校验、消息编解码、会话与 ARM 状态机、50 Hz 速度下发与遥测解析。传输层抽象成 `Transport` 接口，串口实现之外提供内存 fake，便于无硬件单测。
 
 `audio` — 语音播报。预录音频文件播放为主（`aplay` 或 Qt Multimedia）；任务书若要求动态播报再叠 Piper TTS。
 
@@ -73,7 +73,7 @@ flowchart TB
 
 上位机 ↔ 下位机：下位机为 STM32H743VIT6（IMU 用 ICM42688，姿态解算在下位机完成）。物理链路是杜邦线直连——香橙派 40 针的 UART TX/RX/GND 对接 STM32 的 USART3（PD9 收、PD8 发），TX/RX 交叉、必须共地、双方都是 3.3 V TTL，不得接入 5 V 或 RS-232 电平。串口参数 921600 8N1，无流控。
 
-协议以下位机仓库的 `RC/UART_PROTOCOL.md` 为唯一权威：`COBS(帧头 || payload || CRC32C) || 0x00`，帧头含 `0xA55A` 魔数、协议版本、消息 ID、序号、payload 长度和微秒时间戳。安全模型由下位机主导——上位机先 `HELLO_REQ` 取 `boot_id`，`config_valid=1` 才允许发起 `ARM_REQUEST`，操作者现场短按 K2 确认后上位机从 `SYSTEM_STATUS` 读到 `arm_token`，随后必须以 50 Hz 持续发送带 token 的 `CMD_VEL`（零速也要发）；超过 250 ms 没有有效命令下位机立即安全停车并锁存通信故障。遥测方向按 `ODOM_STATE` 50 Hz、`IMU_STATE` 200 Hz、`SYSTEM_STATUS` 10 Hz 上报，故障以 `FAULT_EVENT` 事件推送。
+协议以下位机仓库的 `RC/UART_PROTOCOL.md` 为唯一权威，当前版本为 2：`55 AA | TYPE | LENGTH | PAYLOAD | CRC8`，`LENGTH` 上限 128，CRC-8/ATM 覆盖 `TYPE + LENGTH + PAYLOAD`。没有 COBS、结束符、序号和通用时间戳，payload 里允许出现同步字，接收端严格按长度定帧。安全模型由下位机主导——上位机先 `HELLO_REQ` 取 `boot_id`，`config_valid=1` 才允许发起 `ARM_REQUEST`，操作者现场短按 K2 确认后上位机从 `SYSTEM_STATUS` 读到 `arm_token`，随后必须以 50 Hz 持续发送带 token 的 `CMD_VEL`（零速也要发）；超过 250 ms 没有有效命令下位机立即安全停车并锁存通信故障。遥测方向按 `ODOM_STATE` 50 Hz、`IMU_STATE` 200 Hz、`SYSTEM_STATUS` 10 Hz 上报，故障以 `FAULT_EVENT` 事件推送。
 
 上位机侧的实现约定（设备路径、termios 设置、会话状态机、重连与超时策略）写在 `docs/api/uart.md`，不重抄线协议细节。协议本身的任何改动由双方在 `RC/UART_PROTOCOL.md` 同步。
 
@@ -91,7 +91,7 @@ flowchart TB
 
 ## 开发顺序
 
-1. **uart**——协议已由下位机定稿，按 `RC/UART_PROTOCOL.md` 自底向上实现 COBS/CRC32C、帧编解码、消息编解码、会话状态机，用协议第 10 节的黄金测试向量做无硬件单测，接线后即可联调建链与遥测。
+1. **uart**——协议已由下位机定稿，按 `RC/UART_PROTOCOL.md` 自底向上实现 CRC8、帧编解码、消息编解码、会话状态机，用协议里的黄金帧做无硬件单测，接线后即可联调建链与遥测。
 2. **camera + ui 出图**——双路采集跑通，Qt 界面能看到两路画面，帧率达标。
 3. **vision 第一刀**——先在 PC 上训练/转换一个检测模型，板端 RKNN 推理出框，叠加到画面。
 4. **navigation**——BEV + 栅格地图 + 局部规划，仿真数据先行，再接真实相机。

@@ -10,7 +10,7 @@ function(uart_add_test layer unit lib)
   add_test(NAME uart_${unit} COMMAND uart_${unit}_test)
 endfunction()
 
-foreach(unit crc32c cobs frame codec)
+foreach(unit crc8 frame codec)
   uart_add_test(proto ${unit} uart_proto)
 endforeach()
 

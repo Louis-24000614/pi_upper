@@ -83,6 +83,12 @@ struct Diagnostics {
   uint32_t zero_substitutions = 0;
   uint32_t hello_sent = 0;
   uint32_t arm_requests = 0;
+  /// 对端协议版本与本端不一致的次数。
+  uint32_t version_mismatches = 0;
+  /// 因已有管理请求在等 ACK 而被拒绝发出的请求数。
+  uint32_t requests_refused_busy = 0;
+  /// 管理请求等 ACK 超时的次数。
+  uint32_t ack_timeouts = 0;
   /// 因超时或错误导致链路掉线的次数。
   uint32_t link_drops = 0;
   /// 因 boot_id 变化而丢弃会话的次数。
@@ -102,6 +108,9 @@ struct SessionConfig {
   uint32_t link_timeout_ms = 1000;
   /// 时间同步请求间隔，0 表示不做时间同步。
   uint32_t time_sync_period_ms = 1000;
+  /// 管理请求等待 ACK 的超时。协议 v2 没有序号，ACK 只能按消息类型配对，
+  /// 因此同一时刻只允许一个在途的管理请求，超时后才能发下一个。
+  uint32_t ack_timeout_ms = 500;
   /// 停车时连发多少帧零速再发 DISARM。
   uint32_t stop_zero_frames = 3;
 };
@@ -158,8 +167,17 @@ class Session {
   /// 当前 ARM token，0 表示未持有。
   uint32_t arm_token() const { return arm_token_; }
 
+  const SessionConfig& config() const { return config_; }
+
   /// 本次会话的 boot_id，未建链时为 0。
   uint32_t boot_id() const { return boot_id_; }
+
+  /// 对端上报的协议版本，未收到 HELLO_INFO 时为 0。
+  /// 与 @ref kProtocolVersion 不一致时不会进入已连接状态。
+  uint8_t peer_protocol_version() const { return peer_protocol_version_; }
+
+  /// 是否有管理请求正在等待 ACK。为真时新的管理请求会被拒绝。
+  bool request_pending() const { return pending_request_type_ != 0; }
 
   /// 下位机是否报告配置有效。为假时不允许请求 ARM。
   bool config_valid() const { return config_valid_; }
@@ -174,10 +192,13 @@ class Session {
   /// 发送零 payload 的管理命令。
   bool SendEmpty(MsgType type);
   /// 处理一条解出来的完整帧。
-  void OnFrame(const Header& header, const uint8_t* payload, size_t len);
+  void OnFrame(uint8_t msg_type, const uint8_t* payload, size_t len);
   void OnHelloInfo(const uint8_t* payload, size_t len);
   void OnSystemStatus(const uint8_t* payload, size_t len);
   void OnTimeSyncResp(const uint8_t* payload, size_t len, uint64_t rx_us);
+  void OnAck(const uint8_t* payload, size_t len);
+  /// 发出一个需要 ACK 的管理请求。已有在途请求时拒绝，避免无法配对响应。
+  bool SendRequest(MsgType type, const uint8_t* payload, size_t payload_len);
   /// 丢掉当前会话状态（token、boot_id、遥测新鲜度），回到建链。
   void DropSession();
   /// 按周期发送速度命令。
@@ -193,11 +214,15 @@ class Session {
   LinkState link_state_ = LinkState::kClosed;
   RemoteState remote_state_ = RemoteState::kDisconnected;
 
-  uint16_t next_sequence_ = 1;
   uint32_t boot_id_ = 0;
   bool has_boot_id_ = false;
   uint32_t arm_token_ = 0;
   bool config_valid_ = false;
+  uint8_t peer_protocol_version_ = 0;
+
+  /// 在途管理请求的消息类型，0 表示没有。协议 v2 无序号，只能按类型配对 ACK。
+  uint8_t pending_request_type_ = 0;
+  uint64_t pending_request_ms_ = 0;
 
   float target_linear_ = 0.0f;
   float target_angular_ = 0.0f;

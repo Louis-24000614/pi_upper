@@ -30,6 +30,8 @@ void Session::Start() {
   has_boot_id_ = false;
   arm_token_ = 0;
   config_valid_ = false;
+  peer_protocol_version_ = 0;
+  pending_request_type_ = 0;
   target_linear_ = 0.0f;
   target_angular_ = 0.0f;
   has_target_ = false;
@@ -53,13 +55,9 @@ bool Session::Send(MsgType type, const uint8_t* payload, size_t payload_len) {
     link_state_ = LinkState::kClosed;
     return false;
   }
-  Header header;
-  header.msg_type = static_cast<uint8_t>(type);
-  header.sequence = next_sequence_++;
-  header.timestamp_us = clock_.NowUs();
-
-  uint8_t frame[kMaxEncodedSize] = {};
-  const size_t len = EncodeFrame(header, payload, payload_len, frame, sizeof(frame));
+  uint8_t frame[kMaxFrameSize] = {};
+  const size_t len =
+      EncodeFrame(static_cast<uint8_t>(type), payload, payload_len, frame, sizeof(frame));
   if (len == 0) {
     ++diagnostics_.tx_errors;
     return false;
@@ -77,6 +75,35 @@ bool Session::Send(MsgType type, const uint8_t* payload, size_t payload_len) {
 
 bool Session::SendEmpty(MsgType type) { return Send(type, nullptr, 0); }
 
+bool Session::SendRequest(MsgType type, const uint8_t* payload, size_t payload_len) {
+  // 协议 v2 没有序号，ACK 只能靠"被响应的消息类型"配对。若同时放两个管理请求上线，
+  // 收到 ACK 时无法判断它属于哪一次，因此这里串行化：一个在途，其余直接拒绝。
+  if (pending_request_type_ != 0) {
+    ++diagnostics_.requests_refused_busy;
+    return false;
+  }
+  if (!Send(type, payload, payload_len)) {
+    return false;
+  }
+  pending_request_type_ = static_cast<uint8_t>(type);
+  pending_request_ms_ = clock_.NowMs();
+  return true;
+}
+
+void Session::OnAck(const uint8_t* payload, size_t len) {
+  Ack ack;
+  if (!DecodeAck(payload, len, &ack)) {
+    return;
+  }
+  telemetry_.last_ack = ack;
+  telemetry_.has_ack = true;
+  // 只有类型匹配才算把在途请求收尾。CMD_VEL 出错时也会回 ACK，但它不占在途名额，
+  // 类型对不上就不会误清掉真正在等的管理请求。
+  if (ack.request_type == pending_request_type_) {
+    pending_request_type_ = 0;
+  }
+}
+
 void Session::DropSession() {
   // token 绑定单次会话，链路一断就必须作废：协议规定重连不恢复旧 token。
   arm_token_ = 0;
@@ -84,6 +111,9 @@ void Session::DropSession() {
   remote_state_ = RemoteState::kDisconnected;
   has_boot_id_ = false;
   boot_id_ = 0;
+  peer_protocol_version_ = 0;
+  // 会话已失效，在途请求的 ACK 不会再来了，名额必须放开。
+  pending_request_type_ = 0;
   has_target_ = false;
   target_linear_ = 0.0f;
   target_angular_ = 0.0f;
@@ -112,6 +142,16 @@ void Session::OnHelloInfo(const uint8_t* payload, size_t len) {
     has_target_ = false;
     target_linear_ = 0.0f;
     target_angular_ = 0.0f;
+  }
+
+  peer_protocol_version_ = info.protocol_version;
+  // v2 把版本协商放进了 HELLO_INFO 的 payload（帧头已经没有版本字段）。版本不一致时
+  // 下位机会照样回 HELLO_INFO 但拒绝 ARM，上位机这边就停在 kConnecting 不进控制流程。
+  if (info.protocol_version != kProtocolVersion) {
+    ++diagnostics_.version_mismatches;
+    telemetry_.hello = info;
+    telemetry_.has_hello = true;
+    return;
   }
 
   boot_id_ = info.boot_id;
@@ -161,16 +201,11 @@ void Session::OnTimeSyncResp(const uint8_t* payload, size_t len, uint64_t rx_us)
   time_sync_.rtt_us = rtt_us;
 }
 
-void Session::OnFrame(const Header& header, const uint8_t* payload, size_t len) {
+void Session::OnFrame(uint8_t msg_type, const uint8_t* payload, size_t len) {
   const uint64_t now_us = clock_.NowUs();
   last_rx_ms_ = now_us / 1000;
 
-  // 主版本不兼容时只做诊断，不进入控制流程。帧层刻意不拦版本号就是为了留出这一步。
-  if (header.version != kProtocolVersion) {
-    return;
-  }
-
-  switch (static_cast<MsgType>(header.msg_type)) {
+  switch (static_cast<MsgType>(msg_type)) {
     case MsgType::kHelloInfo:
       OnHelloInfo(payload, len);
       break;
@@ -178,9 +213,7 @@ void Session::OnFrame(const Header& header, const uint8_t* payload, size_t len) 
       OnSystemStatus(payload, len);
       break;
     case MsgType::kAck:
-      if (DecodeAck(payload, len, &telemetry_.last_ack)) {
-        telemetry_.has_ack = true;
-      }
+      OnAck(payload, len);
       break;
     case MsgType::kTimeSyncResp:
       OnTimeSyncResp(payload, len, now_us);
@@ -282,14 +315,21 @@ void Session::Poll() {
       break;
     }
     consumed += static_cast<size_t>(n);
-    rx_.Feed(buf, static_cast<size_t>(n),
-             [this](const Header& header, const uint8_t* payload, size_t len) {
-               OnFrame(header, payload, len);
+    rx_.Feed(buf, static_cast<size_t>(n), clock_.NowUs(),
+             [this](uint8_t msg_type, const uint8_t* payload, size_t len) {
+               OnFrame(msg_type, payload, len);
              });
   }
   diagnostics_.rx = rx_.stats();
 
   const uint64_t now_ms = clock_.NowMs();
+
+  // 在途管理请求等 ACK 超时：放开名额，让上层可以重试。协议要求不自动重发非幂等命令，
+  // 所以这里只清标志，不代替上层重发。
+  if (pending_request_type_ != 0 && now_ms - pending_request_ms_ > config_.ack_timeout_ms) {
+    ++diagnostics_.ack_timeouts;
+    pending_request_type_ = 0;
+  }
 
   // 长时间收不到任何有效帧：链路已不可信，丢掉会话重新建链。
   if (link_state_ == LinkState::kConnected && now_ms - last_rx_ms_ > config_.link_timeout_ms) {
@@ -303,7 +343,12 @@ void Session::Poll() {
     if (now_ms - last_hello_ms_ >= config_.hello_retry_ms) {
       last_hello_ms_ = now_ms;
       ++diagnostics_.hello_sent;
-      SendEmpty(MsgType::kHelloReq);
+      // HELLO 是幂等的，且下位机用 HELLO_INFO 而非 ACK 回应，所以不占用在途请求名额，
+      // 可以按重试周期一直发。
+      uint8_t payload[kSizeHelloReq] = {};
+      if (EncodeHelloReq(HelloReq{}, payload, sizeof(payload)) == kSizeHelloReq) {
+        Send(MsgType::kHelloReq, payload, sizeof(payload));
+      }
     }
     return;  // 建链完成前不发速度命令和时间同步。
   }
@@ -353,7 +398,7 @@ bool Session::RequestArm() {
   if (EncodeArmRequest(req, payload, sizeof(payload)) != kSizeArmRequest) {
     return false;
   }
-  if (!Send(MsgType::kArmRequest, payload, sizeof(payload))) {
+  if (!SendRequest(MsgType::kArmRequest, payload, sizeof(payload))) {
     return false;
   }
   ++diagnostics_.arm_requests;
@@ -365,6 +410,7 @@ bool Session::RequestDisarm() {
   target_linear_ = 0.0f;
   target_angular_ = 0.0f;
   has_target_ = false;
+  // DISARM 是停车动作，安全优先：不受在途请求名额限制，任何时候都要能发出去。
   return SendEmpty(MsgType::kDisarm);
 }
 
@@ -372,10 +418,12 @@ bool Session::RequestResetOdom() {
   if (armed()) {
     return false;  // 下位机仅在非 ARMED 状态接受，这里提前拦掉省一次 ACK。
   }
-  return SendEmpty(MsgType::kResetOdom);
+  return SendRequest(MsgType::kResetOdom, nullptr, 0);
 }
 
-bool Session::RequestClearFault() { return SendEmpty(MsgType::kClearFaultRequest); }
+bool Session::RequestClearFault() {
+  return SendRequest(MsgType::kClearFaultRequest, nullptr, 0);
+}
 
 void Session::Shutdown() {
   if (!port_.IsOpen()) {
