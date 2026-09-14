@@ -11,6 +11,7 @@ flowchart TD
   root --> gui["gui/<br/>PySide6 调试界面与道路拍照"]
   root --> config["config/<br/>运行配置（如先验拓扑）"]
   root --> navigation["navigation/<br/>导航 Python 原型"]
+  root --> servo["servo/<br/>180° 舵机硬件 PWM（C++）"]
   root --> docs["docs/<br/>手写文档（规范、API 契约、模块文档）"]
   root --> models["models/<br/>模型文件（不入 git）"]
 ```
@@ -20,6 +21,8 @@ flowchart TD
 `config/` — 运行时加载的配置（非文档）。当前含赛题图 3 先验拓扑 `config/nav_topology.yaml`；设计说明见 `docs/nav.md`，目录说明见 `config/README.md`。
 
 `navigation/` — 导航 Python 原型。`topo_proto/` 加载拓扑 YAML 并做 Dijkstra / 模拟封边；见 `navigation/README.md` 与 `docs/reference/navigation/topo_proto.md`。
+
+`servo/` — 香橙派 40 针 Pin 7（`PWM14_M2`）180° 舵机。C++ 分层：`math/`、`pwm/`、门面 `servo.h`、`app/` CLI；见 `servo/README.md` 与 `docs/reference/hw/servo.md`。
 
 `uart/` — 与 STM32 下位机的串口通信模块，内部分 `proto/`（纯协议编解码）与 `link/`（串口、时钟、会话状态机）两层。模块文档见 `docs/reference/comm/uart.md`，线协议见下位机仓库的 `UART_PROTOCOL.md`，上位机侧实现约定见 `docs/api/uart.md`。
 
