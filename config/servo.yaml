@@ -1,0 +1,6 @@
+# 香橙派 40 针物理 Pin 7 = PWM14_M2。先开 overlay pwm14-m2，再 ls /sys/class/pwm 核对芯片路径。
+pwmchip: /sys/class/pwm/pwmchip2
+channel: 0
+period_us: 20000
+min_pulse_us: 500
+max_pulse_us: 2500

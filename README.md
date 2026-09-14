@@ -43,6 +43,7 @@
 - 下位机：STM32H743VIT6（IMU 为 ICM42688，由下位机侧负责解算）
 - 上下位机链路：杜邦线直连 UART，香橙派 40 针 TX/RX/GND 对接 STM32 的 USART3（PD8/PD9），3.3 V TTL，921600 8N1
 - 扬声器：语音播报输出（USB 声卡或 3.5mm）
+- 舵机：180° Hobby PWM，信号接 40 针 Pin 7（`PWM14_M2`），电源独立 5–6 V；见 `docs/reference/hw/servo.md`
 
 ## 上位机主要功能
 

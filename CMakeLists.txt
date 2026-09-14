@@ -15,3 +15,4 @@ if(BUILD_TESTS)
 endif()
 
 add_subdirectory(uart)
+add_subdirectory(servo)
