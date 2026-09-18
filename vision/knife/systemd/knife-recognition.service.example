@@ -1,0 +1,16 @@
+[Unit]
+Description=pi_upper knife recognition service
+After=network.target
+
+[Service]
+Type=simple
+User=orangepi
+# 安装时把两个占位符换成真实pi_upper目录和已验证的板端Python解释器。
+WorkingDirectory=__PI_UPPER_DIR__
+ExecStart=__KNIFE_PYTHON__ -m vision.knife.service --config config/knife.json --host 127.0.0.1 --port 20005
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

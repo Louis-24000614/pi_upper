@@ -4,6 +4,8 @@
 
 ## Contents
 
+刀具识别模块：参见 [DINOv3 上手指南](vision/knife/README.md) 和 [模块说明](docs/reference/perception/knife.md)。配置默认关闭，GUI异步客户端已提供，主窗口接线尚未完成。
+
 - [运行环境](#运行环境)
 - [硬件说明](#硬件说明)
 - [上位机主要功能](#上位机主要功能)

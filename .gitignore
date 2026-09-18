@@ -9,3 +9,8 @@ __pycache__/
 # Model files are large and prepared per-machine (see docs/architecture/overview.md)
 models/*
 !models/README.md
+
+# 刀具识别固定发布版本随仓库交付，其他模型仍按机器单独准备。
+!models/knife/
+models/knife/*
+!models/knife/dinov3_448_fp16_v1/
