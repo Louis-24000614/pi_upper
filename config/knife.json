@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "model_id": "dinov3_448_fp16_v1",
+  "model_path": "models/knife/dinov3_448_fp16_v1/dinov3_448_fp16.rknn",
+  "templates_path": "models/knife/dinov3_448_fp16_v1/templates.json",
+  "manifest_path": "models/knife/dinov3_448_fp16_v1/manifest.json",
+  "model_sha256": "ee016460014a280aa9945aa75e9e459fce9d21d9dfdf862871101c754c9fdee9",
+  "camera_role": "recognition_camera",
+  "core_mask": "0_1_2",
+  "trigger": "manual_or_stationary",
+  "max_inflight": 1,
+  "request_timeout_ms": 3000,
+  "min_foreground_pixels": 20,
+  "min_foreground_ratio": 0.005,
+  "score_threshold": null,
+  "margin_threshold": null
+}
