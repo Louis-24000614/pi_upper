@@ -2,6 +2,11 @@
 
 本仓库手写文档的地图，每个文档一行介绍。
 
+- `vision/knife/README.md` — 刀具识别安装、启动和板端验收。
+- `docs/reference/perception/knife.md` — 刀具模块架构、设计和测试。
+- `docs/reference/perception/knife-reality.md` — 5张实拍图手写测试记录。
+- `docs/api/knife.md` — 刀具识别HTTP接口契约。
+
 - `docs/conventions.md` — 全仓库编码与文档规范（提交前缀、模块文档结构、API 契约格式）。
 - `docs/architecture/overview.md` — 上位机总体架构规划：模块划分、通信边界、技术选型与开发顺序。
 - `docs/architecture/layout.md` — 仓库目录结构与顶层目录职责。

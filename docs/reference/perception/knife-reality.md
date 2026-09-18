@@ -1,6 +1,6 @@
 # DINOv3 448 FP16：5张实拍图RK3588板端测试
 
-测试日期：2026-09-18。板端：192.168.77.163。输入为上一级目录的1.png、3.png、5.png、8.png、9.png，文件名数字为真实刀ID。使用bushu部署包原预处理、10类生产模板和现有FP16 RKNN模型，没有用本次实拍图修改模板。
+测试日期：2026-09-18。板端：192.168.77.163。输入来自本地实验reality目录的1.png、3.png、5.png、8.png、9.png，文件名数字为真实刀ID。使用bushu部署包原预处理、10类生产模板和现有FP16 RKNN模型，没有用本次实拍图修改模板。
 
 ## 正确率与Top-2
 
@@ -47,8 +47,8 @@
 
 ## 可复核文件
 
-- result.json：25次完整响应，包含Top-1/Top-2、分差、分阶段耗时、图片SHA-256，以及含原文和阶段标记的全部NPU采样。
-- run_reality.py：本次实际执行的测试脚本。
+- 本地实验目录D:/250915_刀具图片 (1)/reality/results_dinov3/result.json：25次完整响应及NPU采样，不纳入Git。
+- 仓库vision/knife/tests/reality.py：本次测试脚本。
 - 板端保留目录：/home/orangepi/knife_reality_20260918.vvE7RW。
 - 模型SHA-256：ee016460014a280aa9945aa75e9e459fce9d21d9dfdf862871101c754c9fdee9。
 - 生产模板SHA-256：ee9f8d2f3b195df9032d1fe397ec5f673752372e0f95ba3c1adac407127f2a80。

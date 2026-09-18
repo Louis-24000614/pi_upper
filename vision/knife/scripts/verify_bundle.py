@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 
 
-ROOT = Path(__file__).resolve().parents[1]
+# 工具收归模块后，向上三级定位仓库根，使配置和模型路径不受启动目录影响。
+ROOT = Path(__file__).resolve().parents[3]
 RELEASE = ROOT / "models/knife/dinov3_448_fp16_v1"
 
 

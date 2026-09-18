@@ -9,7 +9,8 @@ import sys
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+# 工具收归模块后，向上三级定位仓库根，使配置和模型路径不受启动目录影响。
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from vision.knife.preprocessing import preprocess_bgr

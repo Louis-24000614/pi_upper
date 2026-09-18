@@ -4,7 +4,7 @@
 
 ## Contents
 
-刀具识别模块：参见 [DINOv3 板端部署指南](docs/knife/deployment.md) 和 [5张实拍图测试报告](docs/knife/reality_20260918/REPORT.md)。配置默认关闭，GUI异步客户端已提供，主窗口接线尚未完成。
+刀具识别模块：参见 [DINOv3 上手指南](vision/knife/README.md) 和 [模块说明](docs/reference/perception/knife.md)。配置默认关闭，GUI异步客户端已提供，主窗口接线尚未完成。
 
 - [运行环境](#运行环境)
 - [硬件说明](#硬件说明)
