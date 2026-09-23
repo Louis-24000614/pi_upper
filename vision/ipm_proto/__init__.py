@@ -5,5 +5,14 @@
 
 from .centerline import extract_centerline
 from .ipm import BevConfig, Ipm
+from .prior import RoadWidthPrior, extract_centerline_with_width_prior
+from .temporal import CenterlineSmoother
 
-__all__ = ["BevConfig", "Ipm", "extract_centerline"]
+__all__ = [
+    "BevConfig",
+    "Ipm",
+    "extract_centerline",
+    "RoadWidthPrior",
+    "extract_centerline_with_width_prior",
+    "CenterlineSmoother",
+]

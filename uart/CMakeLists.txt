@@ -23,6 +23,9 @@ foreach(target uart_proto uart_link)
   target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
+add_executable(uart_vel app/vel_main.cpp)
+target_link_libraries(uart_vel PRIVATE uart_link)
+
 if(BUILD_TESTS)
   add_subdirectory(tests)
 endif()

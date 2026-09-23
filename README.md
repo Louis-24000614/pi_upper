@@ -4,6 +4,8 @@
 
 ## Contents
 
+刀具识别模块：参见 [DINOv3 上手指南](vision/knife/README.md) 和 [模块说明](docs/reference/perception/knife.md)。配置默认关闭，GUI异步客户端已提供，主窗口接线尚未完成。
+
 - [运行环境](#运行环境)
 - [硬件说明](#硬件说明)
 - [上位机主要功能](#上位机主要功能)
@@ -28,7 +30,7 @@
 用于道路识别、障碍物识别和视觉导航。
 
 - 130 万像素，USB 2.0，**全局快门**，最高 180 FPS
-- 支持 1280×1024 / 1280×960 / 1280×720，视场角约 63.3°，UVC 兼容
+- 支持 1280×1024 / 1280×960 / 1280×720，视场角约 85°，UVC 兼容
 
 ### 侧向识别摄像头
 
@@ -78,7 +80,7 @@ cmake --build build -j
 
 ## 与下位机通信
 
-杜邦线直连 UART，921600 8N1，二进制帧 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`（协议 v2）。上位机建链后取 `boot_id`，经操作者按键确认拿到 `arm_token`，再以 50 Hz 下发 `CMD_VEL`（零速也必须持续发，250 ms 断流下位机自动安全停车）；下位机回传里程计、IMU、系统状态与故障事件。
+杜邦线直连 UART（STM32 USART2：PD5 TX / PD6 RX），921600 8N1，二进制帧 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`（协议标识 1）。上位机 `HELLO` 后带 `boot_id` 发 `ARM_REQUEST`，以 ACK 判断是否允许动。贴线/微调发 8 字节 `CMD_VEL`；路口 90° 和急停发 `MOTION_ACTION`，有限动作等 `MOTION_RESULT`。两种命令互斥。下位机无断流看门狗，退出必须主动 STOP/DISARM。
 
 线协议以下位机仓库的 `UART_PROTOCOL.md` 为唯一权威，上位机侧的实现约定见 `docs/api/uart.md`。
 

@@ -18,7 +18,10 @@ def main() -> int:
     app.setApplicationName("RoboCup 侦查机器人上位机")
     load_style(app)
     window = MainWindow()
-    window.show()
+    # 构造时已按当前屏最大化；此处保证被 WM 映射到前台。
+    window.showMaximized()
+    window.raise_()
+    window.activateWindow()
     return app.exec()
 
 

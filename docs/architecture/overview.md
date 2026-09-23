@@ -57,7 +57,7 @@ flowchart TB
 
 `vision` — 视觉识别。YOLO-seg 道路分割与障碍物识别（RKNN）、物体识别（RKNN）；嫌疑人脸识别现阶段调用 arcface-lite 的 HTTP 接口。输出语义结果（车道区域、障碍物框、目标类别、bbox）。
 
-`navigation` — 视觉导航。BEV 鸟瞰变换、局部栅格地图生成、局部路径规划，输出期望速度/角速度给状态机。
+`navigation` — 视觉导航。BEV 鸟瞰、局部栅格、寻线 `(v, ω)`；路口 90° 交给下位机 `MOTION_ACTION`。ICM42688 无磁、相对 yaw 会漂：长直道用视觉中心线在 Pi 上校准朝向，不把视觉角写回 MCU。详见 [`docs/nav.md`](../nav.md)。
 
 `state` — 任务状态机。按比赛流程串联各阶段（启动、巡航、识别、告警、返航等，具体状态集合 TBD，随任务书定稿），仲裁手动遥控与自主导航的指令来源。
 
@@ -71,9 +71,9 @@ flowchart TB
 
 进程内模块之间：C++ 接口直调 + Qt 信号槽跨线程；图像帧用带时间戳的共享帧缓冲（读最新、写加锁），避免每帧拷贝。
 
-上位机 ↔ 下位机：下位机为 STM32H743VIT6（IMU 用 ICM42688，姿态解算在下位机完成）。物理链路是杜邦线直连——香橙派 40 针的 UART TX/RX/GND 对接 STM32 的 USART3（PD9 收、PD8 发），TX/RX 交叉、必须共地、双方都是 3.3 V TTL，不得接入 5 V 或 RS-232 电平。串口参数 921600 8N1，无流控。
+上位机 ↔ 下位机：下位机为 STM32H743VIT6（IMU 用 ICM42688，姿态解算在下位机完成）。物理链路是杜邦线直连——香橙派 40 针的 UART TX/RX/GND 对接 STM32 的 USART2（PD6 收、PD5 发），TX/RX 交叉、必须共地、双方都是 3.3 V TTL，不得接入 5 V 或 RS-232 电平。串口参数 921600 8N1，无流控。
 
-协议以下位机仓库的 `RC/UART_PROTOCOL.md` 为唯一权威，当前版本为 2：`55 AA | TYPE | LENGTH | PAYLOAD | CRC8`，`LENGTH` 上限 128，CRC-8/ATM 覆盖 `TYPE + LENGTH + PAYLOAD`。没有 COBS、结束符、序号和通用时间戳，payload 里允许出现同步字，接收端严格按长度定帧。安全模型由下位机主导——上位机先 `HELLO_REQ` 取 `boot_id`，`config_valid=1` 才允许发起 `ARM_REQUEST`，操作者现场短按 K2 确认后上位机从 `SYSTEM_STATUS` 读到 `arm_token`，随后必须以 50 Hz 持续发送带 token 的 `CMD_VEL`（零速也要发）；超过 250 ms 没有有效命令下位机立即安全停车并锁存通信故障。遥测方向按 `ODOM_STATE` 50 Hz、`IMU_STATE` 200 Hz、`SYSTEM_STATUS` 10 Hz 上报，故障以 `FAULT_EVENT` 事件推送。
+协议以下位机仓库的 `RC/UART_PROTOCOL.md` 为唯一权威，协议标识为 1：`55 AA | TYPE | LENGTH | PAYLOAD | CRC8`，`LENGTH` 上限 128，CRC-8/ATM 覆盖 `TYPE + LENGTH + PAYLOAD`。上位机 `HELLO_REQ` 取 `boot_id` 后发 `ARM_REQUEST`，以 ACK 判断配置是否允许动（无 token、无 K2 解锁）。贴线、倒车、微调走 `CMD_VEL(v, ω)`；路口 90° / 急停走 `MOTION_ACTION`，有限动作等 `MOTION_RESULT`；同一时刻只走一条。不要用前进锁航向动作跑长直道——ICM42688 相对 yaw 会漂，视觉纠航向放在 `navigation`，uart 不写 MCU yaw。遥测为短 payload 的 `ODOM_STATE` / `IMU_STATE` / `SYSTEM_STATUS`。下位机无通信超时看门狗，上位机退出必须主动 STOP/DISARM。
 
 上位机侧的实现约定（设备路径、termios 设置、会话状态机、重连与超时策略）写在 `docs/api/uart.md`，不重抄线协议细节。协议本身的任何改动由双方在 `RC/UART_PROTOCOL.md` 同步。
 
@@ -85,7 +85,7 @@ flowchart TB
 
 串口：POSIX termios 以 raw 方式直读 `/dev/ttyS*`，不引入 Qt SerialPort，避免通信层依赖 Qt 事件循环。协议栈与传输层分离，传输层背后可以是真实串口或内存 fake，保证编解码和会话逻辑能脱离硬件单测。
 
-50 Hz 的 `CMD_VEL` 下发跑在独立线程里，用 `steady_clock` 自行补偿周期，不挂在 Qt 事件循环上——Linux 非实时，事件循环抖动容易踩下位机 250 ms 的命令看门狗。
+50 Hz 的 `CMD_VEL` 下发跑在独立线程里，用 `steady_clock` 自行补偿周期，不挂在 Qt 事件循环上——Linux 非实时，事件循环抖动会让寻线 `(v, ω)` 发不稳。下位机已无 250 ms 断流看门狗，香橙派卡死时车可能继续跑，退出必须主动 STOP/DISARM。
 
 不引入 ROS 2：题目规模下 ROS 的构建与运维成本大于收益；Qt 自带线程与信号槽足以支撑本架构。下位机仓库的文档里假定上位机跑 ROS 2 Humble 并实现一个串口桥接节点，但协议本身不依赖 ROS，纯 C++ 实现等价，这一点需要与下位机队友对齐说法。
 

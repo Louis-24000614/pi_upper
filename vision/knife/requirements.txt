@@ -1,0 +1,6 @@
+# RKNN Lite2 2.3.2应使用板端已验证wheel，不在这里通过公网盲目升级。
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+python-multipart>=0.0.20,<1

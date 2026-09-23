@@ -1,12 +1,12 @@
 /// @file
 /// 帧层：`55 AA | TYPE | LENGTH | PAYLOAD | CRC8` 的装配与逐字节收帧状态机。
 ///
-/// 协议 v2 相比 v1 大幅精简：不用 COBS、没有结束符、没有 18 字节固定帧头、
-/// 没有序号、也没有通用时间戳。定长字段定位一帧，payload 里允许出现任意字节，
-/// 包括 `55 AA` 本身——接收端严格按 LENGTH 取数据，不靠找同步字来定帧尾。
+/// 当前固件协议标识为 1：不用 COBS、没有结束符、没有序号和通用时间戳。
+/// 定长字段定位一帧，payload 里允许出现任意字节，包括 `55 AA` 本身——
+/// 接收端严格按 LENGTH 取数据，不靠找同步字来定帧尾。
 ///
 /// 因为没有序号，重复包与丢包检测在协议层不存在；`CMD_VEL` 靠"最后有效值覆盖"，
-/// 管理命令靠 ACK 按类型配对，安全靠 ARM token、K2 确认和 250 ms 看门狗。
+/// 管理命令靠 ACK 按类型配对。运动主接口是离散 `MOTION_ACTION` 与连续 `CMD_VEL`。
 ///
 /// 字段级定义见下位机仓库的 UART_PROTOCOL.md 第 2、3 节。本层不认识消息语义，
 /// 只把 TYPE 和 payload 原样搬运。
@@ -24,8 +24,8 @@ namespace uart {
 constexpr uint8_t kSync1 = 0x55;
 constexpr uint8_t kSync2 = 0xAA;
 
-/// 当前协议版本。v2 把版本号从帧头移到了 HELLO_REQ 的 payload 里。
-constexpr uint8_t kProtocolVersion = 2;
+/// HELLO_REQ payload 里协商的协议标识。必须与固件 `UART_PROTOCOL_VERSION` 一致。
+constexpr uint8_t kProtocolVersion = 1;
 
 /// 帧的固定开销：2 字节同步字 + TYPE + LENGTH + CRC8。
 constexpr size_t kFrameOverhead = 5;

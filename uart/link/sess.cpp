@@ -5,49 +5,60 @@
 namespace uart {
 namespace {
 
-/// 单次 Poll 从传输里读取的上限。921600 波特率下每毫秒约 92 字节，
-/// 这个大小足够吸收调度抖动带来的积压，又不会让一次 Poll 占用太久。
 constexpr size_t kReadChunk = 512;
-
-/// 单次 Poll 处理的字节上限。读到返回 0 才算读空，但对端异常刷数据时不能一直读下去，
-/// 否则 50 Hz 的发送节拍会被饿死。超出上限的字节留到下一次 Poll。
 constexpr size_t kMaxBytesPerPoll = 8 * kReadChunk;
-
-/// 时间同步样本的往返时延上限。超过这个值的样本通常是被调度延迟污染的，
-/// 采纳它只会把偏移估计带偏。
-constexpr uint64_t kMaxAcceptableRttUs = 20000;
 
 }  // namespace
 
 Session::Session(Transport& port, const Clock& clock, const SessionConfig& config)
     : port_(port), clock_(clock), config_(config) {}
 
-void Session::Start() {
-  rx_.Reset();
-  link_state_ = port_.IsOpen() ? LinkState::kConnecting : LinkState::kClosed;
-  remote_state_ = RemoteState::kDisconnected;
-  boot_id_ = 0;
-  has_boot_id_ = false;
-  arm_token_ = 0;
-  config_valid_ = false;
-  peer_protocol_version_ = 0;
-  pending_request_type_ = 0;
+bool Session::IsStop(uint8_t action) {
+  return action == static_cast<uint8_t>(MotionActionId::kStop);
+}
+
+bool Session::IsFiniteMotion(uint8_t action, uint32_t distance_mm) {
+  if (action == static_cast<uint8_t>(MotionActionId::kTurnLeft) ||
+      action == static_cast<uint8_t>(MotionActionId::kTurnRight)) {
+    return true;
+  }
+  if ((action == static_cast<uint8_t>(MotionActionId::kForward) ||
+       action == static_cast<uint8_t>(MotionActionId::kBackward)) &&
+      distance_mm != 0) {
+    return true;
+  }
+  return false;
+}
+
+void Session::EnterIdleMotion() {
+  motion_mode_ = MotionMode::kIdle;
+  awaiting_motion_result_ = false;
+  has_target_ = false;
   target_linear_ = 0.0f;
   target_angular_ = 0.0f;
-  has_target_ = false;
-  telemetry_ = Telemetry{};
-  time_sync_ = TimeSync{};
-
-  const uint64_t now_ms = clock_.NowMs();
-  last_rx_ms_ = now_ms;
-  // 让首次 HELLO 立刻发出，而不是等一个重试周期。
-  last_hello_ms_ = now_ms - config_.hello_retry_ms;
-  last_cmd_ms_ = now_ms;
-  last_sync_ms_ = now_ms;
 }
 
 bool Session::armed() const {
-  return remote_state_ == RemoteState::kArmed && arm_token_ != 0;
+  return link_state_ == LinkState::kConnected && arm_ok_ && remote_state_ == RemoteState::kArmed;
+}
+
+void Session::Start() {
+  rx_.Reset();
+  link_state_ = port_.IsOpen() ? LinkState::kConnecting : LinkState::kClosed;
+  remote_state_ = RemoteState::kDisabled;
+  EnterIdleMotion();
+  boot_id_ = 0;
+  has_boot_id_ = false;
+  arm_ok_ = false;
+  config_valid_ = false;
+  peer_protocol_version_ = 0;
+  pending_request_type_ = 0;
+  telemetry_ = Telemetry{};
+
+  const uint64_t now_ms = clock_.NowMs();
+  last_rx_ms_ = now_ms;
+  last_hello_ms_ = now_ms - config_.hello_retry_ms;
+  last_cmd_ms_ = now_ms;
 }
 
 bool Session::Send(MsgType type, const uint8_t* payload, size_t payload_len) {
@@ -76,8 +87,6 @@ bool Session::Send(MsgType type, const uint8_t* payload, size_t payload_len) {
 bool Session::SendEmpty(MsgType type) { return Send(type, nullptr, 0); }
 
 bool Session::SendRequest(MsgType type, const uint8_t* payload, size_t payload_len) {
-  // 协议 v2 没有序号，ACK 只能靠"被响应的消息类型"配对。若同时放两个管理请求上线，
-  // 收到 ACK 时无法判断它属于哪一次，因此这里串行化：一个在途，其余直接拒绝。
   if (pending_request_type_ != 0) {
     ++diagnostics_.requests_refused_busy;
     return false;
@@ -97,30 +106,43 @@ void Session::OnAck(const uint8_t* payload, size_t len) {
   }
   telemetry_.last_ack = ack;
   telemetry_.has_ack = true;
-  // 只有类型匹配才算把在途请求收尾。CMD_VEL 出错时也会回 ACK，但它不占在途名额，
-  // 类型对不上就不会误清掉真正在等的管理请求。
-  if (ack.request_type == pending_request_type_) {
-    pending_request_type_ = 0;
+  if (ack.request_type != pending_request_type_) {
+    return;
+  }
+  pending_request_type_ = 0;
+
+  if (ack.request_type == static_cast<uint8_t>(MsgType::kArmRequest)) {
+    arm_ok_ = ack.result == AckResult::kOk;
+    config_valid_ = ack.result == AckResult::kOk;
+  }
+}
+
+void Session::OnMotionResult(const uint8_t* payload, size_t len) {
+  MotionResult result;
+  if (!DecodeMotionResult(payload, len, &result)) {
+    return;
+  }
+  telemetry_.motion = result;
+  telemetry_.motion_us = clock_.NowUs();
+  telemetry_.has_motion = true;
+  if (awaiting_motion_result_) {
+    awaiting_motion_result_ = false;
+    motion_mode_ = MotionMode::kIdle;
   }
 }
 
 void Session::DropSession() {
-  // token 绑定单次会话，链路一断就必须作废：协议规定重连不恢复旧 token。
-  arm_token_ = 0;
+  arm_ok_ = false;
   config_valid_ = false;
-  remote_state_ = RemoteState::kDisconnected;
+  remote_state_ = RemoteState::kDisabled;
   has_boot_id_ = false;
   boot_id_ = 0;
   peer_protocol_version_ = 0;
-  // 会话已失效，在途请求的 ACK 不会再来了，名额必须放开。
   pending_request_type_ = 0;
-  has_target_ = false;
-  target_linear_ = 0.0f;
-  target_angular_ = 0.0f;
+  EnterIdleMotion();
   telemetry_.has_status = false;
   telemetry_.has_hello = false;
   rx_.Reset();
-  time_sync_ = TimeSync{};
   if (port_.IsOpen()) {
     link_state_ = LinkState::kConnecting;
   } else {
@@ -134,19 +156,14 @@ void Session::OnHelloInfo(const uint8_t* payload, size_t len) {
     return;
   }
 
-  // boot_id 变化意味着下位机复位或重新上电：旧 token 已失效，
-  // 继续沿用会让上位机以为自己还在控制一台刚刚重启的车。
   if (has_boot_id_ && info.boot_id != boot_id_) {
     ++diagnostics_.boot_id_changes;
-    arm_token_ = 0;
-    has_target_ = false;
-    target_linear_ = 0.0f;
-    target_angular_ = 0.0f;
+    arm_ok_ = false;
+    config_valid_ = false;
+    EnterIdleMotion();
   }
 
   peer_protocol_version_ = info.protocol_version;
-  // v2 把版本协商放进了 HELLO_INFO 的 payload（帧头已经没有版本字段）。版本不一致时
-  // 下位机会照样回 HELLO_INFO 但拒绝 ARM，上位机这边就停在 kConnecting 不进控制流程。
   if (info.protocol_version != kProtocolVersion) {
     ++diagnostics_.version_mismatches;
     telemetry_.hello = info;
@@ -156,7 +173,6 @@ void Session::OnHelloInfo(const uint8_t* payload, size_t len) {
 
   boot_id_ = info.boot_id;
   has_boot_id_ = true;
-  config_valid_ = info.config_valid != 0;
   remote_state_ = info.remote_state;
   telemetry_.hello = info;
   telemetry_.has_hello = true;
@@ -173,32 +189,12 @@ void Session::OnSystemStatus(const uint8_t* payload, size_t len) {
   telemetry_.has_status = true;
 
   remote_state_ = status.remote_state;
-  config_valid_ = status.config_valid != 0;
-  // SYSTEM_STATUS 是 token 的唯一来源。非 ARMED 时它上报 0，正好用来清除本地 token。
-  arm_token_ = status.remote_state == RemoteState::kArmed ? status.arm_token : 0;
-}
-
-void Session::OnTimeSyncResp(const uint8_t* payload, size_t len, uint64_t rx_us) {
-  TimeSyncResp resp;
-  if (!DecodeTimeSyncResp(payload, len, &resp)) {
-    return;
+  if (remote_state_ != RemoteState::kArmed) {
+    arm_ok_ = false;
+    if (motion_mode_ == MotionMode::kVelocity) {
+      EnterIdleMotion();
+    }
   }
-  // 四时间戳法：t1/t4 是本地时刻，t2/t3 是 MCU 时刻。t1 按纳秒发出，这里换回微秒。
-  const uint64_t t1_us = resp.t1_host_ns / 1000;
-  if (rx_us < t1_us) {
-    return;  // 时钟异常，丢弃该样本。
-  }
-  const uint64_t rtt_us = (rx_us - t1_us) - (resp.t3_mcu_tx_us - resp.t2_mcu_rx_us);
-  if (rtt_us > kMaxAcceptableRttUs) {
-    return;  // 往返偏大的样本不采纳。
-  }
-  const int64_t offset_us =
-      (static_cast<int64_t>(t1_us) - static_cast<int64_t>(resp.t2_mcu_rx_us) +
-       static_cast<int64_t>(rx_us) - static_cast<int64_t>(resp.t3_mcu_tx_us)) /
-      2;
-  time_sync_.valid = true;
-  time_sync_.offset_us = offset_us;
-  time_sync_.rtt_us = rtt_us;
 }
 
 void Session::OnFrame(uint8_t msg_type, const uint8_t* payload, size_t len) {
@@ -215,8 +211,8 @@ void Session::OnFrame(uint8_t msg_type, const uint8_t* payload, size_t len) {
     case MsgType::kAck:
       OnAck(payload, len);
       break;
-    case MsgType::kTimeSyncResp:
-      OnTimeSyncResp(payload, len, now_us);
+    case MsgType::kMotionResult:
+      OnMotionResult(payload, len);
       break;
     case MsgType::kOdomState:
       if (DecodeOdomState(payload, len, &telemetry_.odom)) {
@@ -236,21 +232,13 @@ void Session::OnFrame(uint8_t msg_type, const uint8_t* payload, size_t len) {
         telemetry_.has_imu_debug = true;
       }
       break;
-    case MsgType::kFaultEvent:
-      if (DecodeFaultEvent(payload, len, &telemetry_.fault)) {
-        telemetry_.fault_us = now_us;
-        telemetry_.has_fault = true;
-      }
-      break;
     default:
-      // 主机方向的消息或未知类型：忽略，不改变控制状态。
       break;
   }
 }
 
 void Session::SendCmdVel(float linear, float angular, uint64_t now_ms) {
   CmdVel cmd;
-  cmd.arm_token = arm_token_;
   cmd.linear_x_mps = linear;
   cmd.angular_z_radps = angular;
 
@@ -266,15 +254,13 @@ void Session::SendCmdVel(float linear, float angular, uint64_t now_ms) {
 }
 
 void Session::PumpCommand(uint64_t now_ms) {
-  if (!armed()) {
+  if (!armed() || motion_mode_ != MotionMode::kVelocity) {
     return;
   }
   if (now_ms - last_cmd_ms_ < config_.cmd_period_ms) {
     return;
   }
 
-  // 上层指令过期就主动发零速。协议要求 50 Hz 持续发送，停发会触发下位机
-  // 250 ms 看门狗刹车并锁存故障，所以这里发零速而不是干脆不发。
   const bool fresh = has_target_ && (now_ms - target_set_ms_) <= config_.cmd_validity_ms;
   if (fresh) {
     SendCmdVel(target_linear_, target_angular_, now_ms);
@@ -298,8 +284,6 @@ void Session::Poll() {
     return;
   }
 
-  // 读到 Read 返回 0 才算读空。短读只说明"此刻可用这么多"，不代表后面没有了——
-  // 拿短读当结束条件会在分片较小时丢掉同一帧的后续字节。
   size_t consumed = 0;
   while (consumed < kMaxBytesPerPoll) {
     uint8_t buf[kReadChunk];
@@ -324,14 +308,11 @@ void Session::Poll() {
 
   const uint64_t now_ms = clock_.NowMs();
 
-  // 在途管理请求等 ACK 超时：放开名额，让上层可以重试。协议要求不自动重发非幂等命令，
-  // 所以这里只清标志，不代替上层重发。
   if (pending_request_type_ != 0 && now_ms - pending_request_ms_ > config_.ack_timeout_ms) {
     ++diagnostics_.ack_timeouts;
     pending_request_type_ = 0;
   }
 
-  // 长时间收不到任何有效帧：链路已不可信，丢掉会话重新建链。
   if (link_state_ == LinkState::kConnected && now_ms - last_rx_ms_ > config_.link_timeout_ms) {
     ++diagnostics_.link_drops;
     DropSession();
@@ -343,25 +324,12 @@ void Session::Poll() {
     if (now_ms - last_hello_ms_ >= config_.hello_retry_ms) {
       last_hello_ms_ = now_ms;
       ++diagnostics_.hello_sent;
-      // HELLO 是幂等的，且下位机用 HELLO_INFO 而非 ACK 回应，所以不占用在途请求名额，
-      // 可以按重试周期一直发。
       uint8_t payload[kSizeHelloReq] = {};
       if (EncodeHelloReq(HelloReq{}, payload, sizeof(payload)) == kSizeHelloReq) {
         Send(MsgType::kHelloReq, payload, sizeof(payload));
       }
     }
-    return;  // 建链完成前不发速度命令和时间同步。
-  }
-
-  if (config_.time_sync_period_ms != 0 && now_ms - last_sync_ms_ >= config_.time_sync_period_ms) {
-    last_sync_ms_ = now_ms;
-    TimeSyncReq req;
-    // 协议规定该字段为纳秒，与 MCU 侧的微秒不同量纲，这里显式换算。
-    req.t1_host_ns = clock_.NowUs() * 1000;
-    uint8_t payload[kSizeTimeSyncReq] = {};
-    if (EncodeTimeSyncReq(req, payload, sizeof(payload)) == kSizeTimeSyncReq) {
-      Send(MsgType::kTimeSyncReq, payload, sizeof(payload));
-    }
+    return;
   }
 
   PumpCommand(now_ms);
@@ -372,10 +340,14 @@ bool Session::SetVelocity(float linear_x_mps, float angular_z_radps) {
     ++diagnostics_.tx_errors;
     return false;
   }
+  if (awaiting_motion_result_ || motion_mode_ == MotionMode::kAction) {
+    return false;
+  }
   target_linear_ = linear_x_mps;
   target_angular_ = angular_z_radps;
   target_set_ms_ = clock_.NowMs();
   has_target_ = true;
+  motion_mode_ = MotionMode::kVelocity;
   return true;
 }
 
@@ -383,12 +355,7 @@ bool Session::RequestArm() {
   if (link_state_ != LinkState::kConnected || !has_boot_id_) {
     return false;
   }
-  // config_valid=0 说明下位机的电机、编码器或底盘参数没绑定好。协议禁止绕过这个检查，
-  // 重发 ARM 或伪造 token 都不行，所以这里直接不发。
-  if (!config_valid_) {
-    return false;
-  }
-  if (remote_state_ != RemoteState::kDisarmed) {
+  if (remote_state_ == RemoteState::kFault || remote_state_ == RemoteState::kDisabled) {
     return false;
   }
 
@@ -406,35 +373,72 @@ bool Session::RequestArm() {
 }
 
 bool Session::RequestDisarm() {
-  // 先归零本地目标，避免 DISARM 之后还有一帧非零速度排在后面。
-  target_linear_ = 0.0f;
-  target_angular_ = 0.0f;
-  has_target_ = false;
-  // DISARM 是停车动作，安全优先：不受在途请求名额限制，任何时候都要能发出去。
+  EnterIdleMotion();
+  arm_ok_ = false;
   return SendEmpty(MsgType::kDisarm);
 }
 
-bool Session::RequestResetOdom() {
-  if (armed()) {
-    return false;  // 下位机仅在非 ARMED 状态接受，这里提前拦掉省一次 ACK。
+bool Session::RequestMotionAction(uint8_t action, uint8_t quarter_turns, uint16_t speed_mmps,
+                                  uint32_t distance_mm) {
+  if (!armed()) {
+    return false;
   }
-  return SendRequest(MsgType::kResetOdom, nullptr, 0);
-}
 
-bool Session::RequestClearFault() {
-  return SendRequest(MsgType::kClearFaultRequest, nullptr, 0);
+  const bool stop = IsStop(action);
+  const bool finite = IsFiniteMotion(action, distance_mm);
+  if (!stop && awaiting_motion_result_) {
+    return false;
+  }
+
+  MotionAction msg;
+  msg.action = action;
+  msg.quarter_turns = quarter_turns;
+  msg.speed_mmps = speed_mmps;
+  msg.distance_mm = distance_mm;
+  uint8_t payload[kSizeMotionAction] = {};
+  if (EncodeMotionAction(msg, payload, sizeof(payload)) != kSizeMotionAction) {
+    return false;
+  }
+
+  if (stop) {
+    has_target_ = false;
+    target_linear_ = 0.0f;
+    target_angular_ = 0.0f;
+    motion_mode_ = MotionMode::kIdle;
+    awaiting_motion_result_ = false;
+    if (!Send(MsgType::kMotionAction, payload, sizeof(payload))) {
+      return false;
+    }
+    ++diagnostics_.action_frames;
+    return true;
+  }
+
+  if (!SendRequest(MsgType::kMotionAction, payload, sizeof(payload))) {
+    return false;
+  }
+  ++diagnostics_.action_frames;
+  has_target_ = false;
+  target_linear_ = 0.0f;
+  target_angular_ = 0.0f;
+  motion_mode_ = MotionMode::kAction;
+  awaiting_motion_result_ = finite;
+  return true;
 }
 
 void Session::Shutdown() {
   if (!port_.IsOpen()) {
     return;
   }
-  // 正常停车序列：先连发若干帧零速，再 DISARM。只在确实持有 token 时才需要零速，
-  // 否则速度帧会被下位机以 BAD_TOKEN 拒掉，白占带宽。
-  if (armed()) {
+  if (armed() && motion_mode_ == MotionMode::kVelocity) {
     const uint64_t now_ms = clock_.NowMs();
     for (uint32_t i = 0; i < config_.stop_zero_frames; ++i) {
       SendCmdVel(0.0f, 0.0f, now_ms);
+    }
+  } else if (armed()) {
+    MotionAction stop;
+    uint8_t payload[kSizeMotionAction] = {};
+    if (EncodeMotionAction(stop, payload, sizeof(payload)) == kSizeMotionAction) {
+      Send(MsgType::kMotionAction, payload, sizeof(payload));
     }
   }
   RequestDisarm();
