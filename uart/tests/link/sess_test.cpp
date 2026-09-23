@@ -315,6 +315,35 @@ void TestTelemetryCaptured() {
   CHECK(f.session.telemetry().odom_us > 0);
 }
 
+void TestRfidCardCaptured() {
+  Fixture f;
+  f.Connect();
+
+  RfidCard card;
+  card.present = 1;
+  card.card_number = 3;
+  card.generation = 1;
+  f.mcu.SendRfidCard(f.port, card);
+  f.Tick(1);
+
+  CHECK(f.session.telemetry().has_rfid);
+  CHECK(f.session.telemetry().rfid.present == 1);
+  CHECK(f.session.telemetry().rfid.card_number == 3);
+  CHECK(f.session.telemetry().rfid.generation == 1);
+  CHECK(f.session.telemetry().rfid_us > 0);
+
+  uint8_t bad_payload[2] = {1, 3};
+  uint8_t frame[16] = {};
+  const size_t frame_len = EncodeFrame(static_cast<uint8_t>(MsgType::kRfidCard), bad_payload,
+                                       sizeof(bad_payload), frame, sizeof(frame));
+  f.mcu.SendRaw(f.port, std::vector<uint8_t>(frame, frame + frame_len));
+  f.Tick(1);
+
+  CHECK(f.session.telemetry().rfid.present == 1);
+  CHECK(f.session.telemetry().rfid.card_number == 3);
+  CHECK(f.session.telemetry().rfid.generation == 1);
+}
+
 void TestVersionMismatchDoesNotConnect() {
   Fixture f;
   f.session.Start();
@@ -499,6 +528,7 @@ int main() {
   TestTransportErrorDropsSession();
   TestShutdownSendsZeroThenDisarm();
   TestTelemetryCaptured();
+  TestRfidCardCaptured();
   TestVersionMismatchDoesNotConnect();
   TestBadFrameDoesNotDisturbSession();
   TestWorksWithByteAtATimeReads();

@@ -285,4 +285,24 @@ bool DecodeMotionResult(const uint8_t* payload, size_t len, MotionResult* out) {
   return true;
 }
 
+size_t EncodeRfidCard(const RfidCard& msg, uint8_t* dst, size_t cap) {
+  if (cap < kSizeRfidCard) {
+    return 0;
+  }
+  dst[0] = msg.present;
+  dst[1] = msg.card_number;
+  dst[2] = msg.generation;
+  return kSizeRfidCard;
+}
+
+bool DecodeRfidCard(const uint8_t* payload, size_t len, RfidCard* out) {
+  if (len != kSizeRfidCard) {
+    return false;
+  }
+  out->present = payload[0];
+  out->card_number = payload[1];
+  out->generation = payload[2];
+  return true;
+}
+
 }  // namespace uart

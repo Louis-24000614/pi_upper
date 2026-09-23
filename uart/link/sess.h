@@ -59,6 +59,10 @@ struct Telemetry {
 
   Ack last_ack;
   bool has_ack = false;
+
+  RfidCard rfid;
+  uint64_t rfid_us = 0;
+  bool has_rfid = false;
 };
 
 struct Diagnostics {

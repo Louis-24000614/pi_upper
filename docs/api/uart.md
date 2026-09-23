@@ -41,7 +41,7 @@
 
 payload 里可以出现任意字节（包括 `55 AA`），接收端必须严格按 `LENGTH` 取数据。协议标识在 `HELLO_REQ` 的 payload 里。
 
-字段级细节见下位机 `UART_PROTOCOL.md` / `UART_MESSAGES.md`。上位机需要处理的消息：下发 `HELLO_REQ`、`ARM_REQUEST`、`DISARM`、`CMD_VEL`、`MOTION_ACTION`；接收 `ACK`、`HELLO_INFO`、`ODOM_STATE`、`IMU_STATE`、`IMU_DEBUG`、`SYSTEM_STATUS`、`MOTION_RESULT`。
+字段级细节见下位机 `UART_PROTOCOL.md` / `UART_MESSAGES.md`。上位机需要处理的消息：下发 `HELLO_REQ`、`ARM_REQUEST`、`DISARM`、`CMD_VEL`、`MOTION_ACTION`；接收 `ACK`、`HELLO_INFO`、`ODOM_STATE`、`IMU_STATE`、`IMU_DEBUG`、`SYSTEM_STATUS`、`MOTION_RESULT`、`RFID_CARD`。`RFID_CARD` 为 3 字节读卡结果，保存在会话遥测里，本模块不播报、不计分。
 
 序列化必须逐字节写入，**不允许**把 C++ 结构体直接 `memcpy` 上线——对齐、填充和 ABI 差异会让两端字节布局不一致。
 

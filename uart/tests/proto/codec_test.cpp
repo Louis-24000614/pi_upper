@@ -24,6 +24,7 @@ static_assert(kSizeImuState == 29, "IMU_STATE payload 应为 29 字节");
 static_assert(kSizeImuDebug == 21, "IMU_DEBUG payload 应为 21 字节");
 static_assert(kSizeSystemStatus == 7, "SYSTEM_STATUS payload 应为 7 字节");
 static_assert(kSizeMotionResult == 11, "MOTION_RESULT payload 应为 11 字节");
+static_assert(kSizeRfidCard == 3, "RFID_CARD payload 应为 3 字节");
 
 void TestMsgTypeValues() {
   CHECK(static_cast<uint8_t>(MsgType::kHelloReq) == 0x01);
@@ -38,6 +39,7 @@ void TestMsgTypeValues() {
   CHECK(static_cast<uint8_t>(MsgType::kImuDebug) == 0x92);
   CHECK(static_cast<uint8_t>(MsgType::kSystemStatus) == 0x93);
   CHECK(static_cast<uint8_t>(MsgType::kMotionResult) == 0x94);
+  CHECK(static_cast<uint8_t>(MsgType::kRfidCard) == 0x95);
 }
 
 void TestCmdVelLayout() {
@@ -278,6 +280,22 @@ void TestArmRequestRoundTrip() {
   CHECK(back.boot_id == msg.boot_id);
 }
 
+void TestRfidCardLayout() {
+  RfidCard msg;
+  msg.present = 1;
+  msg.card_number = 12;
+  msg.generation = 2;
+  uint8_t buf[kSizeRfidCard] = {};
+  CHECK(EncodeRfidCard(msg, buf, sizeof(buf)) == kSizeRfidCard);
+  CHECK(buf[0] == 1 && buf[1] == 12 && buf[2] == 2);
+  RfidCard out;
+  CHECK(DecodeRfidCard(buf, kSizeRfidCard, &out));
+  CHECK(out.present == 1 && out.card_number == 12 && out.generation == 2);
+  CHECK(!DecodeRfidCard(buf, kSizeRfidCard - 1, &out));
+  CHECK(!DecodeRfidCard(buf, kSizeRfidCard + 1, &out));
+  CHECK(EncodeRfidCard(msg, buf, 2) == 0);
+}
+
 void TestUnknownEnumsAreConservative() {
   uint8_t status[kSizeSystemStatus] = {};
   status[0] = 99;
@@ -307,6 +325,7 @@ int main() {
   TestImuRoundTrip();
   TestSystemStatusRoundTrip();
   TestMotionResultRoundTrip();
+  TestRfidCardLayout();
   TestArmRequestRoundTrip();
   TestUnknownEnumsAreConservative();
   return uart::test::Finish("codec");

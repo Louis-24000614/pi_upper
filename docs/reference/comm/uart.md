@@ -73,7 +73,7 @@ flowchart TB
 
 `proto/frame.h` — 协议常量（`kSync1`/`kSync2`、`kProtocolVersion`、`kFrameOverhead`、`kMaxPayloadSize`、`kMaxFrameSize`、`kInterByteTimeoutUs`）、`EncodeFrame()` 装配整帧、`Reassembler` 六状态逐字节收帧并维护 `Stats` 统计（帧数、CRC 错误、字节间超时、长度溢出）。`Feed()` 需要传入本批字节的到达时刻，用于字节间超时判断。
 
-`proto/msg.h` — 消息 ID（`MsgType`）、结果码（`AckResult`）、远程状态（`RemoteState`）、能力位与状态位常量，以及 11 个有 payload 的消息的进程内结构体。只有数据定义，没有逻辑。
+`proto/msg.h` — 消息 ID（`MsgType`）、结果码（`AckResult`）、远程状态（`RemoteState`）、能力位与状态位常量，以及各有 payload 的消息的进程内结构体。`0x95 RFID_CARD` 为 3 字节读卡结果，会话只保存最近一帧，不播报、不计分。只有数据定义，没有逻辑。
 
 `proto/codec.h` — 各消息 payload 长度常量与字段级编解码。编码返回写入字节数，0 表示缓冲不足或字段非法；解码返回 bool，要求长度严格相等。MCU→主机方向也提供编码函数，供测试与仿真里的"假下位机"构造遥测帧。
 
@@ -129,7 +129,7 @@ CRC-8/ATM 用协议给定的 `CRC8("123456789") = 0xF4` 自检。这个检查值
 
 帧层用固件黄金帧做字节级比对：`55 AA 01 01 01 79`（`HELLO_REQ`）与零速 `CMD_VEL` `55 AA 12 08 … 83` 必须完全一致，故意保留旧 CRC 的坏帧必须计入 `crc_errors` 且不触发回调。
 
-消息层 payload 长度用 `static_assert` 锁死：`CMD_VEL` 8 字节、`ACK` 2 字节、`HELLO_INFO` 7 字节、`ODOM_STATE` 21 字节、`MOTION_ACTION` 8 字节、`MOTION_RESULT` 11 字节。未知状态不得变成 ARMED，未知 ACK 不得变成 OK。
+消息层 payload 长度用 `static_assert` 锁死：`CMD_VEL` 8 字节、`ACK` 2 字节、`HELLO_INFO` 7 字节、`ODOM_STATE` 21 字节、`MOTION_ACTION` 8 字节、`MOTION_RESULT` 11 字节、`RFID_CARD` 3 字节。未知状态不得变成 ARMED，未知 ACK 不得变成 OK。
 
 会话层覆盖：HELLO 重试、ARM ACK 判定配置、未 ARM 不发速度、速度环 20 ms、指令过期改零速、boot_id 变化丢掉使能、FAULT 停命令、链路超时、`Shutdown`、版本不匹配、以及方案 C：有限动作挡住速度环直到 `0x94`、STOP 可随时打断、等待结果时拒绝第二个有限动作。
 
@@ -141,7 +141,7 @@ CRC-8/ATM 用协议给定的 `CRC8("123456789") = 0xF4` 自检。这个检查值
 
 **测试逼出来的一个实现 bug**：`Session::Poll` 原先用"短读即读空"作为读取循环的结束条件。非阻塞 fd 上短读只表示"此刻可用这么多"，不代表后续没有数据，因此分片较小时会丢掉同一帧的后续字节。真串口上短读通常确实等于读空，所以这个错误在硬件联调里只会表现为偶发丢帧，极难定位；是 fake 的逐字节分片模式把它逼出来的。现在改为读到返回 0 才结束，并对单次 Poll 的字节数设上限，避免对端刷数据时饿死 50 Hz 发送节拍。
 
-**与固件源码的对照结果**：字段长度与 ID 对照下位机 `UART_PROTOCOL.md` / `uart_protocol.h`（协议标识 1，`CMD_VEL` 8 字节，`0x13` 为 `MOTION_ACTION`，`0x94` 为 `MOTION_RESULT`）。
+**与固件源码的对照结果**：字段长度与 ID 对照下位机 `UART_PROTOCOL.md` / `uart_protocol.h`（协议标识 1，`CMD_VEL` 8 字节，`0x13` 为 `MOTION_ACTION`，`0x94` 为 `MOTION_RESULT`，`0x95` 为 `RFID_CARD`）。
 
 字节间超时仍取固件 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` = 20 ms。
 
