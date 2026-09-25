@@ -47,6 +47,14 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(cmd.v_mps, 0.0)
         self.assertEqual(cmd.omega_radps, 0.0)
 
+    def test_left_reading_bias_holds_a_straight_line(self) -> None:
+        points = [(-0.03, y) for y in (0.25, 0.35, 0.45, 0.55, 0.70, 0.85, 0.95, 1.0)]
+        cmd = command_from_centerline(
+            points, road_pixels=2000, cfg=FollowConfig(x_bias_m=0.03)
+        )
+        self.assertEqual(cmd.reason, "follow")
+        self.assertAlmostEqual(cmd.omega_radps, 0.0, places=3)
+
     def test_omega_is_clamped(self) -> None:
         points = [(0.20, y) for y in (0.25, 0.35, 0.45, 0.55, 0.70, 0.85, 0.95, 1.0)]
         cfg = FollowConfig(max_abs_omega=0.05)
