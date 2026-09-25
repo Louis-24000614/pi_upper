@@ -44,18 +44,19 @@ class TopologyGraphTests(unittest.TestCase):
         self.graph.clear_blocked()
 
     def test_block_edge_on_shortest_path_to_2_4(self) -> None:
-        """封掉通往 2_4 最短路上的竖边后应改道（例如经 2_3__2_4）。"""
+        """封掉右出口下去的竖边后，去 2_4 应改走左出口。"""
         self.graph.clear_blocked()
         before = shortest_path(self.graph, "0_0", "2_4")
         self.assertIsNotNone(before)
         assert before is not None
-        self.assertIn("1_4__2_4", before.edge_ids)
-        self.graph.set_edge_blocked("1_4__2_4", True)
+        self.assertIn("1_3__2_3", before.edge_ids)
+        self.graph.set_edge_blocked("1_3__2_3", True)
         after = shortest_path(self.graph, "0_0", "2_4")
         self.assertIsNotNone(after)
         assert after is not None
         self.assertNotEqual(before.edge_ids, after.edge_ids)
-        self.assertNotIn("1_4__2_4", after.edge_ids)
+        self.assertNotIn("1_3__2_3", after.edge_ids)
+        self.assertIn("0_0__1_2", after.edge_ids)
         self.graph.clear_blocked()
 
 

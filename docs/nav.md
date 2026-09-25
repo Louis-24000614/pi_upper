@@ -1,5 +1,7 @@
 # 导航与障碍重规划（分层设计）
 
+上层任务、默认路线和封边重搜的最终约定在 [`docs/reference/navigation/upper-planner.md`](reference/navigation/upper-planner.md)。本文保留贴线、航向、倒车和局部占用这些执行细节。
+
 杭州侦察机器人上位机侧 **路径规划 / 遇障重规划** 设计规格。采用业界常见且贴合本赛题尺度的方案：**先验拓扑全局规划 + BEV 局部规划 + 寻线执行**。本文是设计稿，不含业务代码实现。
 
 ## Contents
@@ -25,7 +27,7 @@
 
 赛题要求：巡逻路线上最多出现 **3 个任意放置的障碍物**，机器人须 **自行重新规划行进路线** 以完成任务；鼓励纯视觉，不依赖超声/激光/主动红外可获加分；导航为未建稠密全局地图条件下的自主行进。
 
-场地约 **3200×4400 mm**，侦察车道宽约 **800 mm**，两侧有约 **50 mm** 挡板。这是窄路网场景，不是旷野越野。
+场地约 **3200×4400 mm**，车道净宽 **200 mm**，岛区格距约 **800 mm**，两侧有约 **50 mm** 挡板。这是窄路网场景，不是旷野越野。净宽里绕不开障碍，遇障换边以 [`upper-planner.md`](reference/navigation/upper-planner.md) 为准。
 
 **本文目标**
 
@@ -44,6 +46,7 @@
 | [`docs/superpowers/specs/2026-08-29-visual-nav-road-follow-design.md`](superpowers/specs/2026-08-29-visual-nav-road-follow-design.md) | Stage-1：mask → IPM → 中心线 → Pure Pursuit；交叉口默认自然延伸。本文在其上增加 **选岔/换边与障碍重规划**。 |
 | [`docs/superpowers/specs/2026-08-29-ipm-centerline-proto-design.md`](superpowers/specs/2026-08-29-ipm-centerline-proto-design.md) | BEV 窗口与外参约定；局部占用栅格复用同一鸟瞰窗。 |
 | [`docs/superpowers/specs/2026-09-02-mission-topology-and-gui-design.md`](superpowers/specs/2026-09-02-mission-topology-and-gui-design.md) | Mission / UID：收齐巡逻点、播报。Mission **不**实现换道细节；只提供「巡场中 / 回出发区」等目标语义。 |
+| [`docs/reference/navigation/topology-rfid-navigation.md`](reference/navigation/topology-rfid-navigation.md) | 当前拓扑定位与 RFID 到点策略：固定物理 `slot_id` 与现场 `card_number` 分离；有标签节点读卡停车转 90°，无标签路口使用视觉与里程计交接。 |
 | [`docs/architecture/overview.md`](architecture/overview.md) | 逻辑模块 `navigation` / `state` / `uart` 的总图位置。 |
 | [`docs/api/uart.md`](api/uart.md) | 线协议与会话：`CMD_VEL` 与 `MOTION_ACTION` 互斥；`IMU_STATE.relative_yaw` 无绝对航向。 |
 | [`vision/ipm_proto/`](../vision/ipm_proto/) | 已有 IPM/中心线 Python 原型，局部层可在此演进。 |
@@ -152,6 +155,8 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
 
 拓扑只回答「走廊怎么连、堵了换哪条」。贴路、短距倒车、UID 播报都不进这张图。
 
+车辆的物理位置由已知起点、已执行边序列和沿边进度维护，不由标签编号反推。巡逻位置使用固定 `slot_id`；现场读出的 `card_number` 只用于建立 `slot_id ↔ card_number` 映射、播报和去重。两类节点的到点触发与状态推进详见 [拓扑定位、RFID 到点与路口转向](reference/navigation/topology-rfid-navigation.md)。
+
 ### 全局规划
 
 - **正常：** 按 Mission 目标生成一条边序列（巡场覆盖或回 `S`）。第一版可用固定巡航环 + 回家路径；后续可按「未扫区域」优化。
@@ -182,10 +187,10 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
 
 ```text
                     0_0 出发区
-                   /    \
-        1_1 -- 1_2 -- 1_3 -- 1_4     ≈① / 十字 / 十字 / ≈⑫
-         |      |      |      |
-        2_1 -- 2_2 -- 2_3 -- 2_4     ≈② / 十字 / 十字 / ≈⑪
+                   /         \
+                 1_2         1_3      ≈①           ≈⑫
+                  |           |
+        2_1 -- 2_2 -- 2_3 -- 2_4      ≈② / 十字 / 十字 / ≈⑪
          |      |      |      |
         3_1 -- 3_2 -- 3_3 -- 3_4     ≈③ / 十字 / 十字 / ≈⑩
          |      |      |      |

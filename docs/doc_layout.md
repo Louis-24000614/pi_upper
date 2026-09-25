@@ -12,8 +12,11 @@
 - `docs/architecture/layout.md` — 仓库目录结构与顶层目录职责。
 - `docs/nav.md` — 导航与障碍重规划：拓扑全局 + BEV 局部 + 寻线执行；`CMD_VEL` / `MOTION_ACTION` 分工与视觉校准 ICM42688 相对航向。
 - `config/nav_topology.yaml` — 赛题图 3 先验拓扑运行配置（`行_列`：左右巡逻格 + 中间双十字、边与隧道初标）。
+- `docs/reference/navigation/upper-planner.md` — 上层路径规划：12 巡逻点、四段隧道、封边重搜、到点转向和记分记忆。
 - `docs/reference/navigation/topo_proto.md` — 拓扑 Dijkstra 原型：加载 YAML、封边重搜、CLI。
 - `docs/reference/navigation/road-follow-actions.md` — 道路跟随有限动作：路口/RFID 转向、遇障倒车、UART 文本接口、运行与测试。
+- `docs/reference/navigation/topology-rfid-navigation.md` — 固定物理节点与现场卡号分离；RFID 节点停车转向、普通路口视觉/里程计转向及拓扑状态推进。
+- `docs/reference/navigation/vision-odom-junction-turn.md` — 道路分割发现路口、下位机编码器/IMU补盲、定距直行与90°转弯交接。
 - `navigation/README.md` — navigation 目录说明（含 `topo_proto/`）。
 - `docs/api/face.md` — arcface-lite 服务的 HTTP REST 与 WebSocket 线协议契约。
 - `docs/api/uart.md` — 下位机串口通信在上位机侧的实现约定（线协议以下位机仓库的 `UART_PROTOCOL.md` 为权威）。
