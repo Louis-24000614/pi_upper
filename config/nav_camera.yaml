@@ -45,10 +45,49 @@ follow:
 
 # 同色过分割时的几何兜底（vision/ipm_proto）
 road_prior:
-  expected_width_m: 0.8
-  min_width_m: 0.35
-  max_width_m: 1.15
+  # 赛题 PDF 图 3 给出的道路净宽为 200 mm；800 mm 是格网间距，不是车道宽。
+  expected_width_m: 0.20
+  # 上下限给分割毛边、场地约 5% 尺寸误差和 BEV 标定误差留余量。
+  min_width_m: 0.14
+  max_width_m: 0.32
   min_pixels: 3
+
+# 路口侧向道路还看得见时交给下位机；之后由编码器定距、IMU 保持航向。
+# 自动转弯只有命令行显式指定 --turn-at-junction/--left-at-junction 才启用。
+junction_turn:
+  stable_frames: 2
+  handoff_min_distance_m: 0.18
+  handoff_max_distance_m: 0.55
+  camera_ahead_of_turn_center_m: 0.00  # 实测：相机光心比两轮中心靠前的距离
+  stop_before_center_m: 0.00
+  forward_speed_mmps: 50
+  min_forward_mm: 50
+  max_forward_mm: 650
+  reacquire_frames: 3
+  # 看不到侧路时，以分割道路远端接近作为备用交接信号。
+  # 本次实车日志中远端由 0.61 m 缩至 0.41 m；在预瞄仍有效时提前交接。
+  road_end_enabled: true
+  road_end_min_y_m: 0.48
+  road_end_max_y_m: 0.56
+  # 200 mm 道路的远端通常比路口旋转中心远半个路宽。
+  road_end_beyond_turn_center_m: 0.10
+  road_end_max_abs_lane_x_m: 0.08
+  road_end_min_lane_width_m: 0.14
+  road_end_max_lane_width_m: 0.32
+  # 侧路在远处可见时只锁存方向，继续视觉循迹；靠近后才定距交接。
+  branch_observe_min_distance_m: 0.55
+  branch_observe_max_distance_m: 0.95
+  branch_latch_max_frames: 200
+
+# 局部 RFID 到点测试：首次有效读卡后先持续发零速，再交给下位机 IMU 转 90°。
+# 转向方向由命令行 --turn-at-rfid left/right 显式指定。
+rfid_turn:
+  stop_settle_ms: 300
+  reacquire_frames: 3
+  # 只有道路仍存在但覆盖不到预瞄点（stop_lookahead）时才启用。
+  # 下位机以 IMU 锁定动作起始航向；到上限仍未读卡就停车报错。
+  search_distance_mm: 350
+  search_speed_mmps: 50
 
 temporal:
   # 帧间中心线 X 的 EMA；越大越跟新帧
