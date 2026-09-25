@@ -36,7 +36,7 @@ class PlannerTests(unittest.TestCase):
 class MissionTests(unittest.TestCase):
     def test_hidden_obstacles_trigger_only_on_entry_then_uturn(self) -> None:
         graph = load_topology()
-        obstacles = {"1_1__1_2", "2_1__2_2", "3_1__3_2"}
+        obstacles = {"1_2__2_2", "2_1__2_2", "3_1__3_2"}
         mission = PostmanMission(graph, obstacles)
         self.assertFalse(mission.discovered)
         self.assertFalse(graph.blocked)

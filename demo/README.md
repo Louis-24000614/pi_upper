@@ -14,7 +14,7 @@ python -m demo
 
 ```powershell
 python -m demo --list-edges
-python -m demo --headless --obstacles 1_1__1_2 2_1__2_2 3_1__3_2
+python -m demo --headless --obstacles 1_2__2_2 2_1__2_2 3_1__3_2
 ```
 
 ## 规划规则
