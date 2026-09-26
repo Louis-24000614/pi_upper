@@ -264,8 +264,9 @@ def _watch_uart_notes(
     action_notes: queue.Queue[str],
     rfid_events: queue.Queue[tuple[int, int]],
     odom_samples: queue.Queue[tuple[float, float, float]] | None = None,
+    rfid_enabled: bool = False,
 ) -> None:
-    """分发串口桥输出的有限动作终态、新读卡事件和里程计。"""
+    """分发有限动作、里程计；仅 RFID 独立测试接收读卡事件。"""
     stdout = proc.stdout
     if stdout is None:
         return
@@ -283,6 +284,8 @@ def _watch_uart_notes(
             except ValueError:
                 continue
         elif text.startswith("RFID_EVENT "):
+            if not rfid_enabled:
+                continue
             fields = text.split()
             if len(fields) != 3:
                 continue
@@ -294,9 +297,11 @@ def _watch_uart_notes(
             _event("RFID", f"读到 {card_number} 号标签（第 {generation} 次）")
             rfid_events.put((card_number, generation))
         elif text.startswith("RFID_REMOVED"):
-            _event("RFID", "标签已移开")
+            if rfid_enabled:
+                _event("RFID", "标签已移开")
         elif text.startswith("RFID_INVALID"):
-            _event("RFID", "读到无效标签")
+            if rfid_enabled:
+                _event("RFID", "读到无效标签")
 
 
 def _stop_bridge(proc: subprocess.Popen | None) -> None:
@@ -434,7 +439,13 @@ def main(argv: list[str] | None = None) -> int:
     if bridge is not None:
         threading.Thread(
             target=_watch_uart_notes,
-            args=(bridge, action_notes, rfid_events, odom_samples),
+            args=(
+                bridge,
+                action_notes,
+                rfid_events,
+                odom_samples,
+                turn_side is None,
+            ),
             daemon=True,
         ).start()
     junction_turn = JunctionTurn()
@@ -599,11 +610,6 @@ def main(argv: list[str] | None = None) -> int:
                     and junction_turn.phase == "follow"
                 )
                 if patrol_mode:
-                    detection = None
-                    try:
-                        detection = rfid_events.get_nowait()
-                    except queue.Empty:
-                        pass
                     previous_rfid_phase = rfid_arrival.phase
                     follow_cfg = cfg.get("follow", {}) or {}
                     visual_safe = (
@@ -612,9 +618,10 @@ def main(argv: list[str] | None = None) -> int:
                         and follow_diag.output_points
                         >= int(follow_cfg.get("min_points", 8))
                     )
+                    # 保留原巡检点视觉状态机和全部阈值，只取消 UID 输入。
                     rfid_arrival, command = step_rfid_arrival(
                         rfid_arrival,
-                        detection,
+                        None,
                         command,
                         action_notes,
                         lambda line: write_velocity(bridge, line),
@@ -630,9 +637,8 @@ def main(argv: list[str] | None = None) -> int:
                             f"{_phase_name(previous_rfid_phase)} → "
                             f"{_phase_name(rfid_arrival.phase)}；"
                             f"位置={target.id}，"
-                            f"标签={rfid_arrival.card_number or '未读到'}，"
                             f"侧边={_rfid_edge_name(rfid_arrival)}，"
-                            f"已搜索={rfid_arrival.searched_mm} mm",
+                            f"已前进={rfid_arrival.searched_mm} mm",
                         )
                     if rfid_arrival.phase == "arrived" and route_agent is not None:
                         junction_turn.phase = "arrived"
@@ -648,13 +654,6 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         rfid_arrival = RfidArrival()
                 else:
-                    # 普通 junction 不允许 RFID 冒充到点；丢弃沿途旧标签事件。
-                    if target is not None and target.role != "patrol_slot":
-                        while True:
-                            try:
-                                rfid_events.get_nowait()
-                            except queue.Empty:
-                                break
                     if target is not None and should_stop_at_expected_junction(
                         progress.s_m,
                         edge.length_m,

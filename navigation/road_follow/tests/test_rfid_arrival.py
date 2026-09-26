@@ -112,14 +112,14 @@ class RfidArrivalTest(unittest.TestCase):
         self.assertEqual((state.phase, command.reason), ("arrived", "rfid_arrived"))
         self.assertEqual((state.card_number, state.generation), (6, 2))
 
-    def test_blind_forward_is_not_repeated_without_a_card(self) -> None:
+    def test_blind_forward_confirms_arrival_without_a_card(self) -> None:
         state = RfidArrival(edge_latched=True, road_end_missing_frames=2)
         state, _ = self.step(state, forward_band_ratio=0.0)
         self.assertEqual(state.phase, "blind_forward")
         self.notes.put("FORWARD_DONE")
         state, command = self.step(state)
-        self.assertEqual(state.phase, "fault")
-        self.assertEqual(command.reason, "stop_rfid_not_found")
+        self.assertEqual(state.phase, "arrived")
+        self.assertEqual(command.reason, "rfid_arrived")
         self.assertEqual(state.searched_mm, 200)
         self.assertEqual(self.sent, ["forward 200 50"])
 

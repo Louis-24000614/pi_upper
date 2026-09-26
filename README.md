@@ -1,6 +1,6 @@
 # 侦察机器人上位机（pi_upper）
 
-运行在 Orange Pi 5 Plus（RK3588）上的机器人上位机。当前主链路为：前视相机道路分割、BEV 中心线提取、视觉循迹、拓扑/RFID 路口状态机，以及通过 UART 驱动 STM32 下位机完成速度控制和有限运动动作。
+运行在 Orange Pi 5 Plus（RK3588）上的机器人上位机。当前主链路为：前视相机道路分割、BEV 中心线提取、纯视觉拓扑巡航，以及通过 UART 驱动 STM32 下位机完成速度控制和有限运动动作。RFID 代码仅保留为独立硬件测试，不参与当前拓扑巡航到点。
 
 本仓库不使用 ROS。导航主体目前是 Python，UART、舵机等硬件接口是 C++，调试界面使用 PySide6。
 
@@ -11,8 +11,8 @@
 - 白底白色矮沿场地的道路宽度先验与中心线时间平滑
 - 出发区定距前进到 `0_J`、停车、按拓扑路线 IMU 原地转向，再恢复视觉循迹
 - 路口侧向开口/道路端头识别，定距前进后原地转弯
-- RFID 读取、到点停车和拓扑节点状态推进
-- 道路丢失、动作失败和未读到 RFID 时停车
+- 视觉路口到点、拓扑节点推进和地图决定转向
+- 道路丢失、路口视觉未确认和有限动作失败时停车
 - 原始相机视频录制和逐帧控制日志
 - 障碍物检测与倒车重规划原型
 - Qt/PySide6 调试界面、舵机及刀具/人脸识别模块
@@ -35,7 +35,7 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `navigation/road_follow/` | 实车道路分割、视觉循迹和路口/RFID 状态机 |
+| `navigation/road_follow/` | 实车道路分割、视觉循迹和纯视觉拓扑路口状态机 |
 | `navigation/topo_proto/` | 拓扑加载、寻路和封边原型 |
 | `vision/ipm_proto/` | IPM、中心线、路口几何和时间平滑 |
 | `vision/obstacle/` | 障碍物检测与硬堵塞判定 |
@@ -152,11 +152,13 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 → 恢复正常视觉循迹
 ```
 
-后续道路仍使用与直线模式相同的分割、BEV 和视觉控制器，但路口、RFID、有限动作状态机会在需要时接管速度输出。
+后续道路仍使用与直线模式相同的分割、BEV 和视觉控制器。`patrol_slot` 保留原来的巡检点视觉接近状态机，普通 `junction` 保留原来的路口状态机；唯一取消的是拓扑任务中的 UID 输入。只有有限动作状态机会在需要时接管速度输出。
 
-路口交接原则：侧向矮沿端头只负责提前锁存「这里有路口」；之后继续视觉循迹，直到 BEV 正前方 34–48 cm 检测带的道路 mask 占比连续 3 帧降到 10% 以下，才固定前进一次 20 cm；随后先停车，再执行原地转弯。固定动作进行时不会同时发送 `CMD_VEL`。
+路口交接原则：左右任一侧的矮沿端头只负责提前锁存「这里有路口」；之后继续视觉循迹，直到 BEV 正前方 34–48 cm 检测带的道路 mask 占比连续 3 帧降到 10% 以下，才由下位机使用 IMU 锁航向固定前进一次 20 cm。动作完成后停车，Agent 根据地图中的入边和下一条边决定直行、左转、右转或倒车；转弯后重新进入视觉寻路。固定动作期间不会同时发送 `CMD_VEL`。
 
-局部 RFID 转向测试：
+命令里的 `right` 继续表示普通路口观察右侧开口；它不强制后续节点全部右转，最终动作始终来自拓扑。巡检点仍按原逻辑保存实际看到的左侧、右侧或两侧。
+
+RFID 只保留为独立硬件转向测试，不属于上面的拓扑任务：
 
 ```bash
 PYTHONPATH=.:navigation:vision python3 -m road_follow \
@@ -165,7 +167,7 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
   --uart-bin build-turn/uart/uart_vel
 ```
 
-`--turn-at-junction`、`--turn-at-rfid` 和 `--backup-on-obstacle` 是不同的局部测试模式，部分组合会被命令行拒绝；以 `python3 -m road_follow --help` 为准。
+`--turn-at-junction` 是当前纯视觉拓扑任务；`--turn-at-rfid` 和 `--backup-on-obstacle` 是独立测试模式，部分组合会被命令行拒绝；以 `python3 -m road_follow --help` 为准。
 
 ## 关键导航配置
 
@@ -179,13 +181,13 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 | `follow` | 速度、预瞄距离、转向增益和角速度限幅 |
 | `entrance` | 出发区前进到 `0_J`、停车、按拓扑转向和视觉重新捕获 |
 | `road_prior` | 道路宽度范围和中心线提取先验 |
-| `junction_turn` | 路口锁存、20 cm 交接和原地转向 |
-| `rfid_turn` | RFID 到点、搜索距离和重新捕获 |
+| `junction_turn` | 普通路口原有的锁存、20 cm 交接和原地转向参数 |
+| `rfid_turn` | 巡检点原有的侧边/检测带/20 cm 参数；也供独立 RFID 硬件测试复用 |
 | `temporal` | 中心线 EMA 平滑参数 |
 
 当前循迹坐标约定：地面 `X` 向右、`Y` 向前；正角速度表示左转。`x_bias_m` 是横向标定量，`steering_gain` 是视觉角速度增益，最终仍受 `max_abs_omega` 限制。每次修改参数后应保留录像与日志，不能只根据肉眼印象连续加大增益。
 
-拓扑节点和边长位于 [`config/nav_topology.yaml`](config/nav_topology.yaml)，相关约定见[拓扑定位、RFID 到点与路口转向](docs/reference/navigation/topology-rfid-navigation.md)。
+拓扑节点和边长位于 [`config/nav_topology.yaml`](config/nav_topology.yaml)，相关约定见[拓扑定位、纯视觉到点与可选 RFID 测试](docs/reference/navigation/topology-rfid-navigation.md)。
 
 ## 日志排查
 
@@ -199,7 +201,7 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 | `路口` / `开口` / `检测带` | 稳定路口类型、可通方向和正前方 mask 占比 |
 | `支路=已锁存` | 已确认左/右支路，正等待道路端头交接 |
 | `[动作]` | 定距前进、停车或原地转弯的完成/失败结果 |
-| `[RFID]` / `[巡检点]` | 固定拓扑位置、现场标签号、曾看到的左/右侧端头以及到点阶段变化 |
+| `[RFID]` | 只会在显式运行 `--turn-at-rfid` 独立测试时出现 |
 | `停车：……` | 直接给出中文停车原因 |
 
 分析偏航时，应同时比较录像、状态摘要中的角速度和下位机实际 ODOM/IMU。需要逐帧几何量时应结合录像离线回放；默认实车日志只保留运行决策所需的关键量。
@@ -247,4 +249,4 @@ bash gui/run.sh
 - [`docs/architecture/overview.md`](docs/architecture/overview.md)：总体架构
 - [`docs/api/uart.md`](docs/api/uart.md)：UART 上位机接口约定
 - [`docs/reference/navigation/upper-planner.md`](docs/reference/navigation/upper-planner.md)：上层路线规划
-- [`docs/reference/navigation/topology-rfid-navigation.md`](docs/reference/navigation/topology-rfid-navigation.md)：拓扑、RFID 与路口执行
+- [`docs/reference/navigation/topology-rfid-navigation.md`](docs/reference/navigation/topology-rfid-navigation.md)：纯视觉拓扑到点、地图转向与独立 RFID 测试

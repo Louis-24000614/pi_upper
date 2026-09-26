@@ -1,4 +1,4 @@
-"""Agent 路线中 patrol_slot 的 RFID 到点状态机。"""
+"""保留原 patrol_slot 视觉接近状态机；当前主循环不向它提供 UID。"""
 
 from __future__ import annotations
 
@@ -101,9 +101,9 @@ def step_rfid_arrival(
             return state, VelocityCommand(0.0, 0.0, "rfid_searching")
         state.searched_mm += state.active_step_mm
         state.active_step_mm = 0
-        # 检测带消失后只允许这一段 20 cm；仍未读到卡就停车，禁止连续盲走。
-        state.phase = "fault"
-        return state, VelocityCommand(0.0, 0.0, "stop_rfid_not_found")
+        # 只取消读卡确认：原来的 20 cm 完成后直接确认当前拓扑巡检点。
+        state.phase = "arrived"
+        return state, VelocityCommand(0.0, 0.0, "rfid_arrived")
 
     any_edge_visible = edge_visible or edge_left_visible or edge_right_visible
     if any_edge_visible:

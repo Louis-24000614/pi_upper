@@ -19,7 +19,7 @@
 - `vision/obstacle/README.md` — 障碍检测框到整边硬堵塞事件：空间过滤、跨帧确认、锁存与重置接口。
 - `docs/reference/navigation/topo_proto.md` — 拓扑 Dijkstra 原型：加载 YAML、封边重搜、CLI。
 - `docs/reference/navigation/road-follow-actions.md` — 道路跟随有限动作：路口/RFID 转向、遇障倒车、UART 文本接口、运行与测试。
-- `docs/reference/navigation/topology-rfid-navigation.md` — 固定物理节点与现场卡号分离；侧边角锁存、正前方 mask 检测带、唯一一次 20 cm 接近及拓扑状态推进。
+- `docs/reference/navigation/topology-rfid-navigation.md` — 巡检点与普通路口各自保留原视觉到点状态机，只取消任务 UID 输入；另说明独立 RFID 测试边界。
 - `docs/reference/navigation/vision-odom-junction-turn.md` — 道路分割发现路口、BEV 正前方检测带、编码器/IMU 固定 20 cm 补盲与 90° 转弯交接。
 - `navigation/README.md` — navigation 目录说明（含 `topo_proto/`）。
 - `docs/api/face.md` — arcface-lite 服务的 HTTP REST 与 WebSocket 线协议契约。

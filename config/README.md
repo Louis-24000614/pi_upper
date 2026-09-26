@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `nav_topology.yaml` | 赛题图 3 先验路网（起点 `0_0` 先接顶端丁字口 `0_J`；`_1` 左点、`_2`/`_3` 中间双十字、`_4` 右点）；设计见 `docs/nav.md`，RFID 到点与拓扑定位见 `docs/reference/navigation/topology-rfid-navigation.md` |
+| `nav_topology.yaml` | 赛题图 3 先验路网（起点 `0_0` 先接顶端丁字口 `0_J`；`_1` 左点、`_2`/`_3` 中间双十字、`_4` 右点）；当前巡航保留两类节点原有视觉到点逻辑，只取消 UID 输入；设计见 `docs/nav.md` |
 | `knife.json` | DINOv3 刀具识别：模型路径、模板、NPU 核掩码、`enabled` 默认关闭 |
 | `nav_camera.yaml` | 导航前视安装、BEV 窗、路宽先验、循迹增益、出发区交接，以及“侧边角锁存 + 正前方 mask 检测带 + 唯一一次 20 cm”路口参数；白底白沿见 `docs/superpowers/specs/2026-09-03-white-on-white-road-perception-design.md` |
 | `road_seg_train.yaml` | 主机 YOLO-seg 训练增强/数据比例提示（板端不加载） |

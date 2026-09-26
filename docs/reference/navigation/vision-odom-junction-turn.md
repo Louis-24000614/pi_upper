@@ -16,7 +16,7 @@
 2. 拓扑/任务策略回答“该向左、向右还是直行”；
 3. 编码器和 IMU回答“进入视觉盲区后还要走多远、怎样保持直行”。
 
-本文机制主要用于**没有 RFID 标签的普通路口**。有标签的巡逻位置也复用相同的“侧边角锁存 + 正前方检测带”作为读卡前的接近信号，但最终到点仍必须由新的 RFID 事件确认。两类触发的统一状态约定见 [拓扑定位、RFID 到点与路口转向](topology-rfid-navigation.md)。卡号只负责播报和去重，不决定左右转方向。
+本文状态机继续只负责普通 `junction`。`patrol_slot` 保留原来的巡检点视觉接近状态机，只把最后的 UID 确认删除；两套参数和门限没有合并。边界见 [拓扑定位、纯视觉到点与可选 RFID 测试](topology-rfid-navigation.md)。
 
 ## 控制边界
 
@@ -30,7 +30,7 @@ APPROACH（继续分割循迹，侧边角消失或仍可见都不直接交接）
     │ BEV 正前方 0.34..0.48 m 检测带 road mask 占比连续 3 帧 <= 10%
     ▼
 FORWARD（下位机锁航向固定直行 0.20 m）
-    │ 编码器达到 distance_mm，IMU保持动作起始航向
+    │ 编码器达到 distance_mm，IMU保持上电基准维护出的当前方向档位
     ▼
 TURNING（下位机 N×90°）
     │ 收到 MOTION_RESULT=DONE
@@ -51,7 +51,7 @@ REACQUIRE（原地重新观察）
 侧边角的锁存条件：
 
 - 稳定类型是 `t_junction`、`cross` 或 `corner`；
-- 规划要求的方向确实存在支路；
+- 命令行指定观察侧确实存在支路；
 - 最近 8 帧至少 2 帧看到候选支路；
 - 只切换到 `approach`，不发送 `MOTION_ACTION`。
 
@@ -63,7 +63,7 @@ REACQUIRE（原地重新观察）
 - 近处车道宽度位于 `0.14..0.32 m`，中心偏差不超过 `0.08 m`；
 - 当前仍是视觉循迹，或者是路口锁存后的 `stop_lookahead`。
 
-转向方向目前由命令行显式指定，用于单方向实车验证；正式任务应由拓扑路径生成，不能让对称路口的 mask 自行猜测任务方向。
+命令行的 `left/right` 继续选择普通路口要观察的支路方向；最后转向仍由 Agent 根据当前入边和下一条拓扑边生成，观察方向不覆盖规划结果。
 
 ### 侧边角与正前方检测带的分工
 
@@ -115,7 +115,7 @@ turn right
 
 ## 运行与观测
 
-自动转弯默认关闭。固定左转兼容命令：
+路口动作默认关闭。观察左侧开口的兼容命令：
 
 ```bash
 PYTHONPATH=.:navigation:vision python3 -m road_follow \
@@ -124,7 +124,7 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
   --uart-bin build-turn/uart/uart_vel
 ```
 
-显式选择方向：
+显式选择普通路口观察方向：
 
 ```bash
 PYTHONPATH=.:navigation:vision python3 -m road_follow \
@@ -143,13 +143,13 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 ```text
 [状态] 视觉循迹；速度=0.080 m/s；角速度=-0.120 rad/s；道路=820 px；中心线=61 点；可见距离=0.20～0.76 m；路口=丁字路口；开口=前、右；检测带=0.34；支路=已锁存；路段进度=0.42 m；推理=78 ms
 [动作] 定距前进完成
-[RFID] 读到 7 号标签（第 1 次）
-[巡检点] 定距搜索 → 等待停车确认；位置=2_1，标签=7，侧边=左侧，已搜索=0 mm
+[路口] 定距前进 → 正在停车；规划=右转，定距=200 mm
+[路线] 到达 2_1；下一路段 2_1__3_1：2_1 → 3_1
 ```
 
 若车辆停止，先看中文停车原因：`视觉推理过慢` 表示推理超过 200 ms，`未识别到道路` 表示 **BEV** road 像素不足，`中心线点不足` 表示最终中心线数量不足，`预瞄距离不足` 表示中心线没有覆盖正常或近距离预瞄点。
 
-没有显式转弯参数时只打印观察结果，不会发送有限前进或转弯动作。
+没有显式 `--turn-at-junction` 参数时只运行普通视觉直走，不会加载拓扑或发送路口有限动作。
 
 ## 标定顺序
 
@@ -173,7 +173,8 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 ## 测试
 
 - `vision/ipm_proto/tests/test_junction.py`：合成直道、丁字、十字、拐角、截断及正前方检测带占比。
-- `navigation/road_follow/tests/test_junction_turn.py`：侧边角只锁存、检测带连续确认、唯一一次 20 cm、转弯结果和重新捕获状态。
+- `navigation/road_follow/tests/test_junction_turn.py`：普通路口侧边角锁存、检测带连续确认、唯一一次 20 cm、里程保护、转弯结果和重新捕获状态。
+- `navigation/road_follow/tests/test_rfid_arrival.py`：巡检点保留原视觉门限，固定 20 cm 完成后无需 RFID 即确认到达。
 - `uart` C++ 测试：8 字节 `MOTION_ACTION` 编解码、会话互斥和终态处理。
 
 这些测试是无硬件单元/模拟测试；最终验收必须包含实拍回放和低速整车测试。

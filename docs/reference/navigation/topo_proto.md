@@ -26,4 +26,4 @@ PYTHONPATH=navigation python3 -m topo_proto --list-tunnels
 
 - 分层导航设计：`docs/nav.md`
 - 拓扑数据：`config/nav_topology.yaml`
-- 拓扑定位、RFID 到点与两类转向触发：`docs/reference/navigation/topology-rfid-navigation.md`
+- 纯视觉拓扑到点、地图转向与独立 RFID 测试：`docs/reference/navigation/topology-rfid-navigation.md`

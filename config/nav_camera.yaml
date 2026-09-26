@@ -71,7 +71,7 @@ road_prior:
   max_width_m: 0.32
   min_pixels: 3
 
-# 路口侧向道路还看得见时交给下位机；之后由编码器定距、IMU 保持航向。
+# 侧向支路先锁存；正前方检测带稳定无路后，交给下位机用编码器定距、IMU 保持航向。
 # 自动转弯只有命令行显式指定 --turn-at-junction/--left-at-junction 才启用。
 junction_turn:
   stable_frames: 2
@@ -114,8 +114,9 @@ junction_turn:
   # 完全没有视觉证据时，ODOM 到预计节点前 5 cm 停车等待，禁止盲转。
   odom_stop_margin_m: 0.05
 
-# 局部 RFID 到点测试：首次有效读卡后先持续发零速，再交给下位机 IMU 转 90°。
-# 转向方向由命令行 --turn-at-rfid left/right 显式指定。
+# 保留原巡检点视觉接近参数；--turn-at-junction 只取消 UID 输入，下面的
+# 侧边锁存、检测带、20 cm 和速度值仍按原样使用。独立 --turn-at-rfid
+# 硬件测试也复用本段的停车/重新捕获参数。
 rfid_turn:
   stop_settle_ms: 2000
   reacquire_frames: 3
@@ -125,7 +126,8 @@ rfid_turn:
   road_end_missing_frames: 3
   road_end_band_max_ratio: 0.10
   search_step_distance_mm: 200
-  # 下位机以 IMU 锁定动作起始航向；20 cm 内仍未读到卡就停车，不继续盲走。
+  # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
+  # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
 
 temporal:
