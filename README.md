@@ -1,98 +1,250 @@
 # 侦察机器人上位机（pi_upper）
 
-本仓库为侦察机器人上位机程序，运行在 **香橙派 Orange Pi 5 Plus**（RK3588）上，主要负责视觉识别、导航规划、状态管理、Qt 调试界面以及与 STM32 下位机通信。
+运行在 Orange Pi 5 Plus（RK3588）上的机器人上位机。当前主链路为：前视相机道路分割、BEV 中心线提取、视觉循迹、拓扑/RFID 路口状态机，以及通过 UART 驱动 STM32 下位机完成速度控制和有限运动动作。
 
-## Contents
+本仓库不使用 ROS。导航主体目前是 Python，UART、舵机等硬件接口是 C++，调试界面使用 PySide6。
 
-刀具识别模块：参见 [DINOv3 上手指南](vision/knife/README.md) 和 [模块说明](docs/reference/perception/knife.md)。配置默认关闭，GUI异步客户端已提供，主窗口接线尚未完成。
+## 当前能力
 
-- [运行环境](#运行环境)
-- [硬件说明](#硬件说明)
-- [上位机主要功能](#上位机主要功能)
-- [软件结构](#软件结构)
-- [构建与运行](#构建与运行)
-- [与下位机通信](#与下位机通信)
-- [文档](#文档)
+- RKNN 道路分割与 BEV 鸟瞰转换
+- Pure Pursuit 视觉循迹，输出线速度和角速度
+- 白底白色矮沿场地的道路宽度先验与中心线时间平滑
+- 出发区定距前进到 `0_J`、停车、按拓扑路线 IMU 原地转向，再恢复视觉循迹
+- 路口侧向开口/道路端头识别，定距前进后原地转弯
+- RFID 读取、到点停车和拓扑节点状态推进
+- 道路丢失、动作失败和未读到 RFID 时停车
+- 原始相机视频录制和逐帧控制日志
+- 障碍物检测与倒车重规划原型
+- Qt/PySide6 调试界面、舵机及刀具/人脸识别模块
 
-## 运行环境
+障碍重规划、完整任务编排和 GUI 集成仍在继续联调；不要把原型功能视为已经完成实车验收。
 
-- 主控板：Orange Pi 5 Plus（RK3588，NPU 6 TOPS）
+## 硬件与运行环境
+
+- 主控：Orange Pi 5 Plus（RK3588）
 - 系统：Ubuntu 22.04
-- 开发语言：C++ / Qt
-- 主要依赖：OpenCV、Qt、RKNN Runtime（librknnrt）
+- 前视相机：UVC，当前配置为 `/dev/video0`、1280×720、约 85° 水平视场
+- 下位机：STM32H743VIT6，ICM42688 IMU、编码器和 RFID 由下位机管理
+- UART：当前板端设备 `/dev/ttyS6`，921600 8N1，3.3 V TTL
+- 推理：RKNN Runtime；导航默认模型 `models/road_yolo11n_seg.rknn`
+- 主要软件：Python 3、OpenCV、NumPy、PyYAML、RKNNLite；C++17、CMake
 
-## 硬件说明
+摄像头、串口设备和导航参数以 [`config/nav_camera.yaml`](config/nav_camera.yaml) 为准。STM32 引脚和线协议以下位机工程及其 `UART_PROTOCOL.md` 为准，避免根据本文硬编码接线。
 
-本项目使用两个 USB 摄像头，分工明确。
+## 目录结构
 
-### 前视导航摄像头
+| 路径 | 用途 |
+| --- | --- |
+| `navigation/road_follow/` | 实车道路分割、视觉循迹和路口/RFID 状态机 |
+| `navigation/topo_proto/` | 拓扑加载、寻路和封边原型 |
+| `vision/ipm_proto/` | IPM、中心线、路口几何和时间平滑 |
+| `vision/obstacle/` | 障碍物检测与硬堵塞判定 |
+| `uart/` | UART 协议、会话以及 `uart_vel`/`uart_turn` 工具 |
+| `agent/` | 路线 Agent 和运行状态 |
+| `mission/` | 任务协调模块 |
+| `servo/` | 舵机控制与命令行工具 |
+| `gui/` | PySide6 调试界面 |
+| `config/` | 相机、导航拓扑、障碍物和舵机配置 |
+| `docs/` | 架构、协议和专题设计文档 |
+| `data/road/` | 实车录像和日志（运行时生成） |
 
-用于道路识别、障碍物识别和视觉导航。
+## 构建
 
-- 130 万像素，USB 2.0，**全局快门**，最高 180 FPS
-- 支持 1280×1024 / 1280×960 / 1280×720，视场角约 85°，UVC 兼容
-
-### 侧向识别摄像头
-
-用于侧边目标识别、嫌疑人识别和物体识别。
-
-- 最高分辨率 3852×2172，USB 2.0，滚动快门
-- 支持 MJPG / YUY2，常用模式 1280×720 @ 60 FPS
-- 支持自动曝光、自动白平衡、自动增益
-
-### 其他
-
-- 下位机：STM32H743VIT6（IMU 为 ICM42688，由下位机侧负责解算）
-- 上下位机链路：杜邦线直连 UART，香橙派 40 针 TX/RX/GND 对接 STM32 的 USART3（PD8/PD9），3.3 V TTL，921600 8N1
-- 扬声器：语音播报输出（USB 声卡或 3.5mm）
-- 舵机：180° Hobby PWM，信号接 40 针 Pin 7（`PWM14_M2`），电源独立 5–6 V；见 `docs/reference/hw/servo.md`
-
-## 上位机主要功能
-
-- Qt 调试界面
-- 双摄像头图像采集
-- YOLO-seg 道路分割
-- YOLO-seg 障碍物识别
-- 物体识别
-- ArcFace 嫌疑人人脸识别
-- 视觉导航
-- BEV 鸟瞰图转换
-- 局部栅格地图生成
-- 局部路径规划
-- 机器人任务状态机
-- 语音播报
-- 与 STM32 下位机串口通信
-
-## 软件结构
-
-上位机采用 **"C++ 后端 + Qt 调试界面"** 的单体应用结构，不使用 ROS。Qt 只负责显示和调试，不直接承担核心控制逻辑——采集、推理、规划、通信各自跑在独立线程中，脱离界面也能运行。
-
-推理加速走 RK3588 的 NPU：YOLO 系列模型在训练主机上训练，导出 ONNX 后经 RKNN-Toolkit2 量化转换为 `.rknn`，板端用 RKNN Runtime 加载推理。模型文件统一放 `models/`，不提交到仓库。
-
-## 构建与运行
-
-CMake + Qt 标准工作流（项目骨架建立后补充具体说明）：
+在仓库根目录执行：
 
 ```bash
-cmake -B build
-cmake --build build -j
+cd ~/pi_upper
+
+cmake -S . -B build-turn -DBUILD_TESTS=ON
+cmake --build build-turn -j
+ctest --test-dir build-turn --output-on-failure
 ```
 
-## 与下位机通信
+导航命令使用的 UART 桥为：
 
-杜邦线直连 UART（STM32 USART2：PD5 TX / PD6 RX），921600 8N1，二进制帧 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`（协议标识 1）。上位机 `HELLO` 后带 `boot_id` 发 `ARM_REQUEST`，以 ACK 判断是否允许动。贴线/微调发 8 字节 `CMD_VEL`；路口 90° 和急停发 `MOTION_ACTION`，有限动作等 `MOTION_RESULT`。两种命令互斥。下位机无断流看门狗，退出必须主动 STOP/DISARM。
+```text
+build-turn/uart/uart_vel
+```
 
-线协议以下位机仓库的 `UART_PROTOCOL.md` 为唯一权威，上位机侧的实现约定见 `docs/api/uart.md`。
+## 运行前检查
 
-## 文档
+首次联调或修改运动参数后，先架空驱动轮并确认周围可以立即断电。
 
-手写文档统一放 `docs/`，文档地图见 `docs/doc_layout.md`：
+检查相机：
 
-- `docs/conventions.md` — 编码与文档规范
-- `docs/architecture/overview.md` — 总体架构规划
-- `docs/api/face.md` — 人脸识别接口契约
-- `docs/api/uart.md` — 下位机串口通信的上位机侧实现约定
+```bash
+v4l2-ctl --device /dev/video0 --all
+```
 
-### 当前仓库状态
+只检查 UART 接收，不 ARM、不发送速度：
 
-`vision/arcface-lite/` 为嫌疑人脸识别的 Python 参考实现（InsightFace buffalo_sc，CPU 可跑，含 HTTP/WebSocket 接口与文档），用于先行验证识别效果与建库流程。主体工程按纯 C++/Qt 推进后，人脸识别可继续以独立服务方式被调用（HTTP），或后续用 RKNN 重写并入视觉模块。
+```bash
+python3 uart/tools/uart_monitor.py --device /dev/ttyS6 --baud 921600
+```
+
+日志中应看到 `HELLO_RX`、`state=READY`，并持续收到 `ODOM`、`IMU`、`STATUS` 等消息。不要同时运行多个占用 `/dev/ttyS6` 的进程。
+
+只运行相机和视觉推理、不驱动车辆：
+
+```bash
+mkdir -p data/road
+
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
+  --frames 100 \
+  --preview data/road/preview.jpg
+```
+
+只有显式添加 `--drive` 才会打开 UART 并驱动车辆。
+
+## 视觉直线循迹
+
+只使用道路分割和视觉中心线循迹，不启用路口或 RFID 转弯：
+
+```bash
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
+  --drive \
+  --uart-bin build-turn/uart/uart_vel
+```
+
+同时录制原始相机画面和终端日志：
+
+```bash
+mkdir -p data/road
+
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
+  --drive \
+  --uart-bin build-turn/uart/uart_vel \
+  --record-video \
+  2>&1 | tee data/road/drive_test.log
+```
+
+不指定录像文件时，视频自动保存为 `data/road/drive_时间.avi`。也可以显式指定：
+
+```bash
+--record-video data/road/my_test.avi
+```
+
+按 `Ctrl+C` 会请求停车并退出。实车测试不要依赖终端快捷键作为唯一急停手段。
+
+## 出发区与路口导航
+
+当前实车联调命令：
+
+```bash
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
+  --drive \
+  --turn-at-junction right \
+  --uart-bin build-turn/uart/uart_vel \
+  --record-video \
+  2>&1 | tee data/road/drive_junction.log
+```
+
+启用 `--turn-at-junction` 后，不再等价于单独视觉直走。程序会加载拓扑路线，并首先执行出发区动作：
+
+```text
+从 0_0 前进 15 cm 到 0_J
+→ 停车并等待 2 s
+→ Agent 推进 0_0→0_J，并读取下一条边
+→ 默认按 0_J→1_2 执行 IMU 原地右转
+→ 清空转弯期间的中心线历史
+→ 原地连续 3 帧确认新道路
+→ 以不高于 0.06 m/s 视觉循迹 10 帧
+→ 恢复正常视觉循迹
+```
+
+后续道路仍使用与直线模式相同的分割、BEV 和视觉控制器，但路口、RFID、有限动作状态机会在需要时接管速度输出。
+
+路口交接原则：侧向矮沿端头只负责提前锁存「这里有路口」；之后继续视觉循迹，直到 BEV 正前方 34–48 cm 检测带的道路 mask 占比连续 3 帧降到 10% 以下，才固定前进一次 20 cm；随后先停车，再执行原地转弯。固定动作进行时不会同时发送 `CMD_VEL`。
+
+局部 RFID 转向测试：
+
+```bash
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
+  --drive \
+  --turn-at-rfid right \
+  --uart-bin build-turn/uart/uart_vel
+```
+
+`--turn-at-junction`、`--turn-at-rfid` 和 `--backup-on-obstacle` 是不同的局部测试模式，部分组合会被命令行拒绝；以 `python3 -m road_follow --help` 为准。
+
+## 关键导航配置
+
+主要参数位于 [`config/nav_camera.yaml`](config/nav_camera.yaml)：
+
+| 配置段 | 作用 |
+| --- | --- |
+| `camera` / `bev` | 相机外参、内参与鸟瞰范围 |
+| `capture` | 摄像头设备和分辨率 |
+| `uart` | 串口设备与波特率 |
+| `follow` | 速度、预瞄距离、转向增益和角速度限幅 |
+| `entrance` | 出发区前进到 `0_J`、停车、按拓扑转向和视觉重新捕获 |
+| `road_prior` | 道路宽度范围和中心线提取先验 |
+| `junction_turn` | 路口锁存、20 cm 交接和原地转向 |
+| `rfid_turn` | RFID 到点、搜索距离和重新捕获 |
+| `temporal` | 中心线 EMA 平滑参数 |
+
+当前循迹坐标约定：地面 `X` 向右、`Y` 向前；正角速度表示左转。`x_bias_m` 是横向标定量，`steering_gain` 是视觉角速度增益，最终仍受 `max_abs_omega` 限制。每次修改参数后应保留录像与日志，不能只根据肉眼印象连续加大增益。
+
+拓扑节点和边长位于 [`config/nav_topology.yaml`](config/nav_topology.yaml)，相关约定见[拓扑定位、RFID 到点与路口转向](docs/reference/navigation/topology-rfid-navigation.md)。
+
+## 日志排查
+
+运行日志采用中文关键事件和限频状态摘要：状态发生变化时立即输出；状态不变时每 2 秒输出一次，避免停车、定距动作或 RFID 搜索期间逐帧刷屏。常用内容：
+
+| 中文内容 | 含义 |
+| --- | --- |
+| `[状态] 视觉循迹` / `近距离低速循迹` | 当前控制方式 |
+| `速度` / `角速度` | 当前准备发送的线速度和角速度 |
+| `道路` / `中心线` / `可见距离` | BEV 道路像素、中心线点数和距离范围 |
+| `路口` / `开口` / `检测带` | 稳定路口类型、可通方向和正前方 mask 占比 |
+| `支路=已锁存` | 已确认左/右支路，正等待道路端头交接 |
+| `[动作]` | 定距前进、停车或原地转弯的完成/失败结果 |
+| `[RFID]` / `[巡检点]` | 固定拓扑位置、现场标签号、曾看到的左/右侧端头以及到点阶段变化 |
+| `停车：……` | 直接给出中文停车原因 |
+
+分析偏航时，应同时比较录像、状态摘要中的角速度和下位机实际 ODOM/IMU。需要逐帧几何量时应结合录像离线回放；默认实车日志只保留运行决策所需的关键量。
+
+## 测试
+
+道路循迹状态机测试：
+
+```bash
+PYTHONPATH=.:navigation:vision python3 -m unittest discover \
+  -s navigation/road_follow/tests -p 'test_*.py'
+```
+
+IPM、路口和拓扑模块可分别执行各目录下的 `tests/`。C++ 测试使用：
+
+```bash
+ctest --test-dir build-turn --output-on-failure
+```
+
+## UART 通信
+
+线协议为二进制帧 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`，协议标识为 1。上位机完成 `HELLO` 后请求 ARM：
+
+- 连续视觉循迹使用 `CMD_VEL(v, omega)`。
+- 定距前进、原地 90° 转弯、停车使用 `MOTION_ACTION`，并等待 `MOTION_RESULT`。
+- `CMD_VEL` 与有限动作互斥。
+- 退出时上位机主动 STOP/DISARM；通信故障和动作失败必须停车。
+
+上位机实现约定见 [`docs/api/uart.md`](docs/api/uart.md)，线协议以下位机仓库的 `UART_PROTOCOL.md` 为唯一权威。
+
+## GUI 与其他模块
+
+在 Orange Pi 的 X11 桌面启动调试界面：
+
+```bash
+bash gui/run.sh
+```
+
+刀具识别参见 [`vision/knife/README.md`](vision/knife/README.md) 和 [`docs/reference/perception/knife.md`](docs/reference/perception/knife.md)。舵机参见 [`servo/README.md`](servo/README.md) 与 [`docs/reference/hw/servo.md`](docs/reference/hw/servo.md)。
+
+## 文档入口
+
+- [`docs/doc_layout.md`](docs/doc_layout.md)：文档地图
+- [`docs/nav.md`](docs/nav.md)：导航与障碍重规划设计
+- [`docs/architecture/overview.md`](docs/architecture/overview.md)：总体架构
+- [`docs/api/uart.md`](docs/api/uart.md)：UART 上位机接口约定
+- [`docs/reference/navigation/upper-planner.md`](docs/reference/navigation/upper-planner.md)：上层路线规划
+- [`docs/reference/navigation/topology-rfid-navigation.md`](docs/reference/navigation/topology-rfid-navigation.md)：拓扑、RFID 与路口执行
