@@ -55,6 +55,44 @@ class JunctionTest(unittest.TestCase):
         self.assertFalse(reading.left)
         self.assertFalse(reading.right)
         self.assertAlmostEqual(reading.corridor_end_y_m or 0.0, 1.00, delta=0.02)
+        self.assertGreater(reading.forward_band_ratio, 0.65)
+
+    def test_slanted_straight_lane_is_not_a_corner(self) -> None:
+        bev = _field()
+        for slope in (-0.25, 0.25):
+            with self.subTest(slope=slope):
+                mask = _blank(bev)
+                for v in range(bev.height_px):
+                    _, y_m = bev.bev_px_to_ground(0, v)
+                    center = -0.05 + slope * (y_m - bev.y_min)
+                    x0, _ = bev.ground_to_bev_px(center - 0.13, y_m)
+                    x1, _ = bev.ground_to_bev_px(center + 0.13, y_m)
+                    mask[v, max(0, int(x0)):min(bev.width_px, int(x1) + 1)] = 255
+                reading = classify_junction(mask, bev)
+                self.assertEqual(reading.kind, KIND_STRAIGHT)
+                self.assertTrue(reading.forward)
+                self.assertFalse(reading.left or reading.right)
+
+    def test_slanted_lane_keeps_real_side_opening(self) -> None:
+        bev = _field()
+        for slope, side in ((-0.20, "left"), (0.20, "right")):
+            with self.subTest(side=side):
+                mask = _blank(bev)
+                for v in range(bev.height_px):
+                    _, y_m = bev.bev_px_to_ground(0, v)
+                    center = slope * (y_m - bev.y_min)
+                    x0, _ = bev.ground_to_bev_px(center - 0.13, y_m)
+                    x1, _ = bev.ground_to_bev_px(center + 0.13, y_m)
+                    if 0.53 <= y_m <= 0.64:
+                        if side == "left":
+                            x0 -= 6
+                        else:
+                            x1 += 6
+                    mask[v, max(0, int(x0)):min(bev.width_px, int(x1) + 1)] = 255
+                reading = classify_junction(mask, bev)
+                self.assertEqual(reading.kind, KIND_T)
+                self.assertTrue(reading.forward)
+                self.assertEqual((reading.left, reading.right), (side == "left", side == "right"))
 
     def test_cross_keeps_the_far_arm(self) -> None:
         bev = _field()
@@ -90,6 +128,27 @@ class JunctionTest(unittest.TestCase):
         self.assertFalse(reading.left)
         self.assertAlmostEqual(reading.junction_y_m or 0.0, 0.72, delta=0.03)
 
+    def test_partially_occluded_side_opening_is_still_a_candidate(self) -> None:
+        bev = _field()
+        mask = _blank(bev)
+        _fill(mask, bev, -0.13, 0.13, 0.20, 1.00)
+        # 矮墙遮住横路，只在主路右边缘外露出约 5 cm。
+        _fill(mask, bev, 0.13, 0.18, 0.52, 0.62)
+        reading = classify_junction(mask, bev)
+        self.assertEqual(reading.kind, KIND_T)
+        self.assertTrue(reading.forward and reading.right)
+        self.assertFalse(reading.left)
+
+    def test_near_thin_but_wide_left_opening_is_a_corner(self) -> None:
+        bev = _field()
+        mask = _blank(bev)
+        _fill(mask, bev, -0.13, 0.13, 0.20, 0.49)
+        _fill(mask, bev, -0.38, -0.13, 0.45, 0.49)
+        reading = classify_junction(mask, bev)
+        self.assertEqual(reading.kind, KIND_CORNER)
+        self.assertTrue(reading.left)
+        self.assertFalse(reading.right or reading.forward)
+
     def test_corner_opens_one_side(self) -> None:
         bev = _field()
         mask = _blank(bev)
@@ -109,6 +168,14 @@ class JunctionTest(unittest.TestCase):
         self.assertEqual(reading.kind, KIND_BLOCKED)
         self.assertFalse(reading.forward or reading.left or reading.right)
         self.assertAlmostEqual(reading.corridor_end_y_m or 0.0, 0.50, delta=0.02)
+
+    def test_forward_band_reports_disappeared_road_mask(self) -> None:
+        bev = _field()
+        mask = _blank(bev)
+        _fill(mask, bev, -0.10, 0.10, 0.20, 0.31)
+        reading = classify_junction(mask, bev)
+        self.assertEqual(reading.kind, KIND_BLOCKED)
+        self.assertLessEqual(reading.forward_band_ratio, 0.10)
 
     def test_corridor_end_ignores_a_disconnected_far_blob(self) -> None:
         bev = _field()

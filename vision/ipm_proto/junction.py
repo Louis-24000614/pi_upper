@@ -34,6 +34,8 @@ class JunctionRead:
     junction_y_m: float | None = None
     # 当前车道中央走廊在原始 BEV road mask 中的最远距离。
     corridor_end_y_m: float | None = None
+    # 正前方指定 BEV 距离带内，中央走廊的 road mask 占比。
+    forward_band_ratio: float = 0.0
 
 
 class JunctionTracker:
@@ -62,11 +64,13 @@ def classify_junction(
     *,
     lane_width_m: float = 0.20,
     binary_thresh: int = 127,
+    forward_band_min_y_m: float = 0.34,
+    forward_band_max_y_m: float = 0.48,
 ) -> JunctionRead:
     """数前方 0.5–0.9 m 左、右、前是否还有路。
 
-    近处 0.2 m 用来量本车道。左右开口要在车道外侧连续至少约 0.08 m，
-    十字还要求横路过去之后正前方仍有路。
+    近处车道用于估计宽度和航向；沿着估计的车道中心判断远处是否扩宽。
+    这样车身稍微斜着看直路时，不会把远处整条路误当侧向开口。
     """
     road = _as_road(bev_mask, binary_thresh)
     if road.shape != (bev.height_px, bev.width_px):
@@ -78,26 +82,53 @@ def classify_junction(
     if not near_ok:
         return JunctionRead(KIND_UNKNOWN, False, False, False, lane_x, lane_w)
 
+    center_at_y = _lane_center_projection(road, bev, lane_w, lane_x)
     half = lane_w * 0.5
-    margin = 0.08
-    left_ys = _side_ys(road, bev, lane_x, half, margin, left=True)
-    right_ys = _side_ys(road, bev, lane_x, half, margin, left=False)
-    left = _covers(left_ys, 0.06)
-    right = _covers(right_ys, 0.06)
-    corridor_ys = _corridor_ys(road, bev, lane_x, half)
+    # 实车上矮墙会遮住横路的大部分宽度；只要求主路边缘外露出一小段，
+    # 此处只生成候选，Navigation 还会做多帧锁存和近距离交接。
+    margin = 0.01
+    left_ys = _side_ys(
+        road, bev, center_at_y, half, margin, left=True, min_outside_width_m=0.03
+    )
+    right_ys = _side_ys(
+        road, bev, center_at_y, half, margin, left=False, min_outside_width_m=0.03
+    )
+    left = _covers(left_ys, 0.04, resolution_m=bev.m_per_px)
+    right = _covers(right_ys, 0.04, resolution_m=bev.m_per_px)
+    corridor_ys = _corridor_ys(road, bev, center_at_y, half)
     last_corridor = _continuous_corridor_end(corridor_ys, bev)
+    forward_band_ratio = _corridor_band_ratio(
+        road,
+        bev,
+        center_at_y,
+        half,
+        forward_band_min_y_m,
+        forward_band_max_y_m,
+    )
 
     if not left and not right:
         forward = last_corridor >= bev.y_max - 0.18
         kind = KIND_STRAIGHT if forward else KIND_BLOCKED
         return JunctionRead(
-            kind, forward, False, False, lane_x, lane_w, None, last_corridor
+            kind,
+            forward,
+            False,
+            False,
+            lane_x,
+            lane_w,
+            None,
+            last_corridor,
+            forward_band_ratio,
         )
 
     side_ys = left_ys + right_ys
     junction_y = 0.5 * (min(side_ys) + max(side_ys))
     past = (max(side_ys) + 0.04) if side_ys else bev.y_min
-    forward = _covers([y for y in corridor_ys if y >= past], 0.06)
+    # 当侧路只在鸟瞰远端露出时，past 可能超出视野；连续主路到远端
+    # 本身就是前方可通的证据，不能因此误报 corner。
+    forward = last_corridor >= bev.y_max - 0.12 or _covers(
+        [y for y in corridor_ys if y >= past], 0.06
+    )
     if forward and left and right:
         kind = KIND_CROSS
     elif forward:
@@ -107,7 +138,15 @@ def classify_junction(
     else:
         kind = KIND_CORNER
     return JunctionRead(
-        kind, forward, left, right, lane_x, lane_w, junction_y, last_corridor
+        kind,
+        forward,
+        left,
+        right,
+        lane_x,
+        lane_w,
+        junction_y,
+        last_corridor,
+        forward_band_ratio,
     )
 
 
@@ -146,35 +185,56 @@ def _lane_from_near(
     return float(np.median(centers)), lane_w, True
 
 
+def _lane_center_projection(road: np.ndarray, bev: BevConfig, lane_w: float, lane_x: float):
+    """用路口之前的近处直路估计远处中心，允许小幅车身偏航。"""
+    samples: list[tuple[float, float]] = []
+    for v in _rows_between(bev, bev.y_min, min(bev.y_max, bev.y_min + 0.27)):
+        xs = np.flatnonzero(road[v])
+        width = len(xs) * bev.m_per_px
+        if len(xs) < 3 or abs(width - lane_w) > 0.05:
+            continue
+        x_m, y_m = bev.bev_px_to_ground(float(np.median(xs)), float(v))
+        samples.append((y_m, x_m))
+    if len(samples) < 5:
+        return lambda _y: lane_x
+    ys, centers = np.asarray(samples, dtype=np.float64).T
+    slope = float(np.polyfit(ys, centers, 1)[0])
+    anchor_y = float(np.median(ys))
+    anchor_x = float(np.median(centers))
+    return lambda y: anchor_x + slope * (y - anchor_y)
+
+
 def _side_ys(
     road: np.ndarray,
     bev: BevConfig,
-    lane_x: float,
+    center_at_y,
     half: float,
     margin: float,
     *,
     left: bool,
+    min_outside_width_m: float = 0.06,
 ) -> list[float]:
-    y0 = min(bev.y_max, bev.y_min + 0.28)
-    y1 = min(bev.y_max, y0 + 0.45)
+    y0 = min(bev.y_max, bev.y_min + 0.20)
+    y1 = min(bev.y_max, y0 + 0.55)
     found: list[float] = []
-    min_px = max(3, int(round(0.06 / bev.m_per_px)))
+    min_px = max(3, int(round(min_outside_width_m / bev.m_per_px)))
     for v in _rows_between(bev, y0, y1):
         xs = np.flatnonzero(road[v])
         if xs.size == 0:
             continue
         ground_x = bev.x_min + xs.astype(np.float64) * bev.m_per_px
+        _, y_m = bev.bev_px_to_ground(0.0, float(v))
+        lane_x = center_at_y(y_m)
         if left:
             outside = ground_x < lane_x - half - margin
         else:
             outside = ground_x > lane_x + half + margin
         if int(np.count_nonzero(outside)) >= min_px:
-            _, y_m = bev.bev_px_to_ground(0.0, float(v))
             found.append(y_m)
     return found
 
 
-def _corridor_ys(road: np.ndarray, bev: BevConfig, lane_x: float, half: float) -> list[float]:
+def _corridor_ys(road: np.ndarray, bev: BevConfig, center_at_y, half: float) -> list[float]:
     found: list[float] = []
     limit = half + 0.04
     for v in range(bev.height_px):
@@ -182,10 +242,38 @@ def _corridor_ys(road: np.ndarray, bev: BevConfig, lane_x: float, half: float) -
         if xs.size == 0:
             continue
         ground_x = bev.x_min + xs.astype(np.float64) * bev.m_per_px
+        _, y_m = bev.bev_px_to_ground(0.0, float(v))
+        lane_x = center_at_y(y_m)
         if np.any(np.abs(ground_x - lane_x) <= limit):
-            _, y_m = bev.bev_px_to_ground(0.0, float(v))
             found.append(y_m)
     return found
+
+
+def _corridor_band_ratio(
+    road: np.ndarray,
+    bev: BevConfig,
+    center_at_y,
+    half: float,
+    y0: float,
+    y1: float,
+) -> float:
+    """统计正前方一条 BEV 距离带内的道路占比。
+
+    只数预测主车道宽度内的像素，避免左右支路还在画面中时把
+    横向 road mask 误当成正前方仍可通。
+    """
+    road_count = 0
+    cell_count = 0
+    limit = half + 0.04
+    ground_x = bev.x_min + np.arange(road.shape[1], dtype=np.float64) * bev.m_per_px
+    for v in _rows_between(bev, y0, y1):
+        _, y_m = bev.bev_px_to_ground(0.0, float(v))
+        inside = np.abs(ground_x - center_at_y(y_m)) <= limit
+        cell_count += int(np.count_nonzero(inside))
+        road_count += int(np.count_nonzero(road[v] & inside))
+    if cell_count == 0:
+        return 0.0
+    return road_count / cell_count
 
 
 def _continuous_corridor_end(ys: list[float], bev: BevConfig) -> float:
@@ -219,7 +307,9 @@ def _rows_between(bev: BevConfig, y0: float, y1: float) -> range:
     return range(v_far, v_near + 1)
 
 
-def _covers(ys: list[float], span_m: float) -> bool:
+def _covers(
+    ys: list[float], span_m: float, *, resolution_m: float = 0.0
+) -> bool:
     """这些距离里有没有一段连续开口，长度达到 span_m。"""
     if len(ys) < 2:
         return False
@@ -233,4 +323,6 @@ def _covers(ys: list[float], span_m: float) -> bool:
             start = cur
         prev = cur
     best = max(best, prev - start)
-    return best >= span_m
+    # 离散栅格的首末行相差 N-1 个间距；补半个像素避免 0.06 被表示成
+    # 0.059999... 后恰好落在阈值外。
+    return best + 0.5 * max(0.0, resolution_m) >= span_m
