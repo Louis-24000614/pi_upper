@@ -5,7 +5,7 @@ from __future__ import annotations
 import queue
 from dataclasses import dataclass
 
-from road_follow.control import VelocityCommand
+from road_follow.control import VelocityCommand, is_visual_follow
 
 
 @dataclass(frozen=True)
@@ -121,7 +121,7 @@ def step_rfid_turn(
             return state, VelocityCommand(0.0, 0.0, "rfid_turning")
 
     if state.phase == "reacquire":
-        if command.reason == "follow":
+        if is_visual_follow(command):
             state.clear += 1
         else:
             state.clear = 0
