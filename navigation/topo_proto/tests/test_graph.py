@@ -12,11 +12,35 @@ class TopologyGraphTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.graph = load_topology()
 
-    def test_loads_figure3_v2(self) -> None:
-        self.assertEqual(self.graph.meta.get("name"), "figure3_rowcol_v2")
+    def test_loads_figure3_v3(self) -> None:
+        self.assertEqual(self.graph.meta.get("name"), "figure3_rowcol_v3")
         self.assertIn("0_0", self.graph.nodes)
+        self.assertIn("0_J", self.graph.nodes)
         self.assertIn("5_2", self.graph.nodes)
         self.assertGreaterEqual(len(self.graph.edges), 20)
+
+    def test_start_is_a_stem_into_the_top_t_junction(self) -> None:
+        self.assertEqual(
+            self.graph.neighbors("0_0"), [("0_J", 0.15, "0_0__0_J")]
+        )
+        self.assertEqual(
+            {neighbor for neighbor, _, _ in self.graph.neighbors("0_J")},
+            {"0_0", "1_2", "1_3"},
+        )
+
+    def test_tunnels_are_the_four_central_horizontal_edges(self) -> None:
+        tunnels = {
+            edge.id for edge in self.graph.edges.values() if edge.tunnel
+        }
+        self.assertEqual(
+            tunnels,
+            {
+                "2_2__2_3",
+                "3_2__3_3",
+                "4_2__4_3",
+                "5_2__5_3",
+            },
+        )
 
     def test_start_to_goal_reachable(self) -> None:
         path = shortest_path(self.graph, "0_0", "5_2")
@@ -56,7 +80,8 @@ class TopologyGraphTests(unittest.TestCase):
         assert after is not None
         self.assertNotEqual(before.edge_ids, after.edge_ids)
         self.assertNotIn("1_3__2_3", after.edge_ids)
-        self.assertIn("0_0__1_2", after.edge_ids)
+        self.assertIn("0_0__0_J", after.edge_ids)
+        self.assertIn("0_J__1_2", after.edge_ids)
         self.graph.clear_blocked()
 
 

@@ -1,4 +1,4 @@
-# 赛题图 3 先验拓扑（行列命名 v2）
+# 赛题图 3 先验拓扑（行列命名 v3）
 #
 # 节点名 = 行_列
 #   - 行：从上往下增大（离开出发区）
@@ -8,9 +8,10 @@
 #       _3 中间偏右十字路口
 #       _4 右侧巡逻格
 #   - 0_0：出发区
+#   - 0_J：出发区正前方的顶端丁字路口（不是 RFID 巡逻点）
 #
 # 与图 6 巡逻点位置的大致对应（拓扑名 ≠ 播报点号）：
-#   出发区只有左右两条出口：1_2≈①  1_3≈⑫
+#   出发区先由 0_0 直行到 0_J，再从 0_J 分别通往：1_2≈①  1_3≈⑫
 #   这一排没有 1_1、1_4
 #   2_1≈②  2_4≈⑪
 #   3_1≈③  3_4≈⑩
@@ -25,9 +26,12 @@
 # blocked 为运行时状态，勿写入本文件。
 
 meta:
-  name: figure3_rowcol_v2
+  name: figure3_rowcol_v3
   field_size_m: { width: 3.2, height: 4.4 }
   naming: row_col
+  start_junction: "0_J"
+  # 实车从 0_0 前进 15 cm 到 0_J 后，第一圈固定右转进入图上左侧的 1_2（①）。
+  start_exit: "1_2"
   columns:
     "1": left_patrol_or_bottom
     "2": mid_left_cross_or_bottom
@@ -39,6 +43,7 @@ meta:
 
 nodes:
   "0_0": { x: 1.60, y: 4.20, role: start }
+  "0_J": { x: 1.60, y: 3.60, role: junction }
 
   # 行 1：出发区左右两条出口，就是 ① 和 ⑫
   "1_2": { x: 1.20, y: 3.60, role: patrol_slot }
@@ -69,20 +74,27 @@ nodes:
   "5_4": { x: 2.80, y: 0.40, role: patrol_slot }
 
 edges:
-  # --- 出发区接到第 1 行两个十字 ---
-  - id: "0_0__1_2"
+  # --- 出发区：先直行 15 cm 到顶端丁字口，再原地转向左右巡逻点 ---
+  - id: "0_0__0_J"
     u: "0_0"
-    v: "1_2"
-    length_m: 0.65
+    v: "0_J"
+    length_m: 0.15
     bidirectional: true
-  - id: "0_0__1_3"
-    u: "0_0"
+
+  - id: "0_J__1_2"
+    u: "0_J"
+    v: "1_2"
+    length_m: 0.40
+    bidirectional: true
+
+  - id: "0_J__1_3"
+    u: "0_J"
     v: "1_3"
-    length_m: 0.65
+    length_m: 0.40
     bidirectional: true
 
   # --- 各行横边：左点 — 左十字 — 右十字 — 右点 ---
-  # 第 1 行只有 0_0—1_2 和 0_0—1_3，两条出口不相连成一条绕开出发区的横边。
+  # 第 1 行只有 0_J—1_2 和 0_J—1_3；0_0 只连接 0_J。
 
   - id: "2_1__2_2"
     u: "2_1"
@@ -94,12 +106,12 @@ edges:
     v: "2_3"
     length_m: 0.80
     bidirectional: true
+    tunnel: true
   - id: "2_3__2_4"
     u: "2_3"
     v: "2_4"
     length_m: 0.80
     bidirectional: true
-    tunnel: true # 通往 ≈⑪
 
   - id: "3_1__3_2"
     u: "3_1"
@@ -111,12 +123,12 @@ edges:
     v: "3_3"
     length_m: 0.80
     bidirectional: true
+    tunnel: true
   - id: "3_3__3_4"
     u: "3_3"
     v: "3_4"
     length_m: 0.80
     bidirectional: true
-    tunnel: true # 通往 ≈⑩
 
   - id: "4_1__4_2"
     u: "4_1"
@@ -128,12 +140,12 @@ edges:
     v: "4_3"
     length_m: 0.80
     bidirectional: true
+    tunnel: true
   - id: "4_3__4_4"
     u: "4_3"
     v: "4_4"
     length_m: 0.80
     bidirectional: true
-    tunnel: true # 通往 ≈⑨
 
   - id: "5_1__5_2"
     u: "5_1"
@@ -145,6 +157,7 @@ edges:
     v: "5_3"
     length_m: 0.80
     bidirectional: true
+    tunnel: true
   - id: "5_3__5_4"
     u: "5_3"
     v: "5_4"
@@ -212,7 +225,7 @@ edges:
     length_m: 0.80
     bidirectional: true
 
-  # --- 右列竖边（从第 2 行开始；第四段隧道初标在最底下）---
+  # --- 右列竖边（从第 2 行开始）---
   - id: "2_4__3_4"
     u: "2_4"
     v: "3_4"
@@ -228,4 +241,3 @@ edges:
     v: "5_4"
     length_m: 0.80
     bidirectional: true
-    tunnel: true
