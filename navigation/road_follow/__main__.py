@@ -39,6 +39,7 @@ from road_follow.junction_turn import (
     JunctionCue,
     JunctionTurn,
     junction_turn_config_from_mapping,
+    odom_handoff_turn_cue,
     road_end_turn_cue,
     should_stop_at_expected_junction,
     step_junction_turn,
@@ -654,6 +655,26 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         rfid_arrival = RfidArrival()
                 else:
+                    if target is not None:
+                        odom_cue = odom_handoff_turn_cue(
+                            side=junction_turn.side,
+                            progress_m=progress.s_m,
+                            edge_length_m=edge.length_m,
+                            target_role=target.role,
+                            state=junction_turn,
+                            command=command,
+                            cfg=junction_turn_cfg,
+                        )
+                        if odom_cue.detected:
+                            cue = odom_cue
+                    junction_turn, command = step_junction_turn(
+                        junction_turn,
+                        cue,
+                        command,
+                        action_notes,
+                        lambda line: write_velocity(bridge, line),
+                        junction_turn_cfg,
+                    )
                     if target is not None and should_stop_at_expected_junction(
                         progress.s_m,
                         edge.length_m,
@@ -663,19 +684,14 @@ def main(argv: list[str] | None = None) -> int:
                     ):
                         junction_turn.phase = "odom_wait"
                         junction_turn.stop_started_s = time.monotonic()
+                        command = VelocityCommand(
+                            0.0, 0.0, "stop_odom_junction_wait"
+                        )
                         _event(
                             "安全停车",
                             f"路段 {edge.id} 已行驶 {progress.s_m:.2f} m，"
-                            f"预计节点在 {edge.length_m:.2f} m，视觉尚未确认路口",
+                            f"预计节点在 {edge.length_m:.2f} m，路口交接尚未完成",
                         )
-                    junction_turn, command = step_junction_turn(
-                        junction_turn,
-                        cue,
-                        command,
-                        action_notes,
-                        lambda line: write_velocity(bridge, line),
-                        junction_turn_cfg,
-                    )
                     if junction_turn.phase == "arrived" and route_agent is not None:
                         junction_turn = handoff_arrival(
                             junction_turn,

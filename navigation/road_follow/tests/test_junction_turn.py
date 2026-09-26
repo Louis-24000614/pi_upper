@@ -11,6 +11,7 @@ from road_follow.junction_turn import (
     JunctionCue,
     JunctionTurn,
     JunctionTurnConfig,
+    odom_handoff_turn_cue,
     road_end_turn_cue,
     should_stop_at_expected_junction,
     step_junction_turn,
@@ -376,9 +377,85 @@ class JunctionTurnTest(unittest.TestCase):
             should_stop_at_expected_junction(0.75, 0.80, "junction", state, cfg)
         )
         state.branch_latched = True
-        self.assertFalse(
+        self.assertTrue(
             should_stop_at_expected_junction(0.80, 0.80, "junction", state, cfg)
         )
+
+    def test_latched_cross_uses_odom_for_last_twenty_centimeters(self) -> None:
+        """十字路口前方仍有道路时，也必须在边末端完成到点交接。"""
+        cfg = JunctionTurnConfig(
+            stable_frames=2,
+            turn_forward_m=0.20,
+            road_end_missing_frames=3,
+        )
+        state = JunctionTurn(
+            phase="approach",
+            side="right",
+            branch_latched=True,
+        )
+
+        before = odom_handoff_turn_cue(
+            side=state.side,
+            progress_m=0.59,
+            edge_length_m=0.80,
+            target_role="junction",
+            state=state,
+            command=self.follow,
+            cfg=cfg,
+        )
+        self.assertFalse(before.detected)
+
+        cue = odom_handoff_turn_cue(
+            side=state.side,
+            progress_m=0.60,
+            edge_length_m=0.80,
+            target_role="junction",
+            state=state,
+            command=self.follow,
+            cfg=cfg,
+        )
+        self.assertTrue(cue.detected)
+        self.assertEqual(cue.source, "odom_handoff")
+        self.assertAlmostEqual(cue.distance_m or 0.0, 0.20)
+
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, cfg
+        )
+        self.assertEqual(state.phase, "approach")
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, cfg
+        )
+        self.assertEqual(state.phase, "forward")
+        self.assertEqual(command.reason, "blind_forward")
+        self.assertEqual(self.sent, ["forward 200 50"])
+
+    def test_odom_handoff_requires_a_latched_junction_and_safe_follow(self) -> None:
+        cfg = JunctionTurnConfig(turn_forward_m=0.20)
+        cases = (
+            (JunctionTurn(phase="approach", side="right"), self.follow, "junction"),
+            (
+                JunctionTurn(phase="approach", side="right", branch_latched=True),
+                VelocityCommand(0.0, 0.0, "stop_no_road"),
+                "junction",
+            ),
+            (
+                JunctionTurn(phase="approach", side="right", branch_latched=True),
+                self.follow,
+                "patrol_slot",
+            ),
+        )
+        for state, command, role in cases:
+            with self.subTest(role=role, reason=command.reason):
+                cue = odom_handoff_turn_cue(
+                    side=state.side,
+                    progress_m=0.65,
+                    edge_length_m=0.80,
+                    target_role=role,
+                    state=state,
+                    command=command,
+                    cfg=cfg,
+                )
+                self.assertFalse(cue.detected)
 
 
 if __name__ == "__main__":

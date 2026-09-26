@@ -168,6 +168,33 @@ def road_end_turn_cue(
     return JunctionCue(True, side, cfg.blind_forward_m, "road_end")
 
 
+def odom_handoff_turn_cue(
+    *,
+    side: str,
+    progress_m: float,
+    edge_length_m: float,
+    target_role: str,
+    state: JunctionTurn,
+    command: VelocityCommand,
+    cfg: JunctionTurnConfig,
+) -> JunctionCue:
+    """十字路口前方道路不会消失，用边末端 ODOM 触发最后定距交接。"""
+    handoff_distance_m = cfg.turn_forward_m
+    trigger_m = max(0.0, edge_length_m - handoff_distance_m)
+    detected = (
+        target_role == "junction"
+        and state.phase in ("follow", "approach")
+        and state.branch_latched
+        and side in ("left", "right")
+        and is_visual_follow(command)
+        and progress_m + 1e-6 >= trigger_m
+        and progress_m < edge_length_m
+    )
+    if not detected:
+        return JunctionCue(False)
+    return JunctionCue(True, side, handoff_distance_m, "odom_handoff")
+
+
 def step_junction_turn(
     state: JunctionTurn,
     cue: JunctionCue,
@@ -235,7 +262,7 @@ def step_junction_turn(
             # 一旦确认过支路就保持到本节点动作结束；墙体遮挡不能清掉锁存。
             state.approach_age += 1
 
-        if cue.source == "road_end":
+        if cue.source in ("road_end", "odom_handoff"):
             distance_ok = cue.distance_m is not None and cue.distance_m > 0.0
         elif cue.source == "side_branch":
             # 侧边角只用来确认「这是路口」，不再直接触发最后 20 cm。
@@ -366,8 +393,6 @@ def should_stop_at_expected_junction(
 ) -> bool:
     """视觉全程没确认路口时，ODOM 到拓扑节点只停车，不允许盲转。"""
     if target_role != "junction" or state.phase not in ("follow", "approach"):
-        return False
-    if state.branch_latched:
         return False
     threshold = max(0.0, edge_length_m - cfg.odom_stop_margin_m)
     return progress_m >= threshold
