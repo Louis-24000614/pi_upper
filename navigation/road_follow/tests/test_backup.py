@@ -1,17 +1,15 @@
-"""遇障摆正，并按沿边进度发出定距倒车。"""
+"""遇障后的视觉闭环倒车。"""
 
 from __future__ import annotations
 
-import queue
 import unittest
 
 from road_follow.backup import (
     Backup,
     BackupConfig,
     EdgeProgress,
-    align_omega,
-    backup_distance_mm,
     near_lane_x,
+    reverse_omega,
     step_backup,
 )
 from road_follow.control import VelocityCommand
@@ -19,14 +17,27 @@ from road_follow.control import VelocityCommand
 
 class BackupTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = BackupConfig(align_frames=2, align_timeout_s=1.0)
-        self.notes: queue.Queue[str] = queue.Queue()
-        self.sent: list[str] = []
+        self.cfg = BackupConfig(max_missing_frames=2, max_duration_s=5.0)
         self.follow = VelocityCommand(0.10, 0.0, "follow")
 
-    def send(self, line: str) -> bool:
-        self.sent.append(line)
-        return True
+    def step(
+        self,
+        state: Backup,
+        *,
+        triggered: bool = False,
+        near_x_m: float | None = 0.0,
+        progress_s_m: float = 0.5,
+        now_s: float = 1.0,
+    ) -> tuple[Backup, VelocityCommand]:
+        return step_backup(
+            state,
+            triggered,
+            near_x_m,
+            progress_s_m,
+            self.follow,
+            now_s,
+            self.cfg,
+        )
 
     def test_progress_grows_forward_and_shrinks_in_reverse(self) -> None:
         progress = EdgeProgress()
@@ -40,84 +51,66 @@ class BackupTest(unittest.TestCase):
         points = [(0.20, 0.60), (0.04, 0.25), (0.02, 0.32)]
         self.assertAlmostEqual(near_lane_x(points), 0.03)
 
-    def test_distance_is_capped_at_one_cell(self) -> None:
-        self.assertEqual(backup_distance_mm(0.63, BackupConfig()), 630)
-        self.assertEqual(backup_distance_mm(0.90, BackupConfig()), 700)
-        self.assertEqual(backup_distance_mm(0.0, BackupConfig()), 0)
-
-    def test_align_turns_toward_the_near_centerline_then_backs_up(self) -> None:
-        state = Backup()
-        state, command = step_backup(
-            state, True, 0.08, 0.42, self.follow, self.notes, self.send, 1.0, self.cfg
-        )
-        self.assertEqual(state.phase, "align")
-        self.assertEqual(state.distance_mm, 420)
+    def test_trigger_stops_before_visual_reverse(self) -> None:
+        state, command = self.step(Backup(), triggered=True, progress_s_m=0.50)
+        self.assertEqual(state.phase, "backing")
+        self.assertEqual(command.v_mps, 0.0)
+        self.assertEqual(command.omega_radps, 0.0)
         self.assertEqual(command.reason, "stop_backup")
 
-        state, command = step_backup(
-            state, False, 0.08, 0.42, self.follow, self.notes, self.send, 1.1, self.cfg
+        state, command = self.step(
+            state, near_x_m=0.04, progress_s_m=0.49, now_s=1.1
         )
-        self.assertEqual(command.v_mps, 0.0)
-        self.assertLess(command.omega_radps, 0.0)
-        self.assertEqual(command.reason, "backup_align")
-        self.assertEqual(self.sent, [])
+        self.assertEqual(command.reason, "visual_backup")
+        self.assertLess(command.v_mps, 0.0)
+        self.assertGreater(command.omega_radps, 0.0)
 
-        state, command = step_backup(
-            state, False, 0.01, 0.42, self.follow, self.notes, self.send, 1.2, self.cfg
-        )
-        self.assertEqual(state.phase, "align")
-        state, command = step_backup(
-            state, False, -0.01, 0.42, self.follow, self.notes, self.send, 1.3, self.cfg
-        )
-        self.assertEqual(state.phase, "backing")
-        self.assertEqual(self.sent, ["backward 420 100"])
-        self.assertEqual(command.reason, "backup_backing")
+    def test_reverse_steering_sign_is_opposite_to_forward(self) -> None:
+        self.assertGreater(reverse_omega(0.05, self.cfg), 0.0)
+        self.assertLess(reverse_omega(-0.05, self.cfg), 0.0)
+        self.assertEqual(reverse_omega(0.0, self.cfg), 0.0)
 
-        self.notes.put("BACKWARD_DONE")
-        state, command = step_backup(
-            state, False, None, 0.42, self.follow, self.notes, self.send, 2.0, self.cfg
+    def test_odometry_progress_completes_backup(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=0.55)
+        state, command = self.step(
+            state, near_x_m=-0.02, progress_s_m=0.14, now_s=3.0
         )
         self.assertEqual(state.phase, "done")
         self.assertEqual(command.reason, "backup_done")
+        self.assertEqual(command.v_mps, 0.0)
 
-    def test_right_of_center_commands_a_right_turn(self) -> None:
-        self.assertLess(align_omega(0.05, BackupConfig()), 0.0)
-        self.assertGreater(align_omega(-0.05, BackupConfig()), 0.0)
+    def test_trigger_at_entry_needs_no_reverse(self) -> None:
+        state, command = self.step(Backup(), triggered=True, progress_s_m=0.10)
+        self.assertEqual(state.phase, "done")
+        self.assertEqual(command.reason, "backup_done_at_entry")
 
-    def test_blocked_near_road_reverses_with_the_distance_already_driven(self) -> None:
-        state = Backup()
-        state, _command = step_backup(
-            state, True, -0.03, 0.35, self.follow, self.notes, self.send, 1.0, self.cfg
-        )
-        state, command = step_backup(
-            state, False, None, 0.35, self.follow, self.notes, self.send, 1.1, self.cfg
-        )
-        self.assertEqual(state.phase, "backing")
-        self.assertEqual(self.sent, ["backward 350 100"])
-        self.assertEqual(command.reason, "backup_backing")
-
-    def test_failure_and_missing_distance_stop(self) -> None:
-        state = Backup()
-        state, command = step_backup(
-            state, True, 0.0, 0.0, self.follow, self.notes, self.send, 1.0, self.cfg
-        )
-        state, command = step_backup(
-            state, False, 0.0, 0.0, self.follow, self.notes, self.send, 1.1, self.cfg
-        )
-        state, command = step_backup(
-            state, False, 0.0, 0.0, self.follow, self.notes, self.send, 1.2, self.cfg
-        )
+    def test_missing_vision_stops_then_faults(self) -> None:
+        state, _ = self.step(Backup(), triggered=True)
+        for frame in range(2):
+            state, command = self.step(
+                state, near_x_m=None, now_s=1.1 + frame * 0.1
+            )
+            self.assertEqual(state.phase, "backing")
+            self.assertEqual(command.reason, "stop_backup_no_vision")
+        state, command = self.step(state, near_x_m=None, now_s=1.3)
         self.assertEqual(state.phase, "fault")
-        self.assertEqual(command.reason, "stop_backup_no_distance")
-        self.assertEqual(self.sent, [])
+        self.assertEqual(command.reason, "stop_backup_road_lost")
 
-        state = Backup(phase="backing")
-        self.notes.put("BACKWARD_FAIL")
-        state, command = step_backup(
-            state, False, None, 0.4, self.follow, self.notes, self.send, 3.0, self.cfg
-        )
+    def test_timeout_and_distance_limit_do_not_fake_arrival(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=0.90)
+        state, command = self.step(state, progress_s_m=0.19, now_s=2.0)
         self.assertEqual(state.phase, "fault")
-        self.assertEqual(command.reason, "stop_backup_fail")
+        self.assertEqual(command.reason, "stop_backup_distance_limit")
+
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=0.50)
+        state, command = self.step(state, progress_s_m=0.40, now_s=6.0)
+        self.assertEqual(state.phase, "fault")
+        self.assertEqual(command.reason, "stop_backup_timeout")
+
+    def test_idle_preserves_forward_command(self) -> None:
+        state, command = self.step(Backup(), triggered=False)
+        self.assertEqual(state.phase, "idle")
+        self.assertEqual(command, self.follow)
 
 
 if __name__ == "__main__":
