@@ -49,7 +49,7 @@ follow:
   # 正常视觉循迹稍微降速，给分割和转向纠偏留出更多反应时间。
   cruise_mps: 0.08
   turn_mps: 0.05
-  lookahead_m: 0.45
+  lookahead_m: 0.35
   turn_abs_x_m: 0.08
   min_points: 8
   min_road_pixels: 400
@@ -57,8 +57,8 @@ follow:
   # 实车录像中道路中心已经向左移，但原 +3 cm 偏置抵消了大部分左转纠偏。
   x_bias_m: 0.00
   # 增强视觉纠偏；仍受 max_abs_omega 限制。
-  steering_gain: 2.5
-  # 固定 45 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
+  steering_gain: 2.0
+  # 固定 35 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
   min_lookahead_m: 0.28
   near_mps: 0.05
 

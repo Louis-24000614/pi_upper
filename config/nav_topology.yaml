@@ -185,7 +185,7 @@ edges:
   - id: "1_2__2_2"
     u: "1_2"
     v: "2_2"
-    length_m: 0.80
+    length_m: 1.00
     bidirectional: true
   - id: "2_2__3_2"
     u: "2_2"
