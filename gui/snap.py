@@ -33,6 +33,40 @@ def snapshot_path(
     return root / f"{prefix}_{stamp}.png"
 
 
+def recording_path(
+    role: str,
+    directory: Path | None = None,
+    when: datetime | None = None,
+) -> Path:
+    """按逻辑摄像头角色和时间戳生成 MJPG/AVI 录像路径。"""
+    stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    prefix = _ROLE_PREFIX.get(role, "cam")
+    root = directory if directory is not None else DEFAULT_DIR
+    return root / f"{prefix}_{stamp}.avi"
+
+
+def open_recorder(
+    dest: Path,
+    width: int,
+    height: int,
+    fps: float,
+) -> cv2.VideoWriter | None:
+    """创建 MJPG/AVI 写入器；参数或后端无效时返回 ``None``。"""
+    if width <= 0 or height <= 0 or fps <= 0:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(dest),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        float(fps),
+        (int(width), int(height)),
+    )
+    if not writer.isOpened():
+        writer.release()
+        return None
+    return writer
+
+
 def save_frame(frame: object, dest: Path) -> tuple[bool, str]:
     """将一份 BGR 帧拷贝后写入 `dest`。
 

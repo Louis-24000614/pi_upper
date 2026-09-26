@@ -1,41 +1,45 @@
 #!/usr/bin/env bash
-# 通过 HTTP/MJPEG 把香橙派摄像头画面提供给远程主机浏览器。
+# 在局域网浏览器里看一路摄像头，并在页面上拍照。
+# 保存的是原始 BGR 帧（默认 1280×720），写到仓库 data/road/。
+# 运行期间不要再开上位机或 snap_view.sh，它们会抢同一个摄像头。
 
 set -euo pipefail
 
 DEVICE="${1:-/dev/video0}"
 PORT="${PORT:-8080}"
+BIND="${BIND:-0.0.0.0}"
 WIDTH="${WIDTH:-1280}"
 HEIGHT="${HEIGHT:-720}"
 FPS="${FPS:-30}"
+ROLE="${ROLE:-recognition_camera}"
+PYTHON="${PYTHON:-/home/orangepi/pyside6-venv/bin/python}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ ! -e "$DEVICE" ]]; then
   echo "找不到摄像头设备: $DEVICE" >&2
   exit 1
 fi
 
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "找不到 ffmpeg" >&2
+if [[ ! -x "$PYTHON" ]]; then
+  echo "找不到 Python: $PYTHON" >&2
   exit 1
 fi
 
-echo "仅监听香橙派本机，避免把摄像头画面暴露到局域网。"
-echo "请先在 VS Code 转发端口 ${PORT}，再在主机浏览器打开:"
-echo "http://127.0.0.1:${PORT}/camera.mjpg"
-echo "按 Ctrl+C 停止；运行期间不要让其他程序占用 ${DEVICE}。"
+HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ "$BIND" == "0.0.0.0" && -n "$HOST_IP" ]]; then
+  echo "在浏览器打开 http://${HOST_IP}:${PORT}/"
+else
+  echo "在浏览器打开 http://${BIND}:${PORT}/"
+fi
+echo "点「拍照」或按空格存 PNG；点「录制」或按 R 存视频。都写到 data/road/。"
+echo "看的时候不要再跑 snap_view.sh 或上位机，它们会占用 ${DEVICE}。"
 
-exec ffmpeg \
-  -hide_banner \
-  -loglevel warning \
-  -f v4l2 \
-  -input_format mjpeg \
-  -video_size "${WIDTH}x${HEIGHT}" \
-  -framerate "$FPS" \
-  -i "$DEVICE" \
-  -an \
-  -vsync 0 \
-  -c:v mjpeg \
-  -q:v 5 \
-  -f mpjpeg \
-  -listen 1 \
-  "http://127.0.0.1:${PORT}/camera.mjpg"
+cd "$ROOT"
+exec "$PYTHON" webcam_view.py \
+  --device "$DEVICE" \
+  --bind "$BIND" \
+  --port "$PORT" \
+  --width "$WIDTH" \
+  --height "$HEIGHT" \
+  --fps "$FPS" \
+  --role "$ROLE"
