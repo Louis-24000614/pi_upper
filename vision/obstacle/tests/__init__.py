@@ -1,0 +1,2 @@
+"""Obstacle decision tests."""
+
