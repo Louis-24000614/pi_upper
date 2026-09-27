@@ -34,10 +34,10 @@ def main() -> None:
                 raise ValueError(f"无法读取注册图: {path}")
             descriptor, _, _ = recognizer.embed(frame)
             descriptors.append(descriptor)
-        model_sha256 = recognizer.config["model_sha256"],
+        model_sha256 = recognizer.config["model_sha256"]
     embeddings = np.stack(descriptors).astype(np.float32)
     if embeddings.shape != (10, 384) or not np.isfinite(embeddings).all():
-        raise ValueEror(f"模板矩阵异常: {embeddings.shape}")
+        raise ValueError(f"模板矩阵异常: {embeddings.shape}")
     if float(np.max(np.abs(np.linalg.norm(embeddings, axis=1) - 1.0))) >= 1e-5:
         raise ValueError("模板没有正确L2归一化")
     payload = {

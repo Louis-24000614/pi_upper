@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "release_id": "dinov3_448_fp16_v1",
+  "created_date": "2026-09-17",
+  "target": "RK3588/RK3588S",
+  "precision": "FP16",
+  "rknn_toolkit_lite2": "2.3.2",
+  "input": {
+    "size": 448,
+    "runtime_layout": "NHWC",
+    "dtype": "float32",
+    "color": "RGB",
+    "normalization": "RGB/255, ImageNet mean/std exactly once"
+  },
+  "output": {
+    "dimension": 384,
+    "postprocess": "host FP32 L2, then cosine match against 10 templates"
+  },
+  "classes": [
+    "knife_01",
+    "knife_02",
+    "knife_03",
+    "knife_04",
+    "knife_05",
+    "knife_06",
+    "knife_07",
+    "knife_08",
+    "knife_09",
+    "knife_10"
+  ],
+  "template_source": "target RK3588 production preprocessing + target RKNN inference on the 10 reference images",
+  "template_regression": {
+    "frozen_test_descriptors": 1640,
+    "correct": 1637,
+    "decision_changes_vs_benchmark_templates": 0,
+    "note": "No new full benchmark; reused saved board test descriptors to verify the production templates do not change any Top-1 decision."
+  },
+  "board_accuracy": {
+    "correct": 1637,
+    "total": 1640,
+    "top1": 0.9981707317073171,
+    "hard_correct": 297,
+    "hard_total": 300
+  },
+  "files_sha256": {
+    "dinov3_448_fp16.rknn": "ee016460014a280aa9945aa75e9e459fce9d21d9dfdf862871101c754c9fdee9",
+    "templates.json": "ee9f8d2f3b195df9032d1fe397ec5f673752372e0f95ba3c1adac407127f2a80",
+    "templates_frozen_benchmark.json": "ca1d9a88be68a6ef8358b3bb74588eefb6c91d460e88bd9c6dcd293a5fc56fb9",
+    "references/knife_01/reference.png": "6c3f03b0a045920e7133332593ecf8b2d08dc8d50125a448fb430e0c67c83528",
+    "references/knife_02/reference.png": "ef460cda08c60d70465dc53abc161f813b0955578465141ca4f403cfbcd075e9",
+    "references/knife_03/reference.png": "ca255e4c0b7da4bc302d19e2a6464133dc1d568561ec26e2467276442a7a51f6",
+    "references/knife_04/reference.png": "08ab2c6257e7f9bab496b27fbd0c81130c18747e9d1490c7818ea336ede4c008",
+    "references/knife_05/reference.png": "733084a9696bb73cc223988b59a85eb92c1f09366430bd03cb828fbe32c54f8d",
+    "references/knife_06/reference.png": "0b7d6991052a83b14ef70425c0bae2a26c0b5a6262b57a6c4d32952570f17786",
+    "references/knife_07/reference.png": "e2a0540ae8c6b104412c6599d65c64ccbc6d1cc1687617238a3bd2cfa47e0a96",
+    "references/knife_08/reference.png": "9fd98d417c5a2b1f8186983b03dc5379584a86236502923337571b5e058a7e44",
+    "references/knife_09/reference.png": "12d7373ebd1297580f0296fb608f78ccf0f714efcbc51e826500b4aa9f457f04",
+    "references/knife_10/reference.png": "f85bc4a80d27fa5a19ee74d1db2b36b0e352ade2b3e201ed04c140a04cd58111"
+  }
+}
