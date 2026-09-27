@@ -31,6 +31,7 @@ enum class MsgType : uint8_t {
   kImuDebug = 0x92,
   kSystemStatus = 0x93,
   kMotionResult = 0x94,
+  kRfidCard = 0x95,
 };
 
 /// ACK 的结果码。取值与固件 `UartAckResult` 一致。
@@ -186,6 +187,13 @@ struct MotionResult {
   MotionResultCode result = MotionResultCode::kCompleted;
   float final_yaw_rad = 0.0f;
   float target_yaw_rad = 0.0f;
+};
+
+/// RFID_CARD (0x95)。UART5 读卡结果的最近一帧。
+struct RfidCard {
+  uint8_t present = 0;
+  uint8_t card_number = 0;
+  uint8_t generation = 0;
 };
 
 }  // namespace uart

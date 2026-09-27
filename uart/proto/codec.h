@@ -29,6 +29,7 @@ constexpr size_t kSizeImuState = 29;
 constexpr size_t kSizeImuDebug = 21;
 constexpr size_t kSizeSystemStatus = 7;
 constexpr size_t kSizeMotionResult = 11;
+constexpr size_t kSizeRfidCard = 3;
 
 size_t EncodeHelloReq(const HelloReq& msg, uint8_t* dst, size_t cap);
 size_t EncodeArmRequest(const ArmRequest& msg, uint8_t* dst, size_t cap);
@@ -47,6 +48,7 @@ size_t EncodeImuState(const ImuState& msg, uint8_t* dst, size_t cap);
 size_t EncodeImuDebug(const ImuDebug& msg, uint8_t* dst, size_t cap);
 size_t EncodeSystemStatus(const SystemStatus& msg, uint8_t* dst, size_t cap);
 size_t EncodeMotionResult(const MotionResult& msg, uint8_t* dst, size_t cap);
+size_t EncodeRfidCard(const RfidCard& msg, uint8_t* dst, size_t cap);
 
 bool DecodeAck(const uint8_t* payload, size_t len, Ack* out);
 bool DecodeHelloInfo(const uint8_t* payload, size_t len, HelloInfo* out);
@@ -55,6 +57,7 @@ bool DecodeImuState(const uint8_t* payload, size_t len, ImuState* out);
 bool DecodeImuDebug(const uint8_t* payload, size_t len, ImuDebug* out);
 bool DecodeSystemStatus(const uint8_t* payload, size_t len, SystemStatus* out);
 bool DecodeMotionResult(const uint8_t* payload, size_t len, MotionResult* out);
+bool DecodeRfidCard(const uint8_t* payload, size_t len, RfidCard* out);
 
 }  // namespace uart
 

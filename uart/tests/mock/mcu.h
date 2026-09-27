@@ -87,6 +87,12 @@ class FakeMcu {
     Emit(port, MsgType::kMotionResult, payload, sizeof(payload));
   }
 
+  void SendRfidCard(FakePort& port, const RfidCard& msg) {
+    uint8_t payload[kSizeRfidCard] = {};
+    EncodeRfidCard(msg, payload, sizeof(payload));
+    Emit(port, MsgType::kRfidCard, payload, sizeof(payload));
+  }
+
   void SendHelloInfoWithVersion(FakePort& port, HelloInfo msg, uint8_t version) {
     msg.protocol_version = version;
     SendHelloInfo(port, msg);

@@ -232,6 +232,12 @@ void Session::OnFrame(uint8_t msg_type, const uint8_t* payload, size_t len) {
         telemetry_.has_imu_debug = true;
       }
       break;
+    case MsgType::kRfidCard:
+      if (DecodeRfidCard(payload, len, &telemetry_.rfid)) {
+        telemetry_.rfid_us = now_us;
+        telemetry_.has_rfid = true;
+      }
+      break;
     default:
       break;
   }
