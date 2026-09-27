@@ -10,7 +10,7 @@
 - `docs/conventions.md` — 全仓库编码与文档规范（提交前缀、模块文档结构、API 契约格式）。
 - `docs/architecture/overview.md` — 上位机总体架构规划：模块划分、通信边界、技术选型与开发顺序。
 - `docs/architecture/layout.md` — 仓库目录结构与顶层目录职责。
-- `docs/nav.md` — 导航与障碍重规划：拓扑全局 + BEV 局部 + 寻线执行的分层设计。
+- `docs/nav.md` — 导航与障碍重规划：拓扑全局 + BEV 局部 + 寻线执行；`CMD_VEL` / `MOTION_ACTION` 分工与视觉校准 ICM42688 相对航向。
 - `config/nav_topology.yaml` — 赛题图 3 先验拓扑运行配置（`行_列`：左右巡逻格 + 中间双十字、边与隧道初标）。
 - `docs/reference/navigation/topo_proto.md` — 拓扑 Dijkstra 原型：加载 YAML、封边重搜、CLI。
 - `navigation/README.md` — navigation 目录说明（含 `topo_proto/`）。
@@ -23,5 +23,13 @@
 - `docs/superpowers/specs/2026-08-29-visual-nav-road-follow-design.md` — Stage-1 视觉寻线设计规格。
 - `docs/superpowers/specs/2026-08-29-ipm-centerline-proto-design.md` — IPM/中心线原型设计规格。
 - `docs/superpowers/specs/2026-09-02-mission-topology-and-gui-design.md` — 任务拓扑策略与 GUI 展示设计（点序、UID、选岔与界面字段）。
+- `docs/superpowers/specs/2026-09-03-white-on-white-road-perception-design.md` — 白底白沿道路感知：同色矮沿数据、相机姿态、路宽先验与双目后备。
+- `docs/reference/perception/road_seg_deploy.md` — 道路分割 RKNN 部署与亮场验收清单。
+- `docs/reference/perception/stereo_curb_fallback.md` — 单目不稳时的双目测沿评估清单。
+- `config/nav_camera.yaml` — 导航前视与 BEV/路宽先验运行配置。
+- `config/road_seg_train.yaml` — 道路分割训练增强提示。
+- `config/servo.yaml` — 舵机 PWM 芯片路径、通道与脉宽端点。
+- `docs/reference/hw/servo.md` — Pin 7 / PWM14_M2 接线、overlay、C++ CLI 与角度校准。
+- `servo/README.md` — 舵机模块运行命令。
 
 各模块上手步骤（安装、注册人脸、运行）写在模块目录自己的 `README.md` 里，例如 `vision/arcface-lite/README.md`。

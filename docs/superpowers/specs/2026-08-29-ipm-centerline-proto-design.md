@@ -27,10 +27,12 @@ Stage-1 视觉导航中「mask → BEV → 中心线」的可运行 Python 原�
 | --- | --- |
 | `ipm.py` | 构建单应、warp 到 BEV、像素↔米 |
 | `centerline.py` | BEV mask → 中心线点列 |
+| `prior.py` | 路宽先验（同色过分割裁切） |
+| `temporal.py` | 中心线帧间 EMA |
 | `synth.py` | 合成透视道路图 + mask |
 | `cli.py` | 命令行入口 |
-| `config_example.yaml` | 外参 / BEV 窗口示例 |
-| `tests/` | 合成直道几何断言 |
+| `config_example.yaml` | 外参 / BEV / 先验示例 |
+| `tests/` | 合成直道与先验几何断言 |
 
 模块说明见 `docs/reference/perception/ipm_proto.md`。
 
@@ -44,6 +46,8 @@ Stage-1 视觉导航中「mask → BEV → 中心线」的可运行 Python 原�
 
 - IPM：平面地面假设；优先用外参推单应，也支持直接给 4 点对应。
 - 中心线：对每个 \(Y\) 切片取 road 像素的 \(X\) 中位数（或左右边界中点）；无道路像素则跳过；输出 `[(x,y), ...]`（米）。
+- 路宽先验：多段时选接近 0.8 m 且靠近车体中线的段；过宽时裁成期望宽窗口（`extract_centerline_with_width_prior`）。
+- 时间平滑：`CenterlineSmoother` 按 Y 匹配后对 X 做 EMA。
 - 合成：生成已知路宽约 0.8 m 的直道透视场景，供回归测试。
 
 ## 验收

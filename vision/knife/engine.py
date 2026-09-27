@@ -33,6 +33,27 @@ def _resolve(config_path: Path, value: str) -> Path:
     return (config_path.parent.parent / path).resolve()
 
 
+def _import_rknn_lite():
+    """导入RKNNLite，并用系统PyYAML承接Lite2的平台配置解析。
+
+    Lite2 2.3.2的yaml_parser依赖完整ruamel.yaml API；本板只有PyYAML 5.4.1。
+    在init_runtime之前替换load，即可读取cpu_npu_mapper.yml。
+    """
+    import yaml as pyyaml
+    import rknnlite.utils.yaml_parser as yaml_parser
+
+    def load(stream_or_path, *args, **kwargs):
+        if hasattr(stream_or_path, "read"):
+            return pyyaml.safe_load(stream_or_path)
+        with open(stream_or_path, "r", encoding="utf-8") as handle:
+            return pyyaml.safe_load(handle)
+
+    yaml_parser.load = load
+    from rknnlite.api import RKNNLite
+
+    return RKNNLite
+
+
 class KnifeRecognizer:
     """线程安全的单RKNN实例刀具识别器。
 
@@ -53,7 +74,7 @@ class KnifeRecognizer:
         self._closed = False
 
         # 板端才提供rknnlite；延迟导入使Windows可执行配置和模板单元测试。
-        from rknnlite.api import RKNNLite
+        RKNNLite = _import_rknn_lite()
 
         masks = {
             "0": RKNNLite.NPU_CORE_0,

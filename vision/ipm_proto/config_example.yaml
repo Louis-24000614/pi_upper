@@ -1,4 +1,5 @@
 # 示例：与 synth.default_camera / BevConfig 默认值对齐，实车需重标定。
+# 白底白沿推荐权威配置：config/nav_camera.yaml
 
 bev:
   y_min: 0.3
@@ -11,6 +12,16 @@ camera:
   height_m: 0.25
   pitch_deg: 28.0
   # fx/fy/cx/cy 可省略：按图像宽与约 63.3° FOV 估算
+
+road_prior:
+  expected_width_m: 0.8
+  min_width_m: 0.35
+  max_width_m: 1.15
+  min_pixels: 3
+
+temporal:
+  smooth_alpha: 0.45
+  y_match_tol_m: 0.04
 
 # 也可改用四点标定（提供后将忽略 camera 外参估单应）：
 # image_points:

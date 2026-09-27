@@ -17,7 +17,9 @@ import yaml
 
 from .centerline import centerline_lateral_error, extract_centerline
 from .ipm import BevConfig, CameraExtrinsics, Ipm
+from .prior import extract_centerline_with_width_prior, road_prior_from_mapping
 from .synth import measure_bev_road_width_m, synthesize_straight_road
+from .temporal import temporal_from_mapping
 
 
 def _load_config(path: Path) -> dict:
@@ -114,7 +116,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     ipm = _ipm_from_cfg(cfg, image.shape)
     bev_mask = ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
     bev_img = ipm.warp_to_bev(image, flags=cv2.INTER_LINEAR)
-    points = extract_centerline(bev_mask, ipm.bev)
+    if cfg.get("road_prior") is not None or args.use_prior:
+        points = extract_centerline_with_width_prior(
+            bev_mask, ipm.bev, road_prior_from_mapping(cfg)
+        )
+    else:
+        points = extract_centerline(bev_mask, ipm.bev)
+    if args.smooth:
+        points = temporal_from_mapping(cfg).update(points)
     bev_vis = _draw_centerline_on_bev(bev_img, points, ipm.bev)
 
     out = Path(args.out)
@@ -140,6 +149,16 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--mask", default=None, help="道路 mask；省略则试绿色阈值")
     p_run.add_argument("--config", default=None)
     p_run.add_argument("--out", default="/tmp/ipm_proto_run")
+    p_run.add_argument(
+        "--use-prior",
+        action="store_true",
+        help="启用路宽先验（配置含 road_prior 时默认已启用）",
+    )
+    p_run.add_argument(
+        "--smooth",
+        action="store_true",
+        help="对单帧结果做时间平滑（演示；多帧环请持有 CenterlineSmoother）",
+    )
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args(argv)

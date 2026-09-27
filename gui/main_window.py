@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from camera_controls import CameraDevice, V4L2Control, list_cameras, set_control, v4l2_available
+from snap import save_frame, snapshot_path
 
 
 CONTROL_NAMES = {
@@ -126,9 +127,10 @@ class MainWindow(QMainWindow):
         self.current_task = "测试1"
 
         self.setWindowTitle("RoboCup 侦查机器人上位机")
-        self.setMinimumSize(1024, 600)
-        self.resize(1280, 720)
+        # 外接 HDMI 屏常见 1024×600；最小尺寸必须小于可用桌面，否则窗口会被顶出屏幕。
+        self.setMinimumSize(800, 480)
         self._build_ui()
+        self.showMaximized()
         self._discover_and_start_cameras()
 
     @property
@@ -197,16 +199,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 6, 0)
         layout.setSpacing(8)
         recognition_panel, self.recognition_view, self.recognition_device, self.recognition_fps = self._camera_panel(
-            "识别摄像头"
+            "识别摄像头", "recognition_camera"
         )
         navigation_panel, self.navigation_view, self.navigation_device, self.navigation_fps = self._camera_panel(
-            "导航摄像头"
+            "导航摄像头", "navigation_camera"
         )
         layout.addWidget(recognition_panel, 1)
         layout.addWidget(navigation_panel, 1)
         return container
 
-    def _camera_panel(self, title: str) -> tuple[QFrame, QLabel, QLabel, QLabel]:
+    def _camera_panel(self, title: str, role: str) -> tuple[QFrame, QLabel, QLabel, QLabel]:
         panel = QFrame()
         panel.setObjectName("cameraPanel")
         layout = QVBoxLayout(panel)
@@ -219,11 +221,16 @@ class MainWindow(QMainWindow):
         device.setObjectName("cameraDevice")
         fps = QLabel("-- FPS")
         fps.setObjectName("cameraFps")
+        capture = QPushButton("拍照")
+        capture.setObjectName("primaryButton")
+        capture.setMinimumHeight(32)
+        capture.clicked.connect(lambda checked=False, camera_role=role: self._save_snapshot(camera_role))
         header.addWidget(name)
         header.addSpacing(10)
         header.addWidget(device)
         header.addStretch(1)
         header.addWidget(fps)
+        header.addWidget(capture)
         view = QLabel("未连接")
         view.setObjectName("cameraView")
         view.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -659,6 +666,16 @@ class MainWindow(QMainWindow):
     def _on_camera_error(self, path: str, message: str) -> None:
         self.camera_errors[path] = message
         self._update_camera_ui()
+
+    def _save_snapshot(self, role: str) -> None:
+        """保存该逻辑摄像头当前原始帧，不保存预览裁剪图。"""
+        frame = self.recognition_frame if role == "recognition_camera" else self.navigation_frame
+        dest = snapshot_path(role)
+        ok, message = save_frame(frame, dest)
+        if ok:
+            self._log(f"已保存道路采集图：{message}")
+        else:
+            self._log(f"拍照失败：{message}")
 
     def _show_frame(self, view: QLabel, frame: object) -> None:
         if frame is None:

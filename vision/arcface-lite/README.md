@@ -42,14 +42,17 @@ x86 主机上直接装即可；aarch64 上 PyPI 通常没有预编译 wheel，�
 
 人脸库存储在本地 `face_db.npz`，**不入库**（见 `.gitignore`），每台机器需要自行注册。两种方式：
 
-方式一，离线批量注册（适合已有照片）。目录结构为 `root_dir/姓名/*.jpg`：
+方式一，离线批量注册（适合已有照片）。目录结构为 `root_dir/姓名/*.jpg`。赛题 10 人底库在仓库 [`data/faces/`](../../data/faces/)（身份名为 `1` … `10`）：
 
 ```bash
-.venv/bin/python engine.py register photos/ face_db.npz
-# photos/
-# ├── zhangsan/1.jpg, 2.jpg ...
-# └── lisi/1.jpg ...
+.venv/bin/python engine.py register ../../data/faces face_db.npz --det_size 640
+# data/faces/
+# ├── 1/1.jpg
+# ├── 2/2.jpg
+# └── ...
 ```
+
+近距离证件照用 `--det_size 640`（或 320）。默认 1920 是给远处小脸的，用在这批底库上会全部检不出脸。
 
 方式二，在线注册（服务运行中，拍一张录一张）：
 

@@ -22,17 +22,17 @@ using uart::kMaxFrameSize;
 using uart::kMaxPayloadSize;
 using uart::Reassembler;
 
-/// 文档 6.1：HELLO_REQ，payload 为单字节协议版本 2。
-const std::vector<uint8_t> kGoldenHelloReq = {0x55, 0xAA, 0x01, 0x01, 0x02, 0x70};
+/// 固件 UART_PROTOCOL.md：HELLO_REQ，payload 为协议标识 1。
+const std::vector<uint8_t> kGoldenHelloReq = {0x55, 0xAA, 0x01, 0x01, 0x01, 0x79};
 
-/// 文档 6.5：零速 CMD_VEL，token 0x12345678，v 与 ω 均为 0.0f。
-const std::vector<uint8_t> kGoldenCmdVel = {0x55, 0xAA, 0x12, 0x0C, 0x78, 0x56, 0x34, 0x12, 0x00,
-                                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xCD};
+/// 固件零速 CMD_VEL：8 字节 payload，v 与 ω 均为 0.0f。
+const std::vector<uint8_t> kGoldenCmdVel = {0x55, 0xAA, 0x12, 0x08, 0x00, 0x00, 0x00, 0x00,
+                                            0x00, 0x00, 0x00, 0x00, 0x83};
 
-/// 文档第 9 节：把 token 首字节从 0x78 改成 0x79 却保留原 CRC 0xCD。
+/// 把 payload 首字节从 0x00 改成 0x01 却保留原 CRC 0x83。
 std::vector<uint8_t> MakeGoldenCrcError() {
   std::vector<uint8_t> bad = kGoldenCmdVel;
-  bad[4] = 0x79;
+  bad[4] = 0x01;
   return bad;
 }
 
@@ -67,12 +67,11 @@ void ExpectBytes(const uint8_t* got, size_t got_len, const std::vector<uint8_t>&
 void TestEncodeGoldenVectors() {
   uint8_t buf[kMaxFrameSize] = {};
 
-  const uint8_t hello_payload[1] = {0x02};
+  const uint8_t hello_payload[1] = {0x01};
   size_t len = EncodeFrame(0x01, hello_payload, sizeof(hello_payload), buf, sizeof(buf));
   ExpectBytes(buf, len, kGoldenHelloReq, "encode HELLO_REQ");
 
-  // CMD_VEL payload：token(u32) + linear_x(f32) + angular_z(f32)，均小端。
-  const uint8_t payload[12] = {0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint8_t payload[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   len = EncodeFrame(0x12, payload, sizeof(payload), buf, sizeof(buf));
   ExpectBytes(buf, len, kGoldenCmdVel, "encode zero CMD_VEL");
 }
@@ -94,9 +93,9 @@ void TestDecodeGoldenVectors() {
   rx.Feed(kGoldenCmdVel.data(), kGoldenCmdVel.size(), 0, handler);
   CHECK(sink.calls == 2);
   CHECK(sink.msg_type == 0x12);
-  CHECK(sink.payload.size() == 12);
-  if (sink.payload.size() == 12) {
-    CHECK(sink.payload[0] == 0x78 && sink.payload[3] == 0x12);
+  CHECK(sink.payload.size() == 8);
+  if (sink.payload.size() == 8) {
+    CHECK(sink.payload[0] == 0x00 && sink.payload[7] == 0x00);
   }
   CHECK(rx.stats().frames == 2);
   CHECK(rx.stats().crc_errors == 0);

@@ -14,3 +14,7 @@ models/*
 !models/knife/
 models/knife/*
 !models/knife/dinov3_448_fp16_v1/
+
+# Road-seg collection for YOLO-seg training (see data/road/README.md)
+data/road/*
+!data/road/README.md

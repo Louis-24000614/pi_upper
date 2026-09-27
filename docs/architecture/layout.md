@@ -32,8 +32,8 @@ flowchart TD
 
 `docs/` — 手写文档，文档地图见 `docs/doc_layout.md`。
 
-`models/` — 模型文件（RKNN/ONNX），默认各机器自行准备；刀具固定发布版本models/knife/dinov3_448_fp16_v1/按部署要求作为例外入库。
+`models/` — 模型文件（RKNN/ONNX），默认各机器自行准备；刀具固定发布版本 `models/knife/dinov3_448_fp16_v1/` 按部署要求作为例外入库。
 
-`vision/knife/` — DINOv3刀具识别服务，依赖、脚本、测试和systemd示例收在模块内；配置归config/knife.json，GUI适配归gui/knife_client.py。上手见模块README，设计见docs/reference/perception/knife.md，接口见docs/api/knife.md。
+`vision/knife/` — DINOv3刀具识别服务，依赖、脚本、测试和systemd示例收在模块内；配置归 `config/knife.json`，GUI适配归 `gui/knife_client.py`。上手见模块README，设计见 `docs/reference/perception/knife.md`，接口见 `docs/api/knife.md`。
 
 后续新增的代码模块归属上位机 C++/Qt 单体工程，物理目录结构随骨架搭建时确定并更新本文；视觉类独立服务归入 `vision/`（如 arcface-lite），并按 `docs/conventions.md` 的要求在 `docs/reference/<layer>/` 下补一篇模块文档。

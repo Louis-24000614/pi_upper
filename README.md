@@ -80,7 +80,7 @@ cmake --build build -j
 
 ## 与下位机通信
 
-杜邦线直连 UART，921600 8N1，二进制帧 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`（协议 v2）。上位机建链后取 `boot_id`，经操作者按键确认拿到 `arm_token`，再以 50 Hz 下发 `CMD_VEL`（零速也必须持续发，250 ms 断流下位机自动安全停车）；下位机回传里程计、IMU、系统状态与故障事件。
+杜邦线直连 UART（STM32 USART2：PD5 TX / PD6 RX），921600 8N1，二进制帧 `55 AA | TYPE | LENGTH | PAYLOAD | CRC8`（协议标识 1）。上位机 `HELLO` 后带 `boot_id` 发 `ARM_REQUEST`，以 ACK 判断是否允许动。贴线/微调发 8 字节 `CMD_VEL`；路口 90° 和急停发 `MOTION_ACTION`，有限动作等 `MOTION_RESULT`。两种命令互斥。下位机无断流看门狗，退出必须主动 STOP/DISARM。
 
 线协议以下位机仓库的 `UART_PROTOCOL.md` 为唯一权威，上位机侧的实现约定见 `docs/api/uart.md`。
 

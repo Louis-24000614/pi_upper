@@ -7,6 +7,7 @@
 - [定位与目标](#定位与目标)
 - [与现有文档的关系](#与现有文档的关系)
 - [分层架构](#分层架构)
+- [运动通道与航向校准](#运动通道与航向校准)
 - [先验拓扑（全局层）](#先验拓扑全局层)
 - [行列命名与配置文件](#行列命名与配置文件)
 - [BEV 占用与局部规划](#bev-占用与局部规划)
@@ -30,10 +31,11 @@
 
 1. 固定推荐架构：拓扑全局换道 + BEV 局部避障 + Pure Pursuit 执行。
 2. 定义遇障时的安全动作（减速、停车、短距倒车）与全局重搜触发条件。
-3. 给出与 Mission（UID 巡场）、Stage-1 寻线、UART `CMD_VEL` 的边界与接口草案。
+3. 给出与 Mission（UID 巡场）、Stage-1 寻线、UART `CMD_VEL` / `MOTION_ACTION` 的边界与接口草案。
 4. 给出可分期落地的实现顺序。
+5. 固定航向分工：ICM42688 只管短窗口相对转角；相对路面的朝向由视觉在上位机校准，不写回 MCU。
 
-**一句话：** 寻线负责「贴当前轨迹开」；局部层负责「眼前这一米」；拓扑层负责「这条走廊堵了换哪条」；Mission 负责「点齐了没、该不该回家」。
+**一句话：** 寻线负责「贴当前轨迹开」；局部层负责「眼前这一米」；拓扑层负责「这条走廊堵了换哪条」；Mission 负责「点齐了没、该不该回家」；IMU 只负责「这几秒转了多少」，视觉负责「现在是不是顺着这条走廊」。
 
 ## 与现有文档的关系
 
@@ -43,6 +45,7 @@
 | [`docs/superpowers/specs/2026-08-29-ipm-centerline-proto-design.md`](superpowers/specs/2026-08-29-ipm-centerline-proto-design.md) | BEV 窗口与外参约定；局部占用栅格复用同一鸟瞰窗。 |
 | [`docs/superpowers/specs/2026-09-02-mission-topology-and-gui-design.md`](superpowers/specs/2026-09-02-mission-topology-and-gui-design.md) | Mission / UID：收齐巡逻点、播报。Mission **不**实现换道细节；只提供「巡场中 / 回出发区」等目标语义。 |
 | [`docs/architecture/overview.md`](architecture/overview.md) | 逻辑模块 `navigation` / `state` / `uart` 的总图位置。 |
+| [`docs/api/uart.md`](api/uart.md) | 线协议与会话：`CMD_VEL` 与 `MOTION_ACTION` 互斥；`IMU_STATE.relative_yaw` 无绝对航向。 |
 | [`vision/ipm_proto/`](../vision/ipm_proto/) | 已有 IPM/中心线 Python 原型，局部层可在此演进。 |
 | [`navigation/topo_proto/`](../navigation/topo_proto/) | 全局拓扑 Dijkstra + 模拟封边原型；见 `docs/reference/navigation/topo_proto.md`。 |
 
@@ -56,15 +59,18 @@ flowchart TB
   global[Global_Topology_Planner]
   local[Local_BEV_Planner]
   track[PurePursuit_Tracker]
-  uart[UART_CMD_VEL]
+  uartVel[UART_CMD_VEL]
+  uartAct[UART_MOTION_ACTION]
   perc[Vision_road_obstacle]
 
   mission -->|"patrol_or_go_home"| global
   global -->|"edge_sequence_or_lookahead"| local
   local -->|"path_or_vw"| track
-  track -->|"v_omega"| uart
+  track -->|"v_omega_line_follow"| uartVel
+  global -->|"junction_90deg"| uartAct
   perc -->|"blocked_edges"| global
   perc -->|"occupancy_grid"| local
+  perc -->|"lane_heading"| track
 ```
 
 | 层 | 职责 | 推荐算法 |
@@ -72,10 +78,65 @@ flowchart TB
 | Mission | 12 UID 是否收齐、是否回出发区 | 集合 / 状态机（见 mission 规格） |
 | 全局 Planner | 边序列；走廊堵死后换路 | 拓扑图上 **Dijkstra**（首选）或 **A\*** |
 | 局部 Planner | 车前局部可通行轨迹 | BEV 栅格 **A\***（首选）；**DWA** 可选增强 |
-| 执行 | 跟踪轨迹 | **Pure Pursuit**（或等价），输出 `(v, ω)` |
-| 感知 | 可走区域与障碍 | road（及可选 obstacle）分割 → IPM |
+| 执行 · 贴线 | 直道/缓弯/倒车/微调 | **Pure Pursuit** → 50 Hz `CMD_VEL(v, ω)` |
+| 执行 · 路口 | 离散 90° 与急停 | `MOTION_ACTION`，等 `MOTION_RESULT` |
+| 航向 | 相对路面朝向 | 视觉中心线 / IPM 切线校准 `yaw_offset`；IMU 只做短窗口相对角 |
+| 感知 | 可走区域、障碍、走廊切线 | road（及可选 obstacle）分割 → IPM |
 
 手动遥控与急停由 `state` 仲裁，优先级高于自主规划（与 Stage-1 / mission 规格一致）。
+
+## 运动通道与航向校准
+
+下位机 ICM42688 是 **六轴、无磁力计**。固件给出的 `IMU_STATE.relative_yaw_rad` 是上电后的相对航向，长时间漂移是预期现象，不是联调故障。视觉要校准的是 **上位机眼里相对路面的朝向**，不是 MCU 里的姿态解算。
+
+### 两条互斥通道
+
+与 [`docs/api/uart.md`](api/uart.md) 的方案 C 一致：同一时刻只走一条运动通道。
+
+| 场景 | 通道 | 航向依据 |
+| --- | --- | --- |
+| 直道、缓弯、贴线、倒车、90° 落地后微调 | 50 Hz `CMD_VEL(v, ω)` | 视觉中心线 / IPM 切线（Pure Pursuit） |
+| 路口离散 90°、急停 | `MOTION_ACTION`，等 `MOTION_RESULT` | 陀螺 Z **相对**转过 π/2（几秒窗口） |
+| 隧道无光、几秒内 | 进入前冻视觉 offset，短时 IMU 或直道 `(v, 0)` | 不更新 `yaw_offset` |
+
+**禁止**用 `MOTION_ACTION` 前进锁航向跑长直道。MCU 前进动作会把当时的 `relative_yaw` 冻成目标；零偏一存在，车就会慢慢画弧。长直道纠偏属于寻线，必须走 `CMD_VEL`。
+
+有限动作未完成时 uart 拒绝 `SetVelocity`；`STOP` 随时可发。视觉不得在 90° 进行中抢通道。
+
+### 视觉校准什么
+
+导航在 Pi 上维护一个标量偏移，不改下位机 yaw：
+
+```text
+yaw_nav = imu.relative_yaw + yaw_offset_vision
+```
+
+`yaw_offset_vision` 只在「看得到路、路是直的、没在转弯、没在倒车对着障碍」时更新。来源是 BEV 中心线切线（或等价消失点）：路面说车相对走廊偏了多少，就慢慢把 offset 拉过去。这是相对 **当前走廊切线** 的朝向，不是地磁北，也不是 YAML 节点坐标轴。
+
+路径跟踪本身已经在纠航向：中心线横向误差 → ω。offset 主要给拓扑/选岔用（「转完 90° 之后是不是已经对准下一条边」），以及隧道出口一次性拉回。沿边进度 `s` 仍只用 `ODOM_STATE` 的平移，**不要**拿视觉角去改 `ds` 积分，否则 x/y 与朝向不一致会把倒车尺子算歪。
+
+90° 落地后用视觉验收：BEV 切线相对新边方向若差约 5°～15°，用一小段 `CMD_VEL` 补正，**不要**再发一次 90°。倒回 `from_node` 之后也先用视觉确认对准走廊，再正向寻线。
+
+### 何时冻结视觉
+
+下列情况冻结 `yaw_offset_vision`，继续用上一拍的值（或只用相对 IMU）：
+
+- `MOTION_ACTION` 90° 进行中
+- 路口几何不稳定（横路、分岔、mask 分叉）
+- 硬堵塞 / `BACKUP`（前视仍对着障碍）
+- 隧道、过暗、road mask 丢失
+- 横向加速度大、明显打滑
+
+隧道策略：进去前冻结；里面不跟视觉；出来重新看到白道，再一次性把 offset 拉回路面。
+
+### 明确不做
+
+- **不**增加「上位机写 MCU yaw」的 UART。动作进行中改航向会打乱正在转的 90°；协议也没有这条消息。
+- **不**每帧用视觉去当磁力计或去估陀螺零偏灌进 MCU。视觉噪声进积分会比现在更晃。
+- **不**用视觉去「修准」漂了的 `ODOM_STATE.x/y`。位置靠拓扑节点 + 沿边 `s` + 贴线；先修朝向。
+- **不**把 `IMU_DEBUG` 加速度积分当航向或倒车尺子。
+
+一句话：**IMU 只负责短动作（90°、隧道几秒）；视觉负责「我现在是不是顺着这条走廊」。** 比赛里会飘的是长直道锁航向，那一段本来就该交给 `CMD_VEL`。
 
 ## 先验拓扑（全局层）
 
@@ -222,7 +283,7 @@ stateDiagram-v2
 
 `s` 是软件里的标量：**离开上一拓扑节点 `from_node` 之后，沿当前边走了多少米**。不是场地坐标，不能拿 `ODOM_STATE.x/y` 去对 YAML 的节点 `(x,y)`。
 
-权威测距用下位机 **`ODOM_STATE`（编码器平移 + 陀螺 Z 融合）**，且须 `VALID`（见 [`docs/api/uart.md`](api/uart.md)）。`IMU_STATE` 只辅助看姿态；`IMU_DEBUG` **禁止**进导航。
+权威测距用下位机 **`ODOM_STATE`（编码器平移 + 陀螺 Z 融合）**，且须 `VALID`（见 [`docs/api/uart.md`](api/uart.md)）。`IMU_STATE.relative_yaw` 只作短窗口相对角与 `yaw_offset` 的底数；沿边 `s` 用 odom 平移，不用视觉角改积分。`IMU_DEBUG` **禁止**进导航。视觉航向校准见 [运动通道与航向校准](#运动通道与航向校准)。
 
 每帧沿航向积分（前进 `s` 增大，倒车自动减小）：
 
@@ -244,7 +305,7 @@ s  = max(0, s + ds)
 - 停条件：`s < 0.15 m`（视为已回到上一节点），或本段倒车位移 ≥ **0.70 m**（硬帽，小于一格 0.8 m），或超时。建议 `v ≈ -0.08～-0.15 m/s`，`ω ≈ 0`。
 - 已在路口（`s` 很小）但障碍仍贴脸：额外短退约 **0.40 m**（仍受 0.70 m 帽限制），只为腾空间、把障碍重新送进 BEV。
 - 一次没退够：再短退约 0.3 m，最多两三次，避免按漂掉的 `s` 一次倒穿。
-- 到路口后按新边序列 **正向寻线**。不要在格子中间掉头。
+- 到路口后先用视觉确认对准新走廊，再按新边序列 **正向寻线**。不要在格子中间掉头。
 
 0.40 m 只解决贴脸腾空间；换走廊靠退回上一节点。YAML 坐标不是倒车瞄准点。
 
@@ -301,6 +362,8 @@ get_nav_snapshot() -> {
 | 仅拓扑换边 | 障碍在边中段时过粗；须配合倒回 `from_node` |
 | 负权边 / Bellman-Ford | 走廊长度为正；倒车不是负 `length_m` |
 | 纯惯导加计积分定位 | 协议禁止 `IMU_DEBUG` 进导航；短距用 `ODOM_STATE` |
+| 用 `MOTION_ACTION` 前进锁航向跑长直道 | ICM42688 无磁，锁的是会漂的相对 yaw，车会画弧 |
+| 视觉每帧写回 MCU yaw / 当磁力计 | 无此 UART；会打乱 90°；噪声进积分更晃 |
 | 仅 BEV A\* / 仅 DWA | 缺全局换走廊能力，易局部迷路 |
 | TEB / 重轨迹优化 | 调参与实现成本高，窄场性价比一般 |
 | 端到端 RL / 大模型导航 | 数据与不可解释风险高；非本赛题首选 |
@@ -316,6 +379,7 @@ get_nav_snapshot() -> {
 - 涵洞侦察、嫌疑人识别、UID 播报文案（见 vision / mission / audio）。
 - 下位机电机控制细节（见 uart / 下位机仓库）。
 - 用负 `length_m` 表达倒车或惩罚；用加速度积分当倒车尺子。
+- 用视觉改写下位机 `relative_yaw`；用视觉修准 `ODOM_STATE.x/y`；用 `MOTION_ACTION` 前进锁航向替代寻线。
 
 ## 分阶段落地
 
@@ -324,15 +388,16 @@ get_nav_snapshot() -> {
 3. **视觉硬堵塞检测** — 接 `set_edge_blocked`；含停稳。
 4. **倒回上一节点** — 沿航向积 `s`；`BACKUP` 倒到 `s≈0`（帽 0.70 m）；贴脸再短退 0.40 m。
 5. **BEV 占用 + 局部 A\*** — 软避障与边中段处理。
-6. **（可选）DWA、obstacle 类别、Hybrid A\* 倒车段** — 场测不够再加。
+6. **视觉航向校准** — Pi 上 `yaw_offset`；直道 `CMD_VEL` 纠偏；90° 落地后视觉验收；隧道冻 offset。不写 MCU yaw。
+7. **（可选）DWA、obstacle 类别、Hybrid A\* 倒车段** — 场测不够再加。
 
 ### Stage-1 并行清单（与拓扑搜路解耦）
 
 | 项 | 现状 / 动作 |
 | --- | --- |
 | 导航相机姿态 | 车头居中、高约 0.25 m、相对水平低头约 28°–30°；与训数据姿态一致 |
-| road 实采 | GUI 拍照 → `data/road/`；尽量无人入画、车载视角 |
-| 分割训练 | 主机 YOLO-seg 单类 `road` → ONNX → RKNN（见 Stage-1 规格） |
+| road 实采 | GUI 拍照 → `data/road/`；同色矮沿为主集（见白底白沿规格） |
+| 分割训练 | 主机 YOLO-seg `road`（可选 `curb`）→ ONNX → RKNN（Stage-1 + `config/road_seg_train.yaml`） |
 | IPM / 中心线 | 仓库已有 `vision/ipm_proto/`；根目录 `PYTHONPATH=vision python3 -m ipm_proto.tests.test_pipeline` |
 | `(v, ω)` / UART | 寻线稳定后再接 50 Hz 下发 |
 
@@ -347,6 +412,8 @@ get_nav_snapshot() -> {
 | 是否增加 YOLO `obstacle` 类或仅用「非 road」 | 感知管线 | 队内 |
 | 隧道内无光时的判堵与速度策略 | 边属性 `tunnel` 专用逻辑 | 队内 + 规则 |
 | 粗定位：仅里程计 / 路网匹配到哪一精度 | 全局起点节点如何估计 | 队内 |
+| 视觉 `yaw_offset` 更新门限（直道稳定帧数、最大单步） | 航向校准会不会抖 | 队内场测 |
+| 90° 落地后视觉补正阈值（现意向 5°～15°） | 要不要二次 `MOTION_ACTION` | 队内场测 |
 | 与「纯视觉 +150」的传感器清单最终口径 | 读卡器已允许；勿引入超声/激光 | 规则答疑 |
 
 ## 参考
@@ -356,4 +423,5 @@ get_nav_snapshot() -> {
 - Stage-1 寻线与 IPM/中心线规格（见上表链接）。
 - Mission / UID 与 GUI 字段：`docs/superpowers/specs/2026-09-02-mission-topology-and-gui-design.md`。
 - 工程背景：拓扑–栅格分层导航（全局连通搜索 + 局部占用规划）为移动机器人常见架构；本文件为其在本赛题上的裁剪定义。
-- 里程计归属：[`docs/api/uart.md`](api/uart.md) — 倒车距离只用 `ODOM_STATE`。
+- 里程计与运动通道：[`docs/api/uart.md`](api/uart.md) — 倒车距离只用 `ODOM_STATE`；`CMD_VEL` / `MOTION_ACTION` 互斥。
+- 下位机：`RC/UART_MESSAGES.md` — 无磁力计时 yaw 为上电相对航向，会随时间漂移。

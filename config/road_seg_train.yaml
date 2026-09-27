@@ -1,0 +1,36 @@
+# YOLO-seg 道路分割训练提示配置（主机 Ultralytics 风格）
+# 权威约定：docs/superpowers/specs/2026-09-03-white-on-white-road-perception-design.md
+# 本文件不直接被板端加载；复制到训练工程后按数据路径改 names/path。
+
+# 建议类别（第一版可只用 road）
+names:
+  0: road
+  # 1: curb   # 可选：侧沿立面+顶面
+
+# 白底白沿：加大外观增强，避免只学颜色边线
+# 下列键名对齐 Ultralytics；版本差异时以官方文档为准。
+hyp_hint:
+  hsv_h: 0.02
+  hsv_s: 0.6
+  hsv_v: 0.5
+  degrees: 8.0
+  translate: 0.08
+  scale: 0.4
+  shear: 2.0
+  perspective: 0.0005
+  flipud: 0.0
+  fliplr: 0.5
+  mosaic: 0.8
+  mixup: 0.1
+  # 额外建议（需自定义或 Albumentations）：随机阴影条带、伽马、运动模糊
+
+dataset_policy:
+  same_color_curb_min_fraction: 0.7   # 同色矮沿样本占比下限
+  black_tape_max_fraction: 0.15       # 黑胶带对照上限
+  require_yaw_and_shadow: true
+  label_road_floor_only: true
+  curb_optional: true
+
+export:
+  imgsz: 640
+  # 训练后：ONNX → RKNN-Toolkit2 → models/*.rknn（不入库）

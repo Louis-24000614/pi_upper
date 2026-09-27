@@ -10,7 +10,7 @@
 
 ## Overview
 
-`uart/` 负责上位机与 STM32H743 下位机之间的全部串口通信：帧的编解码、会话与 ARM 状态机、50 Hz 速度下发、遥测解析与诊断统计。
+`uart/` 负责上位机与 STM32H743 下位机之间的全部串口通信：帧的编解码、会话与 ARM 状态机、速度环 `CMD_VEL`、动作环 `MOTION_ACTION`、遥测解析与诊断统计。
 
 模块边界很硬：本模块只做协议与链路，不做任何业务决策。速度指令从哪来（自主导航还是手动遥控）由 `state` 仲裁，这里拿到的是已经定好的目标速度；遥测解析出来的里程计和姿态原样抛给上层，不做滤波、不做坐标变换、不做规划。
 
@@ -47,7 +47,7 @@ include 路径统一取模块根，源码里写成 `#include "proto/frame.h"`、
 ```mermaid
 flowchart TB
   facade["uart<br/>线程 + Qt 信号槽（待实现）"]
-  sess["link/sess<br/>会话状态机：建链 · ARM · token · 看门狗 · 重连"]
+  sess["link/sess<br/>会话状态机：建链 · ARM · 速度/动作互斥 · 重连"]
   clock["link/clock<br/>单调时钟接口"]
   port["link/port<br/>Transport 接口 · termios 串口"]
   codec["proto/codec + proto/msg<br/>消息序列化，逐字节小端"]
@@ -61,7 +61,7 @@ flowchart TB
   frame --> crc
 ```
 
-线程模型：一条通信线程同时承担接收解帧与 50 Hz 周期发送。接收侧从 `Transport` 读到字节就喂给分帧状态机，解出完整帧后解码并通过信号抛给上层，不在通信线程里做业务处理。发送侧按 `steady_clock` 维护 50 Hz 节拍，每拍取最新的目标速度发一帧 `CMD_VEL`。
+线程模型：一条通信线程同时承担接收解帧与 50 Hz 周期发送。接收侧从 `Transport` 读到字节就喂给分帧状态机，解出完整帧后解码并通过信号抛给上层，不在通信线程里做业务处理。发送侧按 `steady_clock` 维护速度环节拍，仅在 `MotionMode::kVelocity` 时发 `CMD_VEL`。
 
 上层写入目标速度、读取最新遥测都走加锁的最新值邮箱，不排队——速度指令是覆盖式的，历史值没有意义。
 
@@ -81,7 +81,7 @@ flowchart TB
 
 `link/clock.h` — `Clock` 单调时间接口与 `SteadyClock` 实现。抽出接口是为了让超时与节拍能用假时钟测。
 
-`link/sess.h` — `Session` 会话状态机，模块的主要对外面。`Start()` 进入建链，`Poll()` 由通信线程反复调用，`SetVelocity()` 写入覆盖式目标速度，`RequestArm()` / `RequestDisarm()` / `RequestResetOdom()` / `RequestClearFault()` 是管理命令，`Shutdown()` 做零速加 DISARM 收尾。状态查询有 `link_state()`、`remote_state()`、`arm_token()`、`config_valid()`、`peer_protocol_version()`、`request_pending()`，数据查询有 `telemetry()`、`time_sync()`、`diagnostics()`。时序参数集中在 `SessionConfig`。
+`link/sess.h` — `Session` 会话状态机。`Start()` 进入建链，`Poll()` 由通信线程反复调用，`SetVelocity()` 写入覆盖式目标速度（速度环），`RequestMotionAction()` 发离散动作（路口 90° / STOP），`RequestArm()` / `RequestDisarm()` 是使能命令，`Shutdown()` 做停车收尾。状态查询有 `link_state()`、`remote_state()`、`motion_mode()`、`command_enabled()`、`config_valid()`、`peer_protocol_version()`、`request_pending()`。
 
 `proto/detail/bytes.h` — 模块内部的小端序读写辅助，不对外暴露。
 
@@ -95,23 +95,19 @@ flowchart TB
 
 **不 memcpy 结构体**：协议明确禁止把编译器结构体直接上线。所有字段逐字节读写，避免对齐、填充和 ABI 差异导致两端布局不一致。
 
-**50 Hz 独立线程而非 Qt 定时器**：Linux 非实时，Qt 事件循环被 UI 或推理拖慢时定时器抖动可能超过下位机 250 ms 的命令看门狗，直接触发安全停车。用独立线程加单调时钟补偿周期更可控。
+**独立线程而非 Qt 定时器**：速度环节拍用独立线程加单调时钟。下位机已无 250 ms 看门狗，但寻线仍需要稳定的 `(v, ω)` 刷新。
 
-**指令有效期**：上层给的速度带本地有效期，超期后本模块主动改发零速而不是保持旧值。低频"最后速度保持"在这个协议下是错误用法。
+**指令有效期**：上层给的速度带本地有效期，超期后本模块主动改发零速。下位机不会因断流自动停车，所以上位机必须自己停。
 
-**token 生命周期**：`boot_id` 变化（下位机复位）或链路重连都会让旧 token 失效，此时必须清空控制状态重新建链。本模块不缓存跨会话的 token。
+**ARM 生命周期**：以 `ARM_REQUEST` 的 ACK 为准，没有 token。`boot_id` 变化或链路重连后必须重新 ARM。
 
-**无序号带来的两条约束**（协议 v2 去掉了帧头里的序号）：
+**速度环与动作环互斥**：有限 `MOTION_ACTION` 未收到 `MOTION_RESULT` 时拒绝 `SetVelocity`；`STOP` 随时可发。长直道贴线走速度环；路口 90° 走动作环。本模块不融合视觉航向、不向下位机写 yaw；相对路面的朝向由 `navigation` 维护，见 [`docs/nav.md`](../../nav.md)。
 
-一是 `ACK` 只能按 `request_type` 配对，所以同一时刻只允许一个在途管理请求。`SendRequest()` 把管理命令串行化，在途期间的新请求直接拒绝并计入 `requests_refused_busy`，而不是发出去等一个无法归属的响应。等 `ack_timeout_ms`（默认 500 ms）超时后释放名额，但**不自动重发**——协议明确要求上位机不重发非幂等管理命令，重试与否留给上层决定。两个例外：`HELLO_REQ` 幂等且由 `HELLO_INFO` 回应，不占名额；`DISARM` 是停车动作，安全优先，任何时候都能发。
+**无序号带来的约束**：`ACK` 只能按 `request_type` 配对，同一时刻只允许一个在途管理请求。`HELLO_REQ` 不占名额；`DISARM` 与 `STOP` 不受名额限制。超时不自动重发。
 
-二是重复包与丢包检测在协议层不存在，`CMD_VEL` 靠"最后有效值覆盖"。这与本模块覆盖式邮箱的设计正好一致，但意味着链路层不再能识别乱序，安全完全依赖 token、K2 现场确认和 250 ms 看门狗。
+**字节间超时**：帧收到一半断流超过 20 ms 就丢弃残帧。取值与固件 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` 对齐。
 
-**字节间超时**：帧收到一半断流超过 20 ms 就丢弃残帧。v2 没有 COBS 和结束符，帧边界完全由 `LENGTH` 决定，残帧一旦与后续字节拼接，有可能凑出长度和内容都错位、但 CRC 恰好自洽的"合法"帧。取值与固件的 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` 对齐。
-
-**CRC8 的强度权衡**：v1 的 CRC-32C 换成了 CRC-8，检错能力显著下降——8 位校验对随机错误有约 1/256 的漏检率，而 payload 最大 128 字节时单帧突发错误也可能漏过。这是下位机定的，上位机只能跟随；实际防线是 token 校验、`config_valid` 检查和看门狗，不能把安全性寄托在帧校验上。
-
-**已知限制**：香橙派侧的 UART 针脚编号与设备节点尚未确定，硬件联调前只能跑 fake 传输层。下位机当前 `config_valid=0`，ARM 会返回 `ACK_DENIED_CONFIG`，运动控制要等对方绑定电机、编码器引脚和底盘参数后才能验证。
+**已知限制**：香橙派 UART overlay / 设备节点尚未确定，硬件联调前只能跑 fake 传输层。尚未实现 `uart.h/cpp` 通信线程外壳，导航也还没接到 `Session`。
 
 ## Testing
 
@@ -131,24 +127,24 @@ ctest --test-dir build --output-on-failure
 
 CRC-8/ATM 用协议给定的 `CRC8("123456789") = 0xF4` 自检。这个检查值能同时锁住多项式、初值、反射方向和最终异或四个参数——任何一个搞错结果都不是 0xF4，而这类参数错误在只做往返测试时完全测不出来。另外验证逐字节推进与一次性计算等价、单比特翻转会改变结果。
 
-帧层用文档里的黄金帧做字节级比对：`55 AA 01 01 02 70`（`HELLO_REQ`）与零速 `CMD_VEL` 的编码结果必须与文档完全一致，第三条故意保留旧 CRC 的坏帧必须计入 `crc_errors` 且不触发任何回调。v2 特有的几条：payload 里塞满 `55 AA` 必须按 `LENGTH` 正确定帧而不被误判为新帧；两帧粘连、以及整条字节流在**每一个**可能的位置切成两段，都要解出两帧；`LENGTH > 128` 计一次溢出并重新搜索同步字；坏帧最后一个字节恰好是 `0x55` 时后续帧仍能收到（与固件的重同步行为一致）；字节间超时后残帧被丢弃、超时窗口内的分片不受影响。另外覆盖逐字节喂入与整块喂入等价、0 到 128 全部长度的往返、以及三类非法编码参数的拒绝。
+帧层用固件黄金帧做字节级比对：`55 AA 01 01 01 79`（`HELLO_REQ`）与零速 `CMD_VEL` `55 AA 12 08 … 83` 必须完全一致，故意保留旧 CRC 的坏帧必须计入 `crc_errors` 且不触发回调。
 
-消息层的 payload 长度用 `static_assert` 锁死，改错编不过。字段偏移不能只靠编解码往返验证——偏移写错时往返仍然自洽，所以对照协议文档硬编码了关键字节位置：`CMD_VEL` 的 token 与两个 float 的 IEEE-754 位模式、`HELLO_INFO` 的 `capabilities`/`boot_id`/`config_valid`、`SYSTEM_STATUS` 偏移 32 的 `arm_token`、`ODOM_STATE` 偏移 48 与 `IMU_STATE` 偏移 40 的 `status_flags`。此外覆盖负编码器计数的往返、长度多一字节或少一字节均拒绝、NaN/Inf 在下发与接收两个方向都被拒绝、`command_age_ms` 的 `0xFFFFFFFF` 哨兵值不被当成数值、未知枚举值保守映射（未知状态不得变成 ARMED，未知结果码不得变成 OK）。
+消息层 payload 长度用 `static_assert` 锁死：`CMD_VEL` 8 字节、`ACK` 2 字节、`HELLO_INFO` 7 字节、`ODOM_STATE` 21 字节、`MOTION_ACTION` 8 字节、`MOTION_RESULT` 11 字节。未知状态不得变成 ARMED，未知 ACK 不得变成 OK。
+
+会话层覆盖：HELLO 重试、ARM ACK 判定配置、未 ARM 不发速度、速度环 20 ms、指令过期改零速、boot_id 变化丢掉使能、FAULT 停命令、链路超时、`Shutdown`、版本不匹配、以及方案 C：有限动作挡住速度环直到 `0x94`、STOP 可随时打断、等待结果时拒绝第二个有限动作。
 
 传输层的 termios 路径用**伪终端**测：真串口设备当前不存在，但 PTY 走同一套 termios 配置，raw 模式、二进制透传和 poll 行为都能覆盖，只有波特率和电平这类物理特性测不到。关键一条是让 `0x00`、`0x0A`、`0x0D` 和 XON/XOFF 的 `0x11`/`0x13` 原样往返——这些字节一旦被终端层改写或吞掉，表现就是随机丢帧，极难定位。此外覆盖无数据时 `WaitReadable` 超时、设备不存在与波特率不支持的失败路径、未打开时读写返回错误。内存 fake 另测了分片读取和读写失败注入。
 
-会话层用假传输、假时钟和一个"假下位机"做一问一答式的交互测试，25 个用例，每条对应协议里一条明确要求：HELLO 重发直到收到 `HELLO_INFO`；`config_valid=0` 与未建链时都不得发出 `ARM_REQUEST`；`ARM_REQUEST` 必须携带本次 `boot_id`；未持有 token 时不发速度帧；拿到 token 后 100 ms 内恰好发 5 帧（50 Hz）且 token 与速度正确；指令超过本地有效期后改发零速而不是保持旧值、也不是停发；非有限速度在写入时就被拒；`boot_id` 变化清 token 并停止下发；下位机报告非 ARMED 时同步清 token；静默超过 1 s 掉线重连；传输报错关闭链路并清会话；`Shutdown()` 发 3 帧零速且 `DISARM` 排在最后；ARMED 下拒绝 `RESET_ODOM`；遥测与故障事件正确解析并带接收时刻；时间同步能估出 500 ms 的人为偏移，往返时延过大的样本被丢弃；`HELLO_INFO` 报的协议版本与本端不一致时不进入已连接、也不允许 ARM；文档第 9 节的坏 CRC 帧不影响会话状态且计入诊断；逐字节分片读取下行为不变。
-
-v2 无序号相关的 5 条：`HELLO_REQ` 必须携带一字节协议版本且不占在途请求名额；在途管理请求期间第二个请求被拒且确实没有上线；类型对不上的 `ACK`（例如 `CMD_VEL` 出错回的 `ACK`）不能把在途请求误清掉；`ACK` 不来时超时释放名额但不自动重发；`DISARM` 不受在途请求阻塞。
+会话层用假传输、假时钟和假下位机做交互测试：HELLO、ARM ACK、速度环、动作环互斥、掉线重连。
 
 **待实现**：`uart.h/cpp` 线程外壳的测试（线程启停与信号转发的冒烟测试）。
 
 **测试逼出来的一个实现 bug**：`Session::Poll` 原先用"短读即读空"作为读取循环的结束条件。非阻塞 fd 上短读只表示"此刻可用这么多"，不代表后续没有数据，因此分片较小时会丢掉同一帧的后续字节。真串口上短读通常确实等于读空，所以这个错误在硬件联调里只会表现为偶发丢帧，极难定位；是 fake 的逐字节分片模式把它逼出来的。现在改为读到返回 0 才结束，并对单次 Poll 的字节数设上限，避免对端刷数据时饿死 50 Hz 发送节拍。
 
-**与固件源码的对照结果**：字段偏移不只对照了协议文档，还逐条比对了下位机 `App/Src/ros_link.c` 里各消息的构造代码（`enqueue_ack`、`enqueue_hello`、`RosLink_BuildOdometry` / `BuildImu` / `BuildStatus` / `BuildFault`），全部一致。
+**与固件源码的对照结果**：字段长度与 ID 对照下位机 `UART_PROTOCOL.md` / `uart_protocol.h`（协议标识 1，`CMD_VEL` 8 字节，`0x13` 为 `MOTION_ACTION`，`0x94` 为 `MOTION_RESULT`）。
 
-对照固件补上了两处文档没写的细节。一是 `ACK` 的 payload 布局：文档第 7 节给了字段表，但 `enqueue_ack` 确认 `request_type` 在偏移 0、`result` 在偏移 1、`arm_token` 从偏移 2 起共 6 字节，与 v1 的 8 字节（含 uint16 序号）不同。二是字节间超时：文档第 4 节只说"接收超时后重新搜索同步字"，没给数值，`Config/car_config.h` 里的 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` 是 20000（20 ms），本实现取同值。
+字节间超时仍取固件 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` = 20 ms。
 
 还有一处行为一致性：`UartProtocolDecoder_Push` 在 CRC 校验失败时，若那个坏字节本身是 `0x55`，会直接进入"等第二个同步字"而不是从头搜索。这不影响正确性，但会影响紧跟其后的帧能否被立刻收到，本实现照抄了这个分支并单独测了它。
 
-**Related**：[串口通信契约](../../api/uart.md) · [总体架构](../../architecture/overview.md)
+**Related**：[串口通信契约](../../api/uart.md) · [总体架构](../../architecture/overview.md) · [导航航向校准](../../nav.md)
