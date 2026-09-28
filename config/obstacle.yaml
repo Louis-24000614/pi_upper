@@ -1,0 +1,41 @@
+# 障碍物检测运行配置。前视导航相机加载，与道路分割分开。
+# 权重由 RKNN-Toolkit2 2.3.2 导出，目标 rk3588。类别名不在 .rknn 里。
+
+model:
+  id: trainV2_train-2_yolo11_1
+  path: models/obstacle/trainV2_train-2_yolo11_1.rknn
+  sha256: 97c8f8b99b5474a92e75380d98e303ed5ab9a0032e50e49ac821564afa086483
+  task: detect
+  # 道路分割占用 NPU 0。障碍检测用 1 号核，避免两路抢同一核。
+  core_mask: "1"
+  input:
+    name: images
+    size: 640
+    # 板端按 uint8 NHWC、RGB 喂入。Runtime 内部做 mean=0、std=255，等价于 /255。
+    layout: nhwc
+    dtype: uint8
+    color: rgb
+  # 检测头未融合进后处理。三个 stride，每个输出：DFL 框、类别、类别和。
+  classes:
+    count: 3
+    # 与训练 data.yaml 的 names 顺序一致后再填。空列表表示名字尚未核对。
+    names: []
+  outputs:
+    strides: [8, 16, 32]
+    reg_max: 16
+    order: [box, cls, score_sum]
+    heads:
+      - box: [1, 64, 80, 80]
+        cls: [1, 3, 80, 80]
+        score_sum: [1, 1, 80, 80]
+      - box: [1, 64, 40, 40]
+        cls: [1, 3, 40, 40]
+        score_sum: [1, 1, 40, 40]
+      - box: [1, 64, 20, 20]
+        cls: [1, 3, 20, 20]
+        score_sum: [1, 1, 20, 20]
+
+detect:
+  camera_role: navigation_camera
+  conf_thres: 0.45
+  iou_thres: 0.5
