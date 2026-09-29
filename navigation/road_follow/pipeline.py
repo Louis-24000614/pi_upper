@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
@@ -10,7 +12,24 @@ from ipm_proto.ipm import BevConfig, CameraExtrinsics, Ipm
 from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from_mapping
 from ipm_proto.temporal import CenterlineSmoother
 
+from road_follow.backup import near_lane_x
 from road_follow.control import FollowConfig, VelocityCommand, command_from_centerline, follow_config_from_mapping
+
+
+@dataclass(frozen=True)
+class FollowDiagnostics:
+    """一帧从原始 mask 到控制指令的关键中间量。"""
+
+    mask_road_pixels: int
+    bev_road_pixels: int
+    prior_points: int
+    raw_points: int
+    output_points: int
+    used_fallback: bool
+    y_min_m: float | None
+    y_max_m: float | None
+    lookahead_covered: bool
+    near_x_m: float | None
 
 
 def make_ipm(cfg: dict, image_shape: tuple[int, ...]) -> Ipm:
@@ -45,19 +64,55 @@ def command_from_mask(
     follow: FollowConfig | None = None,
 ) -> VelocityCommand:
     """单帧道路 mask 变成速度指令。``smoother`` 要跨帧复用。"""
+    command, _ = command_from_mask_with_diagnostics(mask, cfg, smoother, follow)
+    return command
+
+
+def command_from_mask_with_diagnostics(
+    mask: np.ndarray,
+    cfg: dict,
+    smoother: CenterlineSmoother,
+    follow: FollowConfig | None = None,
+) -> tuple[VelocityCommand, FollowDiagnostics]:
+    """生成速度指令，同时返回可解释停车原因的几何诊断。"""
     ipm = make_ipm(cfg, mask.shape)
     bev_mask = ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
+    mask_gray = mask[:, :, 0] if mask.ndim == 3 else mask
     gray = bev_mask[:, :, 0] if bev_mask.ndim == 3 else bev_mask
-    if gray.dtype == np.bool_:
-        road_pixels = int(np.count_nonzero(gray))
-    else:
-        road_pixels = int(np.count_nonzero(gray > 127))
+    mask_road_pixels = _road_pixels(mask_gray)
+    road_pixels = _road_pixels(gray)
     gains = follow if follow is not None else follow_config_from_mapping(cfg)
-    points = extract_centerline_with_width_prior(
+    prior_points = extract_centerline_with_width_prior(
         bev_mask, ipm.bev, road_prior_from_mapping(cfg)
     )
-    # 投影后的路比 0.35 m 窄时，路宽先验会把整行丢掉。这时改用原始中心线，避免有路却停车。
-    if len(points) < gains.min_points:
-        points = extract_centerline(bev_mask, ipm.bev)
+    raw_points = extract_centerline(bev_mask, ipm.bev)
+    used_fallback = len(prior_points) < gains.min_points
+    points = raw_points if used_fallback else prior_points
     points = smoother.update(points)
-    return command_from_centerline(points, road_pixels, gains)
+    ys = [float(y) for _, y in points]
+    lookahead_covered = _covers_lookahead(ys, gains.lookahead_m)
+    command = command_from_centerline(points, road_pixels, gains)
+    diagnostics = FollowDiagnostics(
+        mask_road_pixels=mask_road_pixels,
+        bev_road_pixels=road_pixels,
+        prior_points=len(prior_points),
+        raw_points=len(raw_points),
+        output_points=len(points),
+        used_fallback=used_fallback,
+        y_min_m=min(ys) if ys else None,
+        y_max_m=max(ys) if ys else None,
+        lookahead_covered=lookahead_covered,
+        near_x_m=near_lane_x(points),
+    )
+    return command, diagnostics
+
+
+def _road_pixels(gray: np.ndarray) -> int:
+    if gray.dtype == np.bool_:
+        return int(np.count_nonzero(gray))
+    return int(np.count_nonzero(gray > 127))
+
+
+def _covers_lookahead(ys: list[float], lookahead_m: float) -> bool:
+    ordered = sorted(ys)
+    return any(y0 <= lookahead_m <= y1 for y0, y1 in zip(ordered, ordered[1:]))

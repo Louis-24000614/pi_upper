@@ -488,6 +488,52 @@ void TestFiniteActionBlocksVelocityUntilResult() {
   CHECK(f.session.SetVelocity(0.3f, 0.0f));
 }
 
+void TestFiniteForwardCarriesDistanceAndBlocksVelocity() {
+  Fixture f;
+  f.Connect();
+  f.Arm();
+  f.mcu.ClearReceived();
+
+  CHECK(f.session.RequestMotionAction(static_cast<uint8_t>(MotionActionId::kForward), 0, 50,
+                                      320));
+  f.Tick(1);
+  CHECK(f.session.awaiting_motion_result());
+  CHECK(!f.session.SetVelocity(0.1f, 0.0f));
+
+  const FakeMcu::Received* frame = f.mcu.Last(MsgType::kMotionAction);
+  CHECK(frame != nullptr);
+  if (frame != nullptr) {
+    MotionAction action;
+    CHECK(DecodeMotionAction(frame->payload.data(), frame->payload.size(), &action));
+    CHECK(action.action == static_cast<uint8_t>(MotionActionId::kForward));
+    CHECK(action.speed_mmps == 50);
+    CHECK(action.distance_mm == 320);
+  }
+}
+
+void TestFiniteBackwardCarriesDistanceAndBlocksVelocity() {
+  Fixture f;
+  f.Connect();
+  f.Arm();
+  f.mcu.ClearReceived();
+
+  CHECK(f.session.RequestMotionAction(static_cast<uint8_t>(MotionActionId::kBackward), 0, 100,
+                                      420));
+  f.Tick(1);
+  CHECK(f.session.awaiting_motion_result());
+  CHECK(!f.session.SetVelocity(-0.1f, 0.0f));
+
+  const FakeMcu::Received* frame = f.mcu.Last(MsgType::kMotionAction);
+  CHECK(frame != nullptr);
+  if (frame != nullptr) {
+    MotionAction action;
+    CHECK(DecodeMotionAction(frame->payload.data(), frame->payload.size(), &action));
+    CHECK(action.action == static_cast<uint8_t>(MotionActionId::kBackward));
+    CHECK(action.speed_mmps == 100);
+    CHECK(action.distance_mm == 420);
+  }
+}
+
 void TestStopClearsActionAndAllowsVelocity() {
   Fixture f;
   f.Connect();
@@ -570,6 +616,8 @@ int main() {
   TestDisarmIsNotBlockedByPendingRequest();
   TestHelloReqCarriesVersion();
   TestFiniteActionBlocksVelocityUntilResult();
+  TestFiniteForwardCarriesDistanceAndBlocksVelocity();
+  TestFiniteBackwardCarriesDistanceAndBlocksVelocity();
   TestStopClearsActionAndAllowsVelocity();
   TestSecondFiniteActionRefusedWhileWaiting();
   TestRequestSpeechSendsAudioIdAndWaitsAck();

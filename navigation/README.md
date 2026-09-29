@@ -5,6 +5,7 @@
 | 子目录 | 说明 |
 | --- | --- |
 | `topo_proto/` | 加载 `config/nav_topology.yaml` + Dijkstra + 模拟封边；模块文档见 `docs/reference/navigation/topo_proto.md` |
+| `road_follow/` | 道路分割循线、路口/RFID 转向和遇障倒车；模块文档见 `docs/reference/navigation/road-follow-actions.md` |
 
 ```bash
 PYTHONPATH=navigation python3 -m topo_proto --start 0_0 --goal 5_2 --block 2_3__2_4

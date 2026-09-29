@@ -9,7 +9,11 @@ import numpy as np
 
 from ipm_proto.synth import make_straight_road_bev
 from ipm_proto.temporal import CenterlineSmoother
-from road_follow.pipeline import command_from_mask, make_ipm
+from road_follow.pipeline import (
+    command_from_mask,
+    command_from_mask_with_diagnostics,
+    make_ipm,
+)
 
 
 def _cfg() -> dict:
@@ -80,10 +84,31 @@ class PipelineTest(unittest.TestCase):
         self.assertLess(abs(cmd.omega_radps), 0.08)
 
     def test_empty_mask_stops(self) -> None:
-        cmd = command_from_mask(np.zeros((720, 1280), np.uint8), _cfg(), CenterlineSmoother())
+        mask = np.zeros((720, 1280), np.uint8)
+        cmd, diag = command_from_mask_with_diagnostics(
+            mask, _cfg(), CenterlineSmoother()
+        )
         self.assertEqual(cmd.reason, "stop_road")
         self.assertEqual(cmd.v_mps, 0.0)
         self.assertEqual(cmd.omega_radps, 0.0)
+        self.assertEqual(diag.mask_road_pixels, 0)
+        self.assertEqual(diag.bev_road_pixels, 0)
+        self.assertEqual(diag.output_points, 0)
+        self.assertFalse(diag.lookahead_covered)
+
+    def test_diagnostics_explain_a_valid_lookahead(self) -> None:
+        cfg = _cfg()
+        ipm = make_ipm(cfg, (720, 1280))
+        image = _image_from_bev(make_straight_road_bev(ipm.bev, 0.8), cfg)
+        cmd, diag = command_from_mask_with_diagnostics(
+            image, cfg, CenterlineSmoother()
+        )
+        self.assertEqual(cmd.reason, "follow")
+        self.assertGreater(diag.bev_road_pixels, 400)
+        self.assertGreaterEqual(diag.output_points, 8)
+        self.assertTrue(diag.lookahead_covered)
+        self.assertLessEqual(diag.y_min_m or 1.0, 0.45)
+        self.assertGreaterEqual(diag.y_max_m or 0.0, 0.45)
 
 
 if __name__ == "__main__":
