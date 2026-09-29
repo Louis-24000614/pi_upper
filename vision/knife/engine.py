@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 import threading
 import time
 
 import numpy as np
 
-from .preprocessing import normalize_rgb, preprocess_bgr
+from .preprocessing import normalize_rgb, prepare_raw_roi, preprocess_bgr
 from .templates import TemplateStore
+
+
+_LOG = logging.getLogger(__name__)
 
 
 def _sha256(path: Path) -> str:
@@ -59,6 +63,13 @@ class KnifeRecognizer:
 
     同一实例的推理由互斥锁串行化。服务启动一次加载，退出时调用close释放。
     """
+
+    # 这些数值只决定是否尝试单刀 ROI 补救，不是“有刀具”的验收阈值。
+    # 现场打印照片中，浅色刀刃漏分割时前景比例不足20%，且常规候选分数低于0.8。
+    ROI_MAX_FOREGROUND_RATIO = 0.20
+    ROI_MAX_BASE_SCORE = 0.80
+    ROI_MIN_SCORE_GAIN = 0.07
+    ROI_MIN_MARGIN = 0.03
 
     def __init__(self, config_path: str | Path) -> None:
         self.config_path = Path(config_path).resolve()
@@ -133,7 +144,25 @@ class KnifeRecognizer:
         }
         return descriptor, metadata.to_dict(), timing
 
-    def recognize(self, bgr: np.ndarray, request_id: str = "") -> dict:
+    def _raw_roi_scores(self, bgr: np.ndarray) -> np.ndarray:
+        """对完整 ROI 的四个直角方向取逐类最高分，补救刀刃漏分割。
+
+        仅在用户明确框选单刀且常规结果质量较低时调用；四个方向覆盖现场照片
+        与登记图的摆放差异。每次仍使用同一RKNN实例和互斥锁，避免并发访问。
+        """
+        best = np.full(len(self.templates.classes), -1.0, dtype=np.float32)
+        for turns in range(4):
+            rotated = np.ascontiguousarray(np.rot90(bgr, turns))
+            tensor = normalize_rgb(prepare_raw_roi(rotated))
+            with self._lock:
+                outputs = self._rknn.inference(inputs=[tensor], data_format=["nhwc"])
+            if outputs is None or len(outputs) != 1:
+                raise RuntimeError("ROI补救推理没有返回唯一输出")
+            scores, _ = self.templates.match(self._unit(outputs[0]))
+            best = np.maximum(best, scores)
+        return best
+
+    def recognize(self, bgr: np.ndarray, request_id: str = "", roi_selected: bool = False) -> dict:
         """识别一张BGR/BGRA图像，返回Top-2候选和分阶段耗时。"""
         descriptor, metadata, timing = self.embed(bgr)
         match_started = time.perf_counter_ns()
@@ -144,12 +173,36 @@ class KnifeRecognizer:
         timing["matching"] = matching_ms
         timing["total"] += matching_ms
         top1, top2 = int(ranking[0]), int(ranking[1])
+        recognition_mode = "segmented"
+        # 只在明确框选单刀、低前景且低分时尝试；原图容易带入桌面或其他刀具。
+        if (roi_selected
+                and metadata["foreground_ratio"] < self.ROI_MAX_FOREGROUND_RATIO
+                and float(scores[top1]) < self.ROI_MAX_BASE_SCORE):
+            fallback_started = time.perf_counter_ns()
+            try:
+                raw_scores = self._raw_roi_scores(bgr)
+                raw_ranking = np.argsort(-raw_scores)
+                raw_top1, raw_top2 = int(raw_ranking[0]), int(raw_ranking[1])
+                raw_margin = float(raw_scores[raw_top1] - raw_scores[raw_top2])
+                # 原图分数需明显更高且类别间仍有间隔，减少背景导致的随意翻转。
+                if (float(raw_scores[raw_top1]) > float(scores[top1]) + self.ROI_MIN_SCORE_GAIN
+                        and raw_margin >= self.ROI_MIN_MARGIN):
+                    scores = raw_scores
+                    top1, top2 = raw_top1, raw_top2
+                    recognition_mode = "raw_roi_rotation"
+            except (RuntimeError, ValueError) as error:
+                # 补救路径是可选的；异常时保留已完成的常规识别，避免整次请求失败。
+                _LOG.warning("ROI补救推理失败，使用常规候选: %s", error)
+            finally:
+                timing["roi_fallback"] = (time.perf_counter_ns() - fallback_started) / 1e6
+                timing["total"] += timing["roi_fallback"]
         return {
             "request_id": request_id,
             "model_id": self.config.get("model_id", "dinov3_448_fp16_v1"),
             "template_version": self.templates.version,
             # 当前没有未知类阈值验证，因此只能返回候选，不冒充已安全接受。
             "decision": "candidate",
+            "recognition_mode": recognition_mode,
             "top1_class": self.templates.classes[top1],
             "top1_score": float(scores[top1]),
             "top2_class": self.templates.classes[top2],

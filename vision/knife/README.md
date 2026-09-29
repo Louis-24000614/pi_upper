@@ -37,6 +37,8 @@ gui/knife_client.py提供异步客户端，主窗口尚未接线。调用方传�
 
 config/knife.json中的enabled=false由上层读取，手动启动服务不受该开关控制。建议停车后触发，ArcFace保留CPU执行，上线前做导航与识别混合负载验收。
 
+GUI默认发送整帧，服务以低分辨率CPU图像处理自动框选单刀，返回`roi_xyxy`和`roi_source`；无可靠框时退回整帧。调用方已自行裁剪时可发送`roi_selected=true`跳过自动框选。当浅色刀刃因白色背景漏分割、常规候选分数偏低时，服务额外尝试保留完整ROI的四个直角方向；响应中的`recognition_mode=raw_roi_rotation`表示采用了补救候选。该路径仍不提供“无刀具”判断。
+
 ## Testing
 
 ```bash

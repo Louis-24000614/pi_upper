@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 import cv2
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -29,6 +29,9 @@ from PySide6.QtWidgets import (
 )
 
 from camera_controls import CameraDevice, V4L2Control, list_cameras, set_control, v4l2_available
+from face_client import FaceClient
+from knife_client import KnifeClient
+from knife_roi import KnifeRoiDialog
 from snap import save_frame, snapshot_path
 
 
@@ -108,8 +111,41 @@ class CameraCaptureThread(QThread):
         self._running = False
 
 
+class CameraPreview(QLabel):
+    """等比例显示完整帧，并在窗口尺寸变化时重新缩放。"""
+
+    def __init__(self) -> None:
+        super().__init__("未连接")
+        self._source_image: QImage | None = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def set_frame_image(self, image: QImage) -> None:
+        self._source_image = image
+        self._fit_image()
+
+    def set_status(self, message: str) -> None:
+        self._source_image = None
+        self.setPixmap(QPixmap())
+        self.setText(message)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._source_image is not None:
+            self._fit_image()
+
+    def _fit_image(self) -> None:
+        size = self.contentsRect().size()
+        if size.isEmpty():
+            return
+        pixmap = QPixmap.fromImage(self._source_image).scaled(
+            size, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(pixmap)
+
+
 class MainWindow(QMainWindow):
-    """固定双逻辑摄像头视图，右侧仅切换任务与输入源。"""
+    """单路完整画面预览，后台同时采集两个逻辑摄像头。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -124,12 +160,34 @@ class MainWindow(QMainWindow):
             "recognition_camera": None,
             "navigation_camera": None,
         }
+        self.display_role = "recognition_camera"
         self.current_task = "测试1"
+        self.test1_running = False
+        self.camera_epoch = 0
+        self.recognition_frame_id = 0
+        self.recognition_frame_at = 0.0
+        self.pending_knife_id: str | None = None
+        self.pending_face_id: str | None = None
+        self.face_results: list[dict] = []
+        self.face_seen_at = 0.0
+        self._last_knife_message = ""
+        self._last_face_message = ""
+        self.test1_started_at = 0.0
+        self.knife_roi: tuple[int, int, int, int] | None = None
 
         self.setWindowTitle("RoboCup 侦查机器人上位机")
         # 外接 HDMI 屏常见 1024×600；最小尺寸必须小于可用桌面，否则窗口会被顶出屏幕。
         self.setMinimumSize(800, 480)
         self._build_ui()
+        self.knife_client = KnifeClient(parent=self)
+        self.face_client = FaceClient(parent=self)
+        self.knife_client.result_ready.connect(self._on_knife_result)
+        self.knife_client.request_failed.connect(self._on_knife_error)
+        self.face_client.result_ready.connect(self._on_face_result)
+        self.face_client.request_failed.connect(self._on_face_error)
+        self.recognition_timer = QTimer(self)
+        self.recognition_timer.setInterval(1200)
+        self.recognition_timer.timeout.connect(self._recognition_tick)
         self.showMaximized()
         self._discover_and_start_cameras()
 
@@ -195,20 +253,21 @@ class MainWindow(QMainWindow):
 
     def _build_camera_area(self) -> QWidget:
         container = QWidget()
-        layout = QHBoxLayout(container)
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 6, 0)
-        layout.setSpacing(8)
+        self.camera_stack = QStackedWidget()
         recognition_panel, self.recognition_view, self.recognition_device, self.recognition_fps = self._camera_panel(
             "识别摄像头", "recognition_camera"
         )
         navigation_panel, self.navigation_view, self.navigation_device, self.navigation_fps = self._camera_panel(
             "导航摄像头", "navigation_camera"
         )
-        layout.addWidget(recognition_panel, 1)
-        layout.addWidget(navigation_panel, 1)
+        self.camera_stack.addWidget(recognition_panel)
+        self.camera_stack.addWidget(navigation_panel)
+        layout.addWidget(self.camera_stack)
         return container
 
-    def _camera_panel(self, title: str, role: str) -> tuple[QFrame, QLabel, QLabel, QLabel]:
+    def _camera_panel(self, title: str, role: str) -> tuple[QFrame, CameraPreview, QLabel, QLabel]:
         panel = QFrame()
         panel.setObjectName("cameraPanel")
         layout = QVBoxLayout(panel)
@@ -231,9 +290,8 @@ class MainWindow(QMainWindow):
         header.addStretch(1)
         header.addWidget(fps)
         header.addWidget(capture)
-        view = QLabel("未连接")
+        view = CameraPreview()
         view.setObjectName("cameraView")
-        view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         view.setMinimumHeight(170)
         view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         layout.addLayout(header)
@@ -305,6 +363,14 @@ class MainWindow(QMainWindow):
         label.setWordWrap(True)
         return label
 
+    def _make_knife_label(self) -> QLabel:
+        self.run_knife = self._value("未启动")
+        return self.run_knife
+
+    def _make_face_label(self) -> QLabel:
+        self.run_face = self._value("未启动")
+        return self.run_face
+
     def _info_grid(self, rows: tuple[tuple[str, QLabel], ...]) -> QGridLayout:
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -318,19 +384,41 @@ class MainWindow(QMainWindow):
     def _build_run_page(self) -> QWidget:
         page, layout = self._page()
         layout.addWidget(self._title("运行控制"))
+        self.run_system_status = self._value("待机")
+        self.run_current_task = self._value(self.current_task)
+        self.run_elapsed = self._value("00:00")
         layout.addLayout(self._info_grid((
-            ("系统状态", self._value("待机")), ("当前任务", self._value("--")),
+            ("系统状态", self.run_system_status), ("当前任务", self.run_current_task),
             ("当前目标", self._value("--")), ("当前位置", self._value("--")),
-            ("比赛计时", self._value("00:00")),
+            ("识别计时", self.run_elapsed),
         )))
-        for text, object_name in (("开始任务", "primaryButton"), ("停止任务", "stopButton"), ("软件急停", "emergencyButton")):
+        for text, object_name, action in (
+            ("开始测试1识别", "primaryButton", self._start_test1),
+            ("停止识别", "stopButton", self._stop_test1),
+            ("软件急停", "emergencyButton", self._emergency_stop),
+        ):
             button = QPushButton(text)
             button.setObjectName(object_name)
             button.setMinimumHeight(48)
-            button.clicked.connect(lambda checked=False, name=text: self._log(f"收到{name}请求：控制接口未接入"))
+            button.clicked.connect(action)
             layout.addWidget(button)
-        notice = QLabel("任务控制接口尚未接入")
+        layout.addLayout(self._info_grid((("刀具候选", self._make_knife_label()),
+                                          ("人脸识别", self._make_face_label()))))
+        roi_buttons = QHBoxLayout()
+        select_roi = QPushButton("手动修正取景")
+        select_roi.clicked.connect(self._choose_knife_roi)
+        clear_roi = QPushButton("恢复自动取景")
+        clear_roi.clicked.connect(self._clear_knife_roi)
+        roi_buttons.addWidget(select_roi)
+        roi_buttons.addWidget(clear_roi)
+        layout.addLayout(roi_buttons)
+        self.knife_roi_notice = QLabel("刀具取景：自动框选单刀")
+        self.knife_roi_notice.setObjectName("hint")
+        self.knife_roi_notice.setWordWrap(True)
+        layout.addWidget(self.knife_roi_notice)
+        notice = QLabel("测试1仅运行识别；STM32 控制接口未接入，软件急停不能制动底盘。")
         notice.setObjectName("notice")
+        notice.setWordWrap(True)
         layout.addWidget(notice)
         layout.addStretch(1)
         return page
@@ -417,19 +505,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(devices_title)
         self.status_recognition_camera = self._value("检测中")
         self.status_navigation_camera = self._value("检测中")
+        self.status_rknn = self._value("未检查")
         layout.addLayout(self._info_grid((
             ("识别摄像头", self.status_recognition_camera),
             ("导航摄像头", self.status_navigation_camera),
             ("STM32", self._value("未连接")),
-            ("RKNN", self._value("未加载")),
+            ("RKNN", self.status_rknn),
         )))
 
         vision_title = QLabel("视觉")
         vision_title.setObjectName("sectionTitle")
         layout.addWidget(vision_title)
+        self.status_knife = self._value("未启动")
+        self.status_face = self._value("未启动")
         layout.addLayout(self._info_grid((
-            ("目标检测", self._value("未加载")),
-            ("人脸识别", self._value("未加载")),
+            ("刀具候选", self.status_knife),
+            ("人脸识别", self.status_face),
             ("道路分割", self._value("未加载")),
             ("路径辅助", self._value("未加载")),
         )))
@@ -472,6 +563,21 @@ class MainWindow(QMainWindow):
         self.mapping_notice.setObjectName("notice")
         self.mapping_notice.setWordWrap(True)
         layout.addWidget(self.mapping_notice)
+        display_title = QLabel("屏幕画面切换")
+        display_title.setObjectName("pageTitle")
+        layout.addWidget(display_title)
+        display_hint = QLabel("只切换左侧展示的完整画面，不改变摄像头输入源或识别、导航数据。")
+        display_hint.setObjectName("hint")
+        display_hint.setWordWrap(True)
+        layout.addWidget(display_hint)
+        self.display_switch_button = QPushButton("显示导航摄像头画面")
+        self.display_switch_button.setObjectName("primaryButton")
+        self.display_switch_button.setMinimumHeight(58)
+        self.display_switch_button.clicked.connect(self._switch_display)
+        layout.addWidget(self.display_switch_button)
+        self.display_notice = QLabel("当前显示：识别摄像头")
+        self.display_notice.setObjectName("notice")
+        layout.addWidget(self.display_notice)
         layout.addStretch(1)
         return page
 
@@ -658,8 +764,11 @@ class MainWindow(QMainWindow):
         self.physical_fps[path] = fps
         self.camera_errors.pop(path, None)
         if path == self.role_sources["recognition_camera"]:
-            self._show_frame(self.recognition_view, frame)
-        if path == self.role_sources["navigation_camera"]:
+            self.recognition_frame_id += 1
+            self.recognition_frame_at = time.monotonic()
+            if self.display_role == "recognition_camera":
+                self._show_frame(self.recognition_view, frame, self._current_face_boxes())
+        if path == self.role_sources["navigation_camera"] and self.display_role == "navigation_camera":
             self._show_frame(self.navigation_view, frame)
         self._update_camera_ui()
 
@@ -668,7 +777,7 @@ class MainWindow(QMainWindow):
         self._update_camera_ui()
 
     def _save_snapshot(self, role: str) -> None:
-        """保存该逻辑摄像头当前原始帧，不保存预览裁剪图。"""
+        """保存该逻辑摄像头当前原始帧。"""
         frame = self.recognition_frame if role == "recognition_camera" else self.navigation_frame
         dest = snapshot_path(role)
         ok, message = save_frame(frame, dest)
@@ -677,18 +786,27 @@ class MainWindow(QMainWindow):
         else:
             self._log(f"拍照失败：{message}")
 
-    def _show_frame(self, view: QLabel, frame: object) -> None:
+    def _show_frame(self, view: CameraPreview, frame: object, face_boxes: list[dict] | None = None) -> None:
         if frame is None:
             return
+        if face_boxes:
+            frame = frame.copy()
+            for result in face_boxes:
+                box = result.get("bbox", [])
+                if not isinstance(box, (list, tuple)) or len(box) != 4:
+                    continue
+                try:
+                    x1, y1, x2, y2 = (int(value) for value in box)
+                except (TypeError, ValueError):
+                    continue
+                color = (50, 200, 80) if result.get("name") != "Unknown" else (130, 170, 190)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, str(result.get("name", "Unknown")), (x1, max(20, y1 - 7)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         height, width, channels = rgb.shape
         image = QImage(rgb.data, width, height, channels * width, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(image).scaled(
-            view.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        view.setPixmap(pixmap)
-        view.setText("")
+        view.set_frame_image(image)
 
     def _update_camera_ui(self) -> None:
         self._update_role_ui("recognition_camera", self.recognition_view, self.recognition_device, self.recognition_fps)
@@ -701,23 +819,20 @@ class MainWindow(QMainWindow):
         navigation_path = self.role_sources["navigation_camera"] or "未连接"
         self.mapping_notice.setText(f"识别摄像头 → {recognition_path}\n导航摄像头 → {navigation_path}")
 
-    def _update_role_ui(self, role: str, view: QLabel, device_label: QLabel, fps_label: QLabel) -> None:
+    def _update_role_ui(self, role: str, view: CameraPreview, device_label: QLabel, fps_label: QLabel) -> None:
         path = self.role_sources[role]
         if not path:
             device_label.setText("设备：未连接")
             fps_label.setText("-- FPS")
-            view.setPixmap(QPixmap())
-            view.setText("未连接")
+            view.set_status("未连接")
             return
         device_label.setText(f"设备：{path}")
         fps = self.physical_fps.get(path, 0.0)
         fps_label.setText(f"{fps:.1f} FPS" if fps else "-- FPS")
         if path in self.camera_errors:
-            view.setPixmap(QPixmap())
-            view.setText(self.camera_errors[path])
+            view.set_status(self.camera_errors[path])
         elif path not in self.physical_frames:
-            view.setPixmap(QPixmap())
-            view.setText("正在打开摄像头…")
+            view.set_status("正在打开摄像头…")
 
     def _role_status(self, role: str) -> str:
         path = self.role_sources[role]
@@ -739,8 +854,210 @@ class MainWindow(QMainWindow):
         return f"{path} · {camera_format} · 实际 {fps:.1f} FPS" if fps else f"{path} · {camera_format}"
 
     def _select_task(self, task: str) -> None:
+        if task != self.current_task:
+            self._stop_test1()
         self.current_task = task
         self.footer_task.setText(f"任务：{task}")
+        self.run_current_task.setText(task)
+
+    def _set_knife_status(self, message: str) -> None:
+        self.run_knife.setText(message)
+        self.status_knife.setText(message)
+
+    def _set_face_status(self, message: str) -> None:
+        self.run_face.setText(message)
+        self.status_face.setText(message)
+
+    def _invalidate_recognition(self) -> None:
+        self.camera_epoch += 1
+        self.pending_knife_id = None
+        self.pending_face_id = None
+        self.face_results = []
+        self.face_seen_at = 0.0
+        self.recognition_frame_at = 0.0
+        if self.test1_running:
+            self._set_knife_status("等待识别帧")
+            self._set_face_status("等待识别帧")
+
+    def _start_test1(self) -> None:
+        if self.current_task != "测试1":
+            self._log("当前只接入测试1双识别；请先在“切换”页选择测试1。")
+            return
+        if self.test1_running:
+            return
+        self.test1_running = True
+        self.test1_started_at = time.monotonic()
+        self.run_elapsed.setText("00:00")
+        self.run_system_status.setText("测试1识别中")
+        self.status_rknn.setText("连接服务中")
+        self._last_knife_message = ""
+        self._last_face_message = ""
+        self._invalidate_recognition()
+        self.recognition_timer.start()
+        self._log("测试1已启动：刀具和人脸服务并行处理识别摄像头画面。")
+        self._recognition_tick()
+
+    def _stop_test1(self) -> None:
+        if not self.test1_running:
+            return
+        self.test1_running = False
+        self.recognition_timer.stop()
+        self._invalidate_recognition()
+        self._set_knife_status("未启动")
+        self._set_face_status("未启动")
+        self.run_system_status.setText("待机")
+        self._log("测试1识别已停止。")
+
+    def _emergency_stop(self) -> None:
+        self._stop_test1()
+        self._log("软件急停请求：识别已停止；STM32 未接入，底盘未收到制动命令。")
+
+    def _recognition_tick(self) -> None:
+        if not self.test1_running:
+            return
+        elapsed = int(time.monotonic() - self.test1_started_at)
+        self.run_elapsed.setText(f"{elapsed // 60:02d}:{elapsed % 60:02d}")
+        frame = self.recognition_frame
+        if frame is None or time.monotonic() - self.recognition_frame_at > 2.5:
+            self._set_knife_status("等待识别摄像头")
+            self._set_face_status("等待识别摄像头")
+            return
+        frame_id = self.recognition_frame_id
+        epoch = self.camera_epoch
+        captured_ns = time.monotonic_ns()
+        if not self.knife_client.busy:
+            knife_frame = frame
+            if self.knife_roi is not None:
+                x0, y0, x1, y1 = self.knife_roi
+                knife_frame = frame[y0:y1, x0:x1]
+            request_id = f"test1-{epoch}-knife-{frame_id}"
+            self.pending_knife_id = request_id
+            self.knife_client.submit(knife_frame, request_id, frame_id, epoch, captured_ns,
+                                     roi_selected=self.knife_roi is not None)
+        if not self.face_client.busy:
+            request_id = f"test1-{epoch}-face-{frame_id}"
+            self.pending_face_id = request_id
+            self.face_client.submit(frame, request_id)
+
+    def _on_knife_result(self, data: dict) -> None:
+        if not self.test1_running or data.get("request_id") != self.pending_knife_id:
+            return
+        self.pending_knife_id = None
+        if data.get("camera_epoch") != self.camera_epoch:
+            return
+        # 服务端每帧自动框选；把框选状态显示出来，便于发现没有可靠单刀区域的画面。
+        roi_box = data.get("roi_xyxy")
+        if isinstance(roi_box, list) and len(roi_box) == 4:
+            self.knife_roi_notice.setText(
+                f"刀具取景：自动框选 {roi_box[2] - roi_box[0]} × {roi_box[3] - roi_box[1]} 像素"
+            )
+        elif data.get("roi_source") == "manual":
+            self.knife_roi_notice.setText("刀具取景：手动修正中")
+        else:
+            self.knife_roi_notice.setText("刀具取景：未找到可靠单刀区域，整帧仅供参考")
+        candidate = data.get("top1_class") or "无候选"
+        score = data.get("top1_score")
+        score_text = f" · 相似度 {float(score):.3f}" if isinstance(score, (int, float)) else ""
+        second = data.get("top2_class")
+        second_score = data.get("top2_score")
+        second_text = (f" · 次选 {second} {float(second_score):.3f}"
+                       if second and isinstance(second_score, (int, float)) else "")
+        margin = data.get("margin")
+        margin_text = f" · 分差 {float(margin):.3f}" if isinstance(margin, (int, float)) else ""
+        ambiguity = "，易混淆" if isinstance(margin, (int, float)) and margin < 0.05 else ""
+        preprocess = data.get("preprocess")
+        foreground_ratio = preprocess.get("foreground_ratio") if isinstance(preprocess, dict) else None
+        input_warning = ""
+        if isinstance(foreground_ratio, (int, float)):
+            if foreground_ratio < 0.10:
+                input_warning = f" · 前景仅 {foreground_ratio:.1%}，可能漏掉刀刃"
+            elif foreground_ratio > 0.50:
+                input_warning = f" · 前景 {foreground_ratio:.1%}，可能包含背景"
+        if data.get("recognition_mode") == "raw_roi_rotation":
+            # 已用完整ROI补救时，旧掩码比例不再代表最终输入质量。
+            input_warning = " · 已补救浅色刀刃"
+        quality = "" if data.get("quality_ok", True) else " · 图像质量不足"
+        message = f"{candidate}{score_text}{second_text}{margin_text}{input_warning}{quality}（仅候选{ambiguity}）"
+        self._set_knife_status(message)
+        self.status_rknn.setText("刀具模型就绪")
+        self.footer_rknn.setText("RKNN：就绪")
+        if message != self._last_knife_message:
+            self._log(f"刀具识别：{message}")
+            self._last_knife_message = message
+
+    def _on_knife_error(self, payload: dict) -> None:
+        if not self.test1_running or payload.get("request_id") != self.pending_knife_id:
+            return
+        self.pending_knife_id = None
+        message = "服务不可用：" + str(payload.get("error", "未知错误"))[:140]
+        self._set_knife_status(message)
+        self.status_rknn.setText("刀具服务异常")
+        self.footer_rknn.setText("RKNN：异常")
+        if message != self._last_knife_message:
+            self._log(f"刀具识别：{message}")
+            self._last_knife_message = message
+
+    def _on_face_result(self, payload: dict) -> None:
+        if not self.test1_running or payload.get("request_id") != self.pending_face_id:
+            return
+        self.pending_face_id = None
+        data = payload.get("data", {})
+        results = data.get("results", [])
+        if not isinstance(results, list):
+            self._on_face_message("服务响应缺少 results")
+            return
+        self.face_results = [result for result in results if isinstance(result, dict)]
+        self.face_seen_at = time.monotonic()
+        if not self.face_results:
+            message = "未检测到人脸"
+        else:
+            names = [str(result.get("name", "Unknown")) for result in self.face_results]
+            message = f"{len(names)} 张：" + "、".join(names[:4])
+            if len(names) > 4:
+                message += "…"
+        self._on_face_message(message)
+
+    def _on_face_error(self, payload: dict) -> None:
+        if not self.test1_running or payload.get("request_id") != self.pending_face_id:
+            return
+        self.pending_face_id = None
+        self.face_results = []
+        self.face_seen_at = 0.0
+        self._on_face_message("服务不可用：" + str(payload.get("error", "未知错误"))[:140])
+
+    def _on_face_message(self, message: str) -> None:
+        self._set_face_status(message)
+        if message != self._last_face_message:
+            self._log(f"人脸识别：{message}")
+            self._last_face_message = message
+
+    def _current_face_boxes(self) -> list[dict]:
+        if self.test1_running and time.monotonic() - self.face_seen_at < 2.5:
+            return self.face_results
+        return []
+
+    def _choose_knife_roi(self) -> None:
+        frame = self.recognition_frame
+        if frame is None:
+            self.knife_roi_notice.setText("识别摄像头尚无画面，无法框选。")
+            return
+        dialog = KnifeRoiDialog(frame.copy(), self)
+        if dialog.exec() != KnifeRoiDialog.DialogCode.Accepted:
+            return
+        roi = dialog.get_roi()
+        if roi is None:
+            return
+        self.knife_roi = roi
+        self._invalidate_recognition()
+        width, height = roi[2] - roi[0], roi[3] - roi[1]
+        self.knife_roi_notice.setText(f"刀具取景：手动修正 {width} × {height} 像素；人脸仍使用完整画面")
+        self._log(f"刀具取景已更新：{roi}")
+
+    def _clear_knife_roi(self) -> None:
+        self.knife_roi = None
+        self._invalidate_recognition()
+        self.knife_roi_notice.setText("刀具取景：自动框选单刀")
+        self._log("刀具取景已恢复自动框选。")
 
     def _swap_camera_sources(self) -> None:
         recognition = self.role_sources["recognition_camera"]
@@ -749,13 +1066,29 @@ class MainWindow(QMainWindow):
             self.mapping_notice.setText("需要检测到两路物理 USB 摄像头后，才能交换输入源。")
             return
         self.role_sources["recognition_camera"], self.role_sources["navigation_camera"] = navigation, recognition
+        self.knife_roi = None
+        self.knife_roi_notice.setText("刀具取景：摄像头已切换，自动框选单刀")
+        self._invalidate_recognition()
         self._render_mapped_frames()
         self._update_camera_ui()
 
+    def _switch_display(self) -> None:
+        if self.display_role == "recognition_camera":
+            self.display_role = "navigation_camera"
+            self.camera_stack.setCurrentIndex(1)
+            self.display_notice.setText("当前显示：导航摄像头")
+            self.display_switch_button.setText("显示识别摄像头画面")
+        else:
+            self.display_role = "recognition_camera"
+            self.camera_stack.setCurrentIndex(0)
+            self.display_notice.setText("当前显示：识别摄像头")
+            self.display_switch_button.setText("显示导航摄像头画面")
+        self._render_mapped_frames()
+
     def _render_mapped_frames(self) -> None:
-        if self.recognition_frame is not None:
-            self._show_frame(self.recognition_view, self.recognition_frame)
-        if self.navigation_frame is not None:
+        if self.display_role == "recognition_camera" and self.recognition_frame is not None:
+            self._show_frame(self.recognition_view, self.recognition_frame, self._current_face_boxes())
+        if self.display_role == "navigation_camera" and self.navigation_frame is not None:
             self._show_frame(self.navigation_view, self.navigation_frame)
 
     def _sync_sidebar_button(self, index: int) -> None:
@@ -764,6 +1097,9 @@ class MainWindow(QMainWindow):
             button.setChecked(True)
 
     def closeEvent(self, event) -> None:
+        self._stop_test1()
+        self.knife_client.shutdown(4500)
+        self.face_client.shutdown(4500)
         for thread in self.capture_threads.values():
             thread.stop()
         for thread in self.capture_threads.values():

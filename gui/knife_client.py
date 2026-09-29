@@ -16,7 +16,8 @@ import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
 
 
-def _multipart(fields: dict[str, object], image_png: bytes) -> tuple[bytes, str]:
+def _multipart(fields: dict[str, object], image_bytes: bytes,
+               filename: str = "frame.png", image_type: str = "image/png") -> tuple[bytes, str]:
     """构造一个只含简单字段和单张PNG的multipart请求。"""
     boundary = "----KnifeBoundary" + secrets.token_hex(12)
     chunks: list[bytes] = []
@@ -32,9 +33,9 @@ def _multipart(fields: dict[str, object], image_png: bytes) -> tuple[bytes, str]
     chunks.extend(
         [
             f"--{boundary}\r\n".encode(),
-            b'Content-Disposition: form-data; name="image"; filename="frame.png"\r\n',
-            b"Content-Type: image/png\r\n\r\n",
-            image_png,
+            f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'.encode(),
+            f"Content-Type: {image_type}\r\n\r\n".encode(),
+            image_bytes,
             b"\r\n",
             f"--{boundary}--\r\n".encode(),
         ]
@@ -46,7 +47,7 @@ class _RequestThread(QThread):
     """执行一次PNG编码和HTTP请求；每个KnifeClient最多有一个活动线程。"""
 
     succeeded = Signal(dict)
-    failed = Signal(str)
+    failed = Signal(dict)
 
     def __init__(
         self,
@@ -82,9 +83,9 @@ class _RequestThread(QThread):
             self.succeeded.emit(payload["data"])
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            self.failed.emit(f"HTTP {error.code}: {detail}")
+            self.failed.emit({"request_id": self.metadata["request_id"], "error": f"HTTP {error.code}: {detail}"})
         except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-            self.failed.emit(str(error))
+            self.failed.emit({"request_id": self.metadata["request_id"], "error": str(error)})
 
 
 class KnifeClient(QObject):
@@ -95,7 +96,7 @@ class KnifeClient(QObject):
     """
 
     result_ready = Signal(dict)
-    request_failed = Signal(str)
+    request_failed = Signal(dict)
     busy_changed = Signal(bool)
 
     def __init__(
@@ -112,7 +113,7 @@ class KnifeClient(QObject):
     @property
     def busy(self) -> bool:
         """是否已有请求正在编码、传输或推理。"""
-        return self._worker is not None and self._worker.isRunning()
+        return self._worker is not None
 
     def submit(
         self,
@@ -121,18 +122,20 @@ class KnifeClient(QObject):
         frame_id: int,
         camera_epoch: int,
         captured_monotonic_ns: int,
+        roi_selected: bool = False,
     ) -> bool:
         """提交一个原始BGR/BGRA帧；忙时拒绝，不排队。"""
         if self.busy:
             return False
         if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] not in (3, 4):
-            self.request_failed.emit("识别帧格式无效")
+            self.request_failed.emit({"request_id": request_id, "error": "识别帧格式无效"})
             return False
         metadata = {
             "request_id": request_id,
             "frame_id": frame_id,
             "camera_epoch": camera_epoch,
             "captured_monotonic_ns": captured_monotonic_ns,
+            "roi_selected": str(roi_selected).lower(),
         }
         worker = _RequestThread(self.endpoint, frame, metadata, self.timeout_s, self)
         worker.succeeded.connect(self.result_ready)

@@ -175,6 +175,24 @@ def preprocess_bgr(
     return cv2.cvtColor(boxed, cv2.COLOR_BGR2RGB), boxed_mask, metadata
 
 
+def prepare_raw_roi(image: np.ndarray, size: int = 448) -> np.ndarray:
+    """保留单刀取景中的浅色刀刃，生成不依赖前景掩码的模型输入。
+
+    白色刀刃印在白纸上时，基于边框颜色的分割可能只留下深色刀柄。该路径仅供
+    低质量 ROI 的补救推理使用，不替换已验证的常规预处理和生产模板。
+    """
+    if image.ndim != 3 or image.shape[2] not in (3, 4) or image.dtype != np.uint8:
+        raise ValueError(f"原图ROI必须为uint8 BGR/BGRA，实际={image.shape} {image.dtype}")
+    if image.shape[2] == 4:
+        alpha = image[:, :, 3:4].astype(np.float32) / 255.0
+        bgr = (image[:, :, :3] * alpha + 127.0 * (1.0 - alpha)).astype(np.uint8)
+    else:
+        bgr = image
+    full_mask = np.full(bgr.shape[:2], 255, dtype=np.uint8)
+    boxed, _ = _letterbox(bgr, full_mask, size)
+    return cv2.cvtColor(boxed, cv2.COLOR_BGR2RGB)
+
+
 def normalize_rgb(rgb: np.ndarray) -> np.ndarray:
     """按已验收模型约定执行一次ImageNet归一化，输出连续NHWC张量。"""
     if rgb.shape != (448, 448, 3) or rgb.dtype != np.uint8:

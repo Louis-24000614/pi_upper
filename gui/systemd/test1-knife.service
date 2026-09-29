@@ -1,0 +1,14 @@
+[Unit]
+Description=Test1 DINOv3 knife recognition
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/orangepi/pi_upper
+ExecStart=/home/orangepi/vision_compare_pi_upper/bin/python -m vision.knife.service --config config/knife.json --host 127.0.0.1 --port 20005
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

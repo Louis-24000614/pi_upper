@@ -1,0 +1,8 @@
+name: pi_upper
+channels:
+  - conda-forge
+dependencies:
+  # 香橙派是 aarch64，统一从 conda-forge 安装 Qt 和 OpenCV，避免混用系统 Python 包。
+  - python=3.10
+  - pyside6
+  - opencv

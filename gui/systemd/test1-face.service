@@ -1,0 +1,15 @@
+[Unit]
+Description=Test1 ArcFace recognition
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/orangepi/pi_upper/vision/arcface-lite
+ExecStart=/home/orangepi/vision_compare_pi_upper/bin/python server.py --host 127.0.0.1 --port 20004
+Environment=DB_PATH=/home/orangepi/vision_compare_results/face_db.npz
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

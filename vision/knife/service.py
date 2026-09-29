@@ -14,6 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 import numpy as np
 
 from .engine import KnifeRecognizer
+from .roi import select_knife_roi
 
 _engine: Optional[KnifeRecognizer] = None
 _inference_lock = asyncio.Lock()
@@ -35,6 +36,21 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Knife recognition", version="1", lifespan=lifespan)
 
 
+def _recognize_frame(frame: np.ndarray, request_id: str, roi_selected: bool) -> tuple[dict, dict]:
+    """默认自动取景；调用方已裁剪时直接识别，避免重复裁剪刀具。"""
+    roi = None if roi_selected else select_knife_roi(frame)
+    if roi is not None:
+        x0, y0, x1, y1 = roi.xyxy
+        frame = frame[y0:y1, x0:x1]
+    # 自动框选和手动裁剪都属于单刀ROI，允许引擎在低分时检查原图旋转候选。
+    result = _engine.recognize(frame, request_id, roi_selected or roi is not None)
+    return result, {
+        "roi_selected": roi_selected or roi is not None,
+        "roi_xyxy": list(roi.xyxy) if roi is not None else None,
+        "roi_source": "manual" if roi_selected else (roi.source if roi is not None else None),
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     """返回模型是否就绪和当前忙状态。"""
@@ -53,6 +69,7 @@ async def recognize(
     frame_id: int = Form(-1),
     camera_epoch: int = Form(0),
     captured_monotonic_ns: int = Form(0),
+    roi_selected: bool = Form(False),
 ) -> dict:
     """串行处理一张PNG/JPEG；忙时立即返回409，避免积压过期相机帧。"""
     if _engine is None:
@@ -70,7 +87,7 @@ async def recognize(
         raise HTTPException(status_code=413, detail="decoded_image_too_large")
     try:
         async with _inference_lock:
-            data = await asyncio.to_thread(_engine.recognize, frame, request_id)
+            data, roi_info = await asyncio.to_thread(_recognize_frame, frame, request_id, roi_selected)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
@@ -79,6 +96,7 @@ async def recognize(
         frame_id=frame_id,
         camera_epoch=camera_epoch,
         captured_monotonic_ns=captured_monotonic_ns,
+        **roi_info,
     )
     return {"status": "success", "message": "ok", "data": data}
 
