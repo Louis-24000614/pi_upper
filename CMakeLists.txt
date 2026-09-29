@@ -16,3 +16,4 @@ endif()
 
 add_subdirectory(uart)
 add_subdirectory(servo)
+add_subdirectory(mission)
