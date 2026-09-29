@@ -41,7 +41,7 @@
 
 payload 里可以出现任意字节（包括 `55 AA`），接收端必须严格按 `LENGTH` 取数据。协议标识在 `HELLO_REQ` 的 payload 里。
 
-字段级细节见下位机 `UART_PROTOCOL.md` / `UART_MESSAGES.md`。上位机需要处理的消息：下发 `HELLO_REQ`、`ARM_REQUEST`、`DISARM`、`CMD_VEL`、`MOTION_ACTION`；接收 `ACK`、`HELLO_INFO`、`ODOM_STATE`、`IMU_STATE`、`IMU_DEBUG`、`SYSTEM_STATUS`、`MOTION_RESULT`、`RFID_CARD`。`RFID_CARD` 为 3 字节读卡结果，保存在会话遥测里，本模块不播报、不计分。
+字段级细节见下位机 `UART_PROTOCOL.md` / `UART_MESSAGES.md`。上位机需要处理的消息：下发 `HELLO_REQ`、`ARM_REQUEST`、`DISARM`、`CMD_VEL`、`MOTION_ACTION`、`SPEAK_AUDIO`；接收 `ACK`、`HELLO_INFO`、`ODOM_STATE`、`IMU_STATE`、`IMU_DEBUG`、`SYSTEM_STATUS`、`MOTION_RESULT`、`RFID_CARD`。`SPEAK_AUDIO` 通过 `Session::RequestSpeech()` 请求下位机播放预录音频；`RFID_CARD` 为 3 字节读卡结果，保存在会话遥测里，本模块不播报、不计分。
 
 序列化必须逐字节写入，**不允许**把 C++ 结构体直接 `memcpy` 上线——对齐、填充和 ABI 差异会让两端字节布局不一致。
 
@@ -65,6 +65,8 @@ sequenceDiagram
     M->>U: ACK(已接受)
     M->>U: MOTION_RESULT 有限动作终态
   end
+  U->>M: SPEAK_AUDIO(audio_id)
+  M->>U: ACK(SPEAK_AUDIO, OK/错误)
   U->>M: STOP 或零速 CMD_VEL
   U->>M: DISARM
 ```
@@ -99,7 +101,7 @@ sequenceDiagram
 
 超过约 1 s 没收到任何有效帧时，把本地链路状态置为断开并通知上层。清故障仍由下位机侧长按 K2。
 
-**ACK 配对**：没有序号，`ACK` 只能按 `request_type` 配对。同一时刻只允许一个在途管理请求（含非 STOP 的 `MOTION_ACTION`）。超时只释放名额，不自动重发。`HELLO_REQ` 幂等且由 `HELLO_INFO` 回应，不占名额。`DISARM` 与 `STOP` 不受名额限制。
+**ACK 配对**：没有序号，`ACK` 只能按 `request_type` 配对。同一时刻只允许一个在途管理请求（含 `SPEAK_AUDIO` 和非 STOP 的 `MOTION_ACTION`）。超时只释放名额，不自动重发。`HELLO_REQ` 幂等且由 `HELLO_INFO` 回应，不占名额。`DISARM` 与 `STOP` 不受名额限制。
 
 ## Testing
 

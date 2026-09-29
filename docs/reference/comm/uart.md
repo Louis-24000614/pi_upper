@@ -10,7 +10,7 @@
 
 ## Overview
 
-`uart/` 负责上位机与 STM32H743 下位机之间的全部串口通信：帧的编解码、会话与 ARM 状态机、速度环 `CMD_VEL`、动作环 `MOTION_ACTION`、遥测解析与诊断统计。
+`uart/` 负责上位机与 STM32H743 下位机之间的全部串口通信：帧的编解码、会话与 ARM 状态机、速度环 `CMD_VEL`、动作环 `MOTION_ACTION`、语音命令 `SPEAK_AUDIO`、遥测解析与诊断统计。
 
 模块边界很硬：本模块只做协议与链路，不做任何业务决策。速度指令从哪来（自主导航还是手动遥控）由 `state` 仲裁，这里拿到的是已经定好的目标速度；遥测解析出来的里程计和姿态原样抛给上层，不做滤波、不做坐标变换、不做规划。
 
@@ -81,7 +81,7 @@ flowchart TB
 
 `link/clock.h` — `Clock` 单调时间接口与 `SteadyClock` 实现。抽出接口是为了让超时与节拍能用假时钟测。
 
-`link/sess.h` — `Session` 会话状态机。`Start()` 进入建链，`Poll()` 由通信线程反复调用，`SetVelocity()` 写入覆盖式目标速度（速度环），`RequestMotionAction()` 发离散动作（路口 90° / STOP），`RequestArm()` / `RequestDisarm()` 是使能命令，`Shutdown()` 做停车收尾。状态查询有 `link_state()`、`remote_state()`、`motion_mode()`、`command_enabled()`、`config_valid()`、`peer_protocol_version()`、`request_pending()`。
+`link/sess.h` — `Session` 会话状态机。`Start()` 进入建链，`Poll()` 由通信线程反复调用，`SetVelocity()` 写入覆盖式目标速度（速度环），`RequestMotionAction()` 发离散动作（路口 90° / STOP），`RequestSpeech()` 请求下位机通过 UART4 播放 1～12 号预录音频，`RequestArm()` / `RequestDisarm()` 是使能命令，`Shutdown()` 做停车收尾。状态查询有 `link_state()`、`remote_state()`、`motion_mode()`、`command_enabled()`、`config_valid()`、`peer_protocol_version()`、`request_pending()`。
 
 `proto/detail/bytes.h` — 模块内部的小端序读写辅助，不对外暴露。
 
@@ -103,7 +103,9 @@ flowchart TB
 
 **速度环与动作环互斥**：有限 `MOTION_ACTION` 未收到 `MOTION_RESULT` 时拒绝 `SetVelocity`；`STOP` 随时可发。长直道贴线走速度环；路口 90° 走动作环。本模块不融合视觉航向、不向下位机写 yaw；相对路面的朝向由 `navigation` 维护，见 [`docs/nav.md`](../../nav.md)。
 
-**无序号带来的约束**：`ACK` 只能按 `request_type` 配对，同一时刻只允许一个在途管理请求。`HELLO_REQ` 不占名额；`DISARM` 与 `STOP` 不受名额限制。超时不自动重发。
+**无序号带来的约束**：`ACK` 只能按 `request_type` 配对，同一时刻只允许一个在途管理请求，语音播放请求也占用这个名额。`HELLO_REQ` 不占名额；`DISARM` 与 `STOP` 不受名额限制。超时不自动重发。
+
+**语音播放**：上层调用 `Session::RequestSpeech(audio_id)`，其中 `audio_id` 当前必须为 `1`～`12`。该调用只要求 USART2 已完成 HELLO，不要求电机 ARM。下位机 ACK 为 `ACK_OK` 时表示已接受并尝试通过 UART4 发送，不代表语音播放已经完成；当前 UART4 没有回传播放状态。
 
 **字节间超时**：帧收到一半断流超过 20 ms 就丢弃残帧。取值与固件 `CAR_PROTOCOL_INTERBYTE_TIMEOUT_US` 对齐。
 
@@ -129,7 +131,7 @@ CRC-8/ATM 用协议给定的 `CRC8("123456789") = 0xF4` 自检。这个检查值
 
 帧层用固件黄金帧做字节级比对：`55 AA 01 01 01 79`（`HELLO_REQ`）与零速 `CMD_VEL` `55 AA 12 08 … 83` 必须完全一致，故意保留旧 CRC 的坏帧必须计入 `crc_errors` 且不触发回调。
 
-消息层 payload 长度用 `static_assert` 锁死：`CMD_VEL` 8 字节、`ACK` 2 字节、`HELLO_INFO` 7 字节、`ODOM_STATE` 21 字节、`MOTION_ACTION` 8 字节、`MOTION_RESULT` 11 字节、`RFID_CARD` 3 字节。未知状态不得变成 ARMED，未知 ACK 不得变成 OK。
+消息层 payload 长度用 `static_assert` 锁死：`CMD_VEL` 8 字节、`SPEAK_AUDIO` 1 字节、`ACK` 2 字节、`HELLO_INFO` 7 字节、`ODOM_STATE` 21 字节、`MOTION_ACTION` 8 字节、`MOTION_RESULT` 11 字节、`RFID_CARD` 3 字节。未知状态不得变成 ARMED，未知 ACK 不得变成 OK。
 
 会话层覆盖：HELLO 重试、ARM ACK 判定配置、未 ARM 不发速度、速度环 20 ms、指令过期改零速、boot_id 变化丢掉使能、FAULT 停命令、链路超时、`Shutdown`、版本不匹配、以及方案 C：有限动作挡住速度环直到 `0x94`、STOP 可随时打断、等待结果时拒绝第二个有限动作。
 

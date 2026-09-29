@@ -22,6 +22,7 @@ constexpr size_t kSizeHelloReq = 1;
 constexpr size_t kSizeArmRequest = 4;
 constexpr size_t kSizeCmdVel = 8;
 constexpr size_t kSizeMotionAction = 8;
+constexpr size_t kSizeSpeakAudio = 1;
 constexpr size_t kSizeAck = 2;
 constexpr size_t kSizeHelloInfo = 7;
 constexpr size_t kSizeOdomState = 21;
@@ -35,11 +36,13 @@ size_t EncodeHelloReq(const HelloReq& msg, uint8_t* dst, size_t cap);
 size_t EncodeArmRequest(const ArmRequest& msg, uint8_t* dst, size_t cap);
 size_t EncodeCmdVel(const CmdVel& msg, uint8_t* dst, size_t cap);
 size_t EncodeMotionAction(const MotionAction& msg, uint8_t* dst, size_t cap);
+size_t EncodeSpeakAudio(const SpeakAudio& msg, uint8_t* dst, size_t cap);
 
 bool DecodeHelloReq(const uint8_t* payload, size_t len, HelloReq* out);
 bool DecodeArmRequest(const uint8_t* payload, size_t len, ArmRequest* out);
 bool DecodeCmdVel(const uint8_t* payload, size_t len, CmdVel* out);
 bool DecodeMotionAction(const uint8_t* payload, size_t len, MotionAction* out);
+bool DecodeSpeakAudio(const uint8_t* payload, size_t len, SpeakAudio* out);
 
 size_t EncodeAck(const Ack& msg, uint8_t* dst, size_t cap);
 size_t EncodeHelloInfo(const HelloInfo& msg, uint8_t* dst, size_t cap);

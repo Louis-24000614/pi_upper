@@ -112,6 +112,22 @@ bool DecodeMotionAction(const uint8_t* payload, size_t len, MotionAction* out) {
   return true;
 }
 
+size_t EncodeSpeakAudio(const SpeakAudio& msg, uint8_t* dst, size_t cap) {
+  if (cap < kSizeSpeakAudio || msg.audio_id < 1U || msg.audio_id > 12U) {
+    return 0;
+  }
+  dst[0] = msg.audio_id;
+  return kSizeSpeakAudio;
+}
+
+bool DecodeSpeakAudio(const uint8_t* payload, size_t len, SpeakAudio* out) {
+  if (len != kSizeSpeakAudio || payload[0] < 1U || payload[0] > 12U) {
+    return false;
+  }
+  out->audio_id = payload[0];
+  return true;
+}
+
 size_t EncodeAck(const Ack& msg, uint8_t* dst, size_t cap) {
   if (cap < kSizeAck) {
     return 0;

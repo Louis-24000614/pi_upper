@@ -431,6 +431,20 @@ bool Session::RequestMotionAction(uint8_t action, uint8_t quarter_turns, uint16_
   return true;
 }
 
+bool Session::RequestSpeech(uint8_t speech_id) {
+  if (link_state_ != LinkState::kConnected || speech_id < 1U || speech_id > 12U) {
+    return false;
+  }
+
+  SpeakAudio msg;
+  msg.audio_id = speech_id;
+  uint8_t payload[kSizeSpeakAudio] = {};
+  if (EncodeSpeakAudio(msg, payload, sizeof(payload)) != kSizeSpeakAudio) {
+    return false;
+  }
+  return SendRequest(MsgType::kSpeakAudio, payload, sizeof(payload));
+}
+
 void Session::Shutdown() {
   if (!port_.IsOpen()) {
     return;
