@@ -173,10 +173,7 @@ Mission::SpeechTask
     -> 语音模块
 ```
 
-当前下位机已经有 `Speaker_Speak(Audioname_t)`，但上下位机 USART2 协议还没有语音播放消息。因此 `SpeechTask` 的实现分两步：
-
-1. 在上下位机协议中增加语音播放命令和音频编号字段；
-2. 在 `Speak()` 中调用 `uart::Session` 的发送接口。
+下位机已经有 `Speaker_Speak(Audioname_t)`，上下位机 USART2 协议现在使用 `SPEAK_AUDIO (0x14)` 传递音频编号。`SpeechTask::Speak()` 的具体实现应调用 `uart::Session::RequestSpeech(speech_id)`，并根据返回值记录“已提交”或“未提交”。
 
 建议让语音层负责编号映射，不要让 Mission 直接依赖语音模块的文件名：
 
@@ -292,7 +289,7 @@ FAULT
 
 - 固定拓扑的实时定位和路口选边；
 - 转弯前的路口检测和转弯后的重新找线；
-- UART4 语音播放命令；
+- 将 `SpeechTask` 绑定到真实的 `uart::Session`，并处理 `RequestSpeech()` 的 ACK/超时结果；
 - 4 段隧道的进入、通过和出口判断；
 - 8 个涵洞的嫌疑人/物体识别；
 - 障碍物 BEV 投影、倒车和重新规划；
@@ -303,7 +300,7 @@ FAULT
 1. 先实现 `NavigationTask` 的固定地图、路口和回场逻辑；
 2. 接入 `uart::Session`，打通 `CMD_VEL`、`MOTION_ACTION` 和 `MOTION_RESULT`；
 3. 用下位机 `RFID_CARD` 遥测验证“新卡 + 物理点”确认流程；
-4. 增加 USART2 到 UART4 的语音播放协议；
+4. 将 `SpeechTask` 接入 `uart::Session::RequestSpeech()`，完成任务层的语音播报；
 5. 接入隧道通过状态机；
 6. 接入涵洞识别和一次性播报；
 7. 接入障碍物重规划；

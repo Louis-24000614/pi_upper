@@ -16,6 +16,7 @@ using namespace uart;  // NOLINT(build/namespaces)
 static_assert(kSizeArmRequest == 4, "ARM_REQUEST payload 应为 4 字节");
 static_assert(kSizeCmdVel == 8, "CMD_VEL payload 应为 8 字节");
 static_assert(kSizeMotionAction == 8, "MOTION_ACTION payload 应为 8 字节");
+static_assert(kSizeSpeakAudio == 1, "SPEAK_AUDIO payload 应为 1 字节");
 static_assert(kSizeAck == 2, "ACK payload 应为 2 字节");
 static_assert(kSizeHelloReq == 1, "HELLO_REQ payload 应为 1 字节");
 static_assert(kSizeHelloInfo == 7, "HELLO_INFO payload 应为 7 字节");
@@ -32,6 +33,7 @@ void TestMsgTypeValues() {
   CHECK(static_cast<uint8_t>(MsgType::kDisarm) == 0x11);
   CHECK(static_cast<uint8_t>(MsgType::kCmdVel) == 0x12);
   CHECK(static_cast<uint8_t>(MsgType::kMotionAction) == 0x13);
+  CHECK(static_cast<uint8_t>(MsgType::kSpeakAudio) == 0x14);
   CHECK(static_cast<uint8_t>(MsgType::kAck) == 0x80);
   CHECK(static_cast<uint8_t>(MsgType::kHelloInfo) == 0x81);
   CHECK(static_cast<uint8_t>(MsgType::kOdomState) == 0x90);
@@ -85,6 +87,22 @@ void TestMotionActionLayout() {
   CHECK(back.quarter_turns == 1);
   CHECK(back.speed_mmps == 75);
   CHECK(back.distance_mm == 0);
+}
+
+void TestSpeakAudioLayout() {
+  SpeakAudio msg;
+  msg.audio_id = 8;
+  uint8_t buf[kSizeSpeakAudio] = {};
+  CHECK(EncodeSpeakAudio(msg, buf, sizeof(buf)) == kSizeSpeakAudio);
+  CHECK(buf[0] == 8);
+
+  SpeakAudio back;
+  CHECK(DecodeSpeakAudio(buf, sizeof(buf), &back));
+  CHECK(back.audio_id == 8);
+  msg.audio_id = 0;
+  buf[0] = 0;
+  CHECK(EncodeSpeakAudio(msg, buf, sizeof(buf)) == 0);
+  CHECK(!DecodeSpeakAudio(buf, sizeof(buf), &back));
 }
 
 void TestNonFiniteRejected() {
@@ -317,6 +335,7 @@ int main() {
   TestCmdVelLayout();
   TestZeroCmdVelPayload();
   TestMotionActionLayout();
+  TestSpeakAudioLayout();
   TestNonFiniteRejected();
   TestStrictLength();
   TestHelloInfoRoundTrip();

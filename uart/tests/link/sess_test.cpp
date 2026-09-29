@@ -511,6 +511,38 @@ void TestSecondFiniteActionRefusedWhileWaiting() {
   CHECK(f.mcu.CountOf(MsgType::kMotionAction) == 0);
 }
 
+void TestRequestSpeechSendsAudioIdAndWaitsAck() {
+  Fixture f;
+  f.Connect();
+  CHECK(f.session.RequestSpeech(8));
+  f.Tick(1);
+
+  const FakeMcu::Received* frame = f.mcu.Last(MsgType::kSpeakAudio);
+  CHECK(frame != nullptr);
+  if (frame != nullptr) {
+    SpeakAudio audio;
+    CHECK(DecodeSpeakAudio(frame->payload.data(), frame->payload.size(), &audio));
+    CHECK(audio.audio_id == 8);
+  }
+  CHECK(f.session.request_pending());
+
+  Ack ack;
+  ack.request_type = static_cast<uint8_t>(MsgType::kSpeakAudio);
+  ack.result = AckResult::kOk;
+  f.mcu.SendAck(f.port, ack);
+  f.Tick(1);
+  CHECK(!f.session.request_pending());
+}
+
+void TestRequestSpeechRejectsInvalidIdAndDisconnectedLink() {
+  Fixture f;
+  f.session.Start();
+  CHECK(!f.session.RequestSpeech(1));
+  f.Connect();
+  CHECK(!f.session.RequestSpeech(0));
+  CHECK(!f.session.RequestSpeech(13));
+}
+
 }  // namespace
 
 int main() {
@@ -540,5 +572,7 @@ int main() {
   TestFiniteActionBlocksVelocityUntilResult();
   TestStopClearsActionAndAllowsVelocity();
   TestSecondFiniteActionRefusedWhileWaiting();
+  TestRequestSpeechSendsAudioIdAndWaitsAck();
+  TestRequestSpeechRejectsInvalidIdAndDisconnectedLink();
   return uart::test::Finish("sess");
 }

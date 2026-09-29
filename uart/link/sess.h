@@ -110,6 +110,10 @@ class Session {
   bool RequestMotionAction(uint8_t action, uint8_t quarter_turns = 0, uint16_t speed_mmps = 0,
                            uint32_t distance_mm = 0);
 
+  /// 请求下位机通过 UART4 播放预录音频，当前 speech_id 为 1～12。
+  /// 该命令不要求运动处于 ARMED，但需要已经完成 HELLO 建链，并等待 ACK。
+  bool RequestSpeech(uint8_t speech_id);
+
   void Shutdown();
 
   LinkState link_state() const { return link_state_; }

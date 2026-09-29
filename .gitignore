@@ -1,5 +1,6 @@
 # C++ build
 build/
+build-ninja/
 
 # Python
 __pycache__/
