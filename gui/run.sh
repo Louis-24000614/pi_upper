@@ -9,7 +9,8 @@ export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-/home/orangepi/.Xauthority}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 
-PYTHON="${PYTHON:-/home/orangepi/pyside6-venv/bin/python}"
+# 默认使用部署在香橙派上的 Conda 环境；PYTHON 仍可覆盖，便于临时调试。
+PYTHON="${PYTHON:-/home/orangepi/miniconda3/envs/pi_upper/bin/python}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 xrandr --output HDMI-1 --primary --mode 1280x720 --rate 60

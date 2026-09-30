@@ -45,7 +45,7 @@
   "files_sha256": {
     "dinov3_448_fp16.rknn": "ee016460014a280aa9945aa75e9e459fce9d21d9dfdf862871101c754c9fdee9",
     "templates.json": "ee9f8d2f3b195df9032d1fe397ec5f673752372e0f95ba3c1adac407127f2a80",
-    "templates_frozen_benchmark.json": "ca1d9a88be68a6ef8358b3bb74588eefb6c91d460e88bd9c6dcd293a5fc56fb9",
+    "templates_frozen_benchmark.json": "d8bbf76e4f857f5c05dd86f7db793eb2d5bf067516d861fd6960bfd3ca565333",
     "references/knife_01/reference.png": "6c3f03b0a045920e7133332593ecf8b2d08dc8d50125a448fb430e0c67c83528",
     "references/knife_02/reference.png": "ef460cda08c60d70465dc53abc161f813b0955578465141ca4f403cfbcd075e9",
     "references/knife_03/reference.png": "ca255e4c0b7da4bc302d19e2a6464133dc1d568561ec26e2467276442a7a51f6",

@@ -8,7 +8,8 @@ export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-/home/orangepi/.Xauthority}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 
-PYTHON="${PYTHON:-/home/orangepi/pyside6-venv/bin/python}"
+# 与主界面共用 Conda 环境，避免两套解释器加载不同版本的 Qt/OpenCV。
+PYTHON="${PYTHON:-/home/orangepi/miniconda3/envs/pi_upper/bin/python}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 xrandr --output HDMI-1 --primary --mode 1280x720 --rate 60
