@@ -19,6 +19,8 @@ class FollowConfig:
     min_points: int = 8
     min_road_pixels: int = 400
     max_abs_omega: float = 1.0
+    # 加到预瞄点 X（向右为正）。直道被看成偏左时用正值，避免一直左转。
+    x_bias_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ def follow_config_from_mapping(cfg: dict) -> FollowConfig:
         min_points=int(f.get("min_points", 8)),
         min_road_pixels=int(f.get("min_road_pixels", 400)),
         max_abs_omega=float(f.get("max_abs_omega", 1.0)),
+        x_bias_m=float(f.get("x_bias_m", 0.0)),
     )
 
 
@@ -73,6 +76,7 @@ def command_from_centerline(
         return VelocityCommand(0.0, 0.0, "stop_lookahead")
 
     x_right, y_forward = target
+    x_right += cfg.x_bias_m
     v = cfg.turn_mps if abs(x_right) >= cfg.turn_abs_x_m else cfg.cruise_mps
     denom = x_right * x_right + y_forward * y_forward
     if denom <= 1e-8 or y_forward <= 1e-3:
