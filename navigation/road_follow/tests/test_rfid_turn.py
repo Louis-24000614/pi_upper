@@ -11,7 +11,7 @@ from road_follow.rfid_turn import RfidTurn, RfidTurnConfig, step_rfid_turn
 
 class RfidTurnTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = RfidTurnConfig(stop_settle_s=0.30, reacquire_frames=2)
+        self.cfg = RfidTurnConfig(stop_settle_s=2.0, reacquire_frames=2)
         self.notes: queue.Queue[str] = queue.Queue()
         self.sent: list[str] = []
         self.follow = VelocityCommand(0.10, 0.01, "follow")
@@ -31,14 +31,14 @@ class RfidTurnTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
         state, command = step_rfid_turn(
-            state, None, self.follow, self.notes, self.send, 10.2, self.cfg
+            state, None, self.follow, self.notes, self.send, 11.9, self.cfg
         )
         self.assertEqual(state.phase, "stopping")
         self.assertEqual(command.reason, "stop_rfid_settle")
         self.assertEqual(self.sent, [])
 
         state, command = step_rfid_turn(
-            state, None, self.follow, self.notes, self.send, 10.3, self.cfg
+            state, None, self.follow, self.notes, self.send, 12.0, self.cfg
         )
         self.assertEqual(state.phase, "turning")
         self.assertEqual(command.reason, "rfid_turning")

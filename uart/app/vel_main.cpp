@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
       session.RequestArm();
     }
     if (!announced && session.command_enabled()) {
-      std::cerr << "ARMED " << device << "\n";
+      std::cerr << "[串口] 已使能 " << device << "\n";
       announced = true;
     }
 
@@ -165,7 +165,8 @@ int main(int argc, char** argv) {
               finite_action = FiniteAction::kTurn;
               action_ms = clock.NowMs();
               action_timeout_ms = 20000;
-              std::cerr << (line == "turn left" ? "TURN_LEFT\n" : "TURN_RIGHT\n");
+              std::cerr << (line == "turn left" ? "[动作] 开始原地左转\n"
+                                                  : "[动作] 开始原地右转\n");
             }
           }
           continue;
@@ -199,7 +200,8 @@ int main(int argc, char** argv) {
                   static_cast<uint64_t>(distance_mm) * 1000ULL / speed_mmps;
               action_timeout_ms = std::min<uint64_t>(
                   30000, std::max<uint64_t>(5000, expected_ms * 3 + 2000));
-              std::cerr << name << " " << distance_mm << "mm " << speed_mmps << "mm/s\n";
+              std::cerr << "[动作] 开始定距" << (backward ? "后退 " : "前进 ")
+                        << distance_mm << " mm，速度 " << speed_mmps << " mm/s\n";
             }
           }
           continue;
@@ -222,9 +224,9 @@ int main(int argc, char** argv) {
     if (!session.command_enabled() && now_ms - last_status_ms >= 1000) {
       last_status_ms = now_ms;
       if (session.link_state() == uart::LinkState::kConnected) {
-        std::cerr << "LINK 已连上 " << device << "，等待使能\n";
+        std::cerr << "[串口] 已连接 " << device << "，等待使能\n";
       } else {
-        std::cerr << "LINK 等待下位机 " << device << "\n";
+        std::cerr << "[串口] 等待下位机 " << device << "\n";
       }
     }
     if (finite_action != FiniteAction::kNone) {
@@ -273,6 +275,6 @@ int main(int argc, char** argv) {
   }
 
   session.Shutdown();
-  std::cerr << "STOP\n";
+  std::cerr << "[串口] 已停车\n";
   return 0;
 }

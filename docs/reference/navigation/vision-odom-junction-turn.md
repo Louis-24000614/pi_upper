@@ -16,7 +16,7 @@
 2. 拓扑/任务策略回答“该向左、向右还是直行”；
 3. 编码器和 IMU回答“进入视觉盲区后还要走多远、怎样保持直行”。
 
-本文机制用于**没有 RFID 标签的普通路口**。有标签的巡逻位置采用“新读卡事件到点 → 停车 → 按拓扑方向原地转 90°”，两类触发的统一状态约定见 [拓扑定位、RFID 到点与路口转向](topology-rfid-navigation.md)。卡号只负责播报和去重，不决定左右转方向。
+本文状态机继续只负责普通 `junction`。`patrol_slot` 保留原来的巡检点视觉接近状态机，只把最后的 UID 确认删除；两套参数和门限没有合并。边界见 [拓扑定位、纯视觉到点与可选 RFID 测试](topology-rfid-navigation.md)。
 
 ## 控制边界
 
@@ -24,13 +24,13 @@
 
 ```text
 FOLLOW（分割循迹）
-    │ 在 0.55..0.95 m 看到所需方向支路，只锁存方向
+    │ 连续看到侧边矮沿端头，只锁存「这里有路口」
     ▼
-APPROACH（继续分割循迹，支路被遮挡也不遗忘）
-    │ 中央走廊末端进入交接窗
+APPROACH（继续分割循迹，侧边角消失或仍可见都不直接交接）
+    │ BEV 正前方 0.34..0.48 m 检测带 road mask 占比连续 3 帧 <= 10%
     ▼
-FORWARD（下位机定距直行）
-    │ 编码器达到 distance_mm，IMU保持动作起始航向
+FORWARD（下位机锁航向固定直行 0.20 m）
+    │ 编码器达到 distance_mm，IMU保持上电基准维护出的当前方向档位
     ▼
 TURNING（下位机 N×90°）
     │ 收到 MOTION_RESULT=DONE
@@ -40,59 +40,53 @@ REACQUIRE（原地重新观察）
     └──────────────────────────────► FOLLOW
 ```
 
-里程计只承担几十厘米的局部补盲，不从上一个巡逻点开始开环跑完整个格网。这样可限制轮胎打滑、轮径误差和累计航向漂移的影响。
+里程计只承担最后 20 cm 的局部补盲，不从上一个巡逻点开始开环跑完整个格网。这样可限制轮胎打滑、轮径误差和累计航向漂移的影响。
 
 ## 视觉路口距离
 
-`vision/ipm_proto/junction.py` 在 BEV 中先估计近处本车道，再检查车道左右外侧是否存在连续 road 区域。若发现支路，`junction_y_m` 取左右支路有效纵向区间的中心，表示相机地面原点到路口中心的前向距离。`corridor_end_y_m` 则直接从原始 BEV road mask 读取当前车道中央走廊的最远位置，不经过 0.20 m 直道路宽先验，因此路口变宽时不会被先验中心线提前截断。
+`vision/ipm_proto/junction.py` 在 BEV 中先估计近处本车道，再检查车道左右外侧是否存在连续 road 区域。若发现支路，`junction_y_m` 表示支路的前向距离，但它现在只用于提前锁存路口，不直接启动固定前进。
 
-只有同时满足以下条件才允许交接：
+`corridor_end_y_m` 从原始 BEV road mask 读取中央走廊的最远位置。`forward_band_ratio`（日志中的 `fband`）只统计预测主车道宽度内、前方 `0.34..0.48 m` 距离带的 road mask 占比；左右横向支路不计入。这个检测带对应实车照片中车头正前方的蓝色区域。
+
+侧边角的锁存条件：
 
 - 稳定类型是 `t_junction`、`cross` 或 `corner`；
-- 规划要求的方向确实存在支路；
-- 当前视觉速度指令仍为 `follow`，不是 mask 丢失或推理超时；
-- 距离连续若干帧位于 `handoff_min_distance_m..handoff_max_distance_m`；
-- 计算出的有限前进距离位于安全上下限。
+- 命令行指定观察侧确实存在支路；
+- 最近 8 帧至少 2 帧看到候选支路；
+- 只切换到 `approach`，不发送 `MOTION_ACTION`。
 
-转向方向目前由命令行显式指定，用于单方向实车验证；正式任务应由拓扑路径生成，不能让对称路口的 mask 自行猜测任务方向。
+最后 20 cm 只有同时满足以下条件才允许交接：
 
-### 侧路不可见时的道路末端备用信号
+- 侧边路口已经锁存；
+- `fband <= 0.10` 连续 3 帧，中间一帧恢复就清零计数；
+- `corridor_end_y_m` 位于 `0.20..0.40 m`（`stop_lookahead` 后最宽可到 `0.45 m`）；
+- 近处车道宽度位于 `0.14..0.32 m`，中心偏差不超过 `0.08 m`；
+- 当前仍是视觉循迹，或者是路口锁存后的 `stop_lookahead`。
 
-实车日志显示，支路常在 `0.76..0.90 m` 时可见，进入原交接范围后反而被墙遮挡。现在先把与规划方向一致的远处支路锁存为 `approach`，继续视觉循迹；后续即使 `dirs=-` 也保留方向，直到中央走廊末端进入交接窗。锁存默认最多保留 200 帧，超时而未接近路口就自动清除。
+命令行的 `left/right` 继续选择普通路口要观察的支路方向；最后转向仍由 Agent 根据当前入边和下一条拓扑边生成，观察方向不覆盖规划结果。
 
-道路末端交接默认要求：
+### 侧边角与正前方检测带的分工
 
-- 单帧类型为 `blocked`；未提前锁存支路时，稳定类型也必须为 `blocked`；
-- 当前指令仍是 `follow`，0.45 m 预瞄点尚未丢失；
-- `corridor_end_y_m` 位于 `0.48..0.56 m`；
-- 近处车道宽度位于 `0.14..0.32 m`，中心偏差不超过 `0.08 m`。
+实车中支路可能被墙遮挡，也可能在车辆已经接近时仍留在画面边缘。因此“侧边角消失”不再是交接条件：
 
-提前锁存支路后，一帧可靠道路末端即可交接；没有锁存时仍要求连续两帧，避免把普通分割抖动当作路口。这些条件使交接发生在 `stop_lookahead` 之前。没有 `--turn-at-junction left/right` 时，此备用信号不会控制车辆。指定方向来自任务策略，不是由不可见的侧路猜测。
+- 侧边角只回答“这里曾经看到路口”；
+- 正前方检测带回答“是否已经到了最后视觉交接位置”；
+- 在 `fband` 降到阈值前，即使侧边角已经消失，也仍继续 Pure Pursuit 视觉纠偏；
+- 在 `fband` 降到阈值后，即使侧边角仍在，也可进入连续 3 帧确认。
+
+上一段实车录像的离线回放结果为：正常道路 `fband ≈ 0.78..0.89`，接近末端时依次降为 `0.50 → 0.23 → 0.08 → 0.00`。当 `fband=0.08` 时 `corridor_end_y_m ≈ 0.37 m`，因此运行配置把普通循迹下的走廊末端上限设为 `0.40 m`。这些数字是当前相机安装下的实测初值，改变高度、俯角或 IPM 后必须重新回放标定。
 
 ## 距离换算
 
-交给下位机的距离为：
+当前实现不再用单帧 `junction_y_m` 或 `corridor_end_y_m` 动态换算最后距离。视觉交接条件稳定满足后，统一发送：
 
 ```text
-forward_distance
-  = turn_center_distance_m
-  + camera_ahead_of_turn_center_m
-  - stop_before_center_m
+forward 200 50
 ```
 
-看见侧路时，`turn_center_distance_m` 就是 `junction_y_m`。使用道路末端备用信号时：
+即以 `50 mm/s` 固定前进 `200 mm`。这 20 cm 只补偿相机最后盲区和车轴到转弯中心的安装几何，不代替前面的视觉循迹。
 
-```text
-turn_center_distance_m
-  = corridor_end_y_m
-  - road_end_beyond_turn_center_m
-```
-
-默认 `road_end_beyond_turn_center_m=0.10 m`，即 200 mm 道宽的一半。这只是符合赛场几何的初值，仍需根据车辆实际停止位置标定。
-
-`camera_ahead_of_turn_center_m` 是相机光心比两轮旋转中心靠前的实测距离。相机在旋转中心前方时取正值。`stop_before_center_m` 用来让车辆提前少量停车，给惯性和机械间隙留余量。
-
-这两个值不能从照片猜测，必须在整车上测量和低速标定。默认均为 0，仅用于软件链路验证，不代表可直接参加实车高速测试。
+若固定 20 cm 后车轴仍系统性地停在转弯中心前或后，应先检查相机/IPM 标定和蓝色检测带的距离，再小幅调整 `turn_forward_m`。不能为补偿一次误分割而大幅增加盲走距离。
 
 ## 下位机有限动作
 
@@ -106,7 +100,7 @@ MOTION_ACTION
   distance_mm  = 1..1000
 ```
 
-动作开始时 MCU 锁存当前 `relative_yaw`，角度 PID 在前进期间修正左右轮目标；编码器融合里程计的 `path_length_m` 达到目标后停车并发 `MOTION_RESULT`。随后上位机再发送 `TURN_LEFT/RIGHT, quarter_turns=1`。
+有限距离前进使用 MCU 根据 IMU 上电静止校准和已完成90°转弯维护的当前方向档位，角度 PID 在前进期间用实时 `relative_yaw` 计算误差并修正左右轮目标；不能把15/20 cm动作开始瞬间的 yaw 设成新目标。编码器融合里程计的 `path_length_m` 达到目标后停车并发 `MOTION_RESULT`。例如上电方向为0°，在 `0_J` 完成右转后方向档位为 -90°；即使视觉循迹结束时读到 -82°，最后20 cm仍以 -90°为目标。随后上位机再发送 `TURN_LEFT/RIGHT, quarter_turns=1`，目标继续从该方向档位加减90°。
 
 `uart_vel` 的进程内文本接口为：
 
@@ -121,70 +115,66 @@ turn right
 
 ## 运行与观测
 
-自动转弯默认关闭。固定左转兼容命令：
+路口动作默认关闭。观察左侧开口的兼容命令：
 
 ```bash
-PYTHONPATH=navigation:vision python3 -m road_follow \
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
   --drive \
   --left-at-junction \
   --uart-bin build-turn/uart/uart_vel
 ```
 
-显式选择方向：
+显式选择普通路口观察方向：
 
 ```bash
-PYTHONPATH=navigation:vision python3 -m road_follow \
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
   --drive \
   --turn-at-junction left \
   --uart-bin build-turn/uart/uart_vel
 
-PYTHONPATH=navigation:vision python3 -m road_follow \
+PYTHONPATH=.:navigation:vision python3 -m road_follow \
   --drive \
   --turn-at-junction right \
   --uart-bin build-turn/uart/uart_vel
 ```
 
-每帧日志包含：
+日志不再逐帧输出全部内部字段。状态变化时立即打印；连续状态每 2 秒打印一次中文摘要，例如：
 
 ```text
-mask_px=<原图road像素> bev_px=<BEV road像素>
-pts=<先验点数>/<原始点数>/<最终点数> fallback=<是否回退原始中心线>
-y=<最终中心线最近..最远米数> look=<是否覆盖预瞄距离>
-jraw=<单帧类型> junc=<稳定类型> dirs=<前/左/右开口>
-lane_x=<车道中心> lane_w=<车道宽> jdist=<可见侧路中心米数或-->
-cend=<中央走廊末端米数或-->
-cue=<是否满足交接> cue_src=<side_branch/road_end/none>
-cdist=<换算后的转弯中心距离> latched=<是否锁存支路方向>
-arm=<连续交接计数> phase=<状态>
+[状态] 视觉循迹；速度=0.080 m/s；角速度=-0.120 rad/s；道路=820 px；中心线=61 点；可见距离=0.20～0.76 m；路口=丁字路口；开口=前、右；检测带=0.34；支路=已锁存；路段进度=0.42 m；推理=78 ms
+[动作] 定距前进完成
+[路口] 定距前进 → 正在停车；规划=右转，定距=200 mm
+[路线] 到达 2_1；下一路段 2_1__3_1：2_1 → 3_1
 ```
 
-状态切换和下位机结果另打印 `EVENT phase=...`、`EVENT uart=...`。若车辆停止，先看控制原因：`stop_slow` 是推理超过 200 ms，`stop_road` 是 **BEV** road 像素不足，`stop_centerline` 是最终中心线点数不足，`stop_lookahead` 是中心线没有覆盖 0.45 m 预瞄点。
+若车辆停止，先看中文停车原因：`视觉推理过慢` 表示推理超过 200 ms，`未识别到道路` 表示 **BEV** road 像素不足，`中心线点不足` 表示最终中心线数量不足，`预瞄距离不足` 表示中心线没有覆盖正常或近距离预瞄点。
 
-没有显式转弯参数时只打印观察结果，不会发送有限前进或转弯动作。
+没有显式 `--turn-at-junction` 参数时只运行普通视觉直走，不会加载拓扑或发送路口有限动作。
 
 ## 标定顺序
 
 1. 用地面四点或实测内外参校正 IPM，禁止长期依赖默认 63.3° 视场估计。
-2. 测量相机光心到两轮中心的纵向距离，填写 `camera_ahead_of_turn_center_m`。
-3. 架空或低风险区域单独测试 `forward 100 50`、`forward 150 50`、`forward 200 50`。
+2. 离线回放连续接近路口的录像，绘制 `fband` 随距离的变化，确认正常道路远高于 0.10。
+3. 架空或低风险区域单独测试 `forward 200 50`，确认只执行一次且完成后停车。
 4. 验证直行期间航向保持、完成后自动停车及 `MOTION_RESULT`。
-5. 只开日志回放路口，确认直道不进入交接窗。
-6. 实车先以 50 mm/s 固定左转，逐次调整交接窗和停车提前量。
+5. 只开日志回放路口，确认直道不会在未锁存侧边角时触发交接。
+6. 实车先以 50 mm/s 测试最后 20 cm，逐次调整检测带距离、占比阈值和连续帧数。
 7. 左右转稳定后再让拓扑规划提供方向，最后接障碍封边重规划。
 
 ## 安全与已知限制
 
-- 当前路口几何只在合成测试上验证过；实拍 ONNX 回放仍有较多 `blocked/unknown`，不能视作完成实车验收。
+- 蓝色检测带已用一段实车录像离线回放，但仍需覆盖左/右路口、不同光照和不同车身偏角，不能视作完成实车验收。
 - 下位机有限距离使用累计路径长度，不是世界坐标投影；适用于短距离补盲，不适用于全场定位。
 - 编码器不增长时，有限动作可能无法自行达到距离终点；上位机超时和现场断电手段必须保留。
 - IMU 未完成静止校准时下位机会拒绝有限动作。
 - `MOTION_RESULT` 超时后只允许 STOP 和人工检查，禁止自动重发 90°，否则可能再转一次。
-- `camera_ahead_of_turn_center_m=0` 是待标定值。完成测量前应架空车轮或使用可随时断电的低速测试环境。
+- `turn_forward_m=0.20` 是当前实车初值。确认检测带位置正确前，应架空车轮或使用可随时断电的低速测试环境。
 
 ## 测试
 
-- `vision/ipm_proto/tests/test_junction.py`：合成直道、丁字、十字、拐角、截断及路口距离。
-- `navigation/road_follow/tests/test_junction_turn.py`：视觉连续确认、有限前进、转弯结果和重新捕获状态。
+- `vision/ipm_proto/tests/test_junction.py`：合成直道、丁字、十字、拐角、截断及正前方检测带占比。
+- `navigation/road_follow/tests/test_junction_turn.py`：普通路口侧边角锁存、检测带连续确认、唯一一次 20 cm、里程保护、转弯结果和重新捕获状态。
+- `navigation/road_follow/tests/test_rfid_arrival.py`：巡检点保留原视觉门限，固定 20 cm 完成后无需 RFID 即确认到达。
 - `uart` C++ 测试：8 字节 `MOTION_ACTION` 编解码、会话互斥和终态处理。
 
 这些测试是无硬件单元/模拟测试；最终验收必须包含实拍回放和低速整车测试。

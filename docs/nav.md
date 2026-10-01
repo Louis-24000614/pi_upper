@@ -46,7 +46,7 @@
 | [`docs/superpowers/specs/2026-08-29-visual-nav-road-follow-design.md`](superpowers/specs/2026-08-29-visual-nav-road-follow-design.md) | Stage-1：mask → IPM → 中心线 → Pure Pursuit；交叉口默认自然延伸。本文在其上增加 **选岔/换边与障碍重规划**。 |
 | [`docs/superpowers/specs/2026-08-29-ipm-centerline-proto-design.md`](superpowers/specs/2026-08-29-ipm-centerline-proto-design.md) | BEV 窗口与外参约定；局部占用栅格复用同一鸟瞰窗。 |
 | [`docs/superpowers/specs/2026-09-02-mission-topology-and-gui-design.md`](superpowers/specs/2026-09-02-mission-topology-and-gui-design.md) | Mission / UID：收齐巡逻点、播报。Mission **不**实现换道细节；只提供「巡场中 / 回出发区」等目标语义。 |
-| [`docs/reference/navigation/topology-rfid-navigation.md`](reference/navigation/topology-rfid-navigation.md) | 当前拓扑定位与 RFID 到点策略：固定物理 `slot_id` 与现场 `card_number` 分离；有标签节点读卡停车转 90°，无标签路口使用视觉与里程计交接。 |
+| [`docs/reference/navigation/topology-rfid-navigation.md`](reference/navigation/topology-rfid-navigation.md) | 当前拓扑到点策略：巡检点与普通路口各自保留原视觉状态机，只取消任务 UID 输入；RFID 另保留独立硬件测试。 |
 | [`docs/architecture/overview.md`](architecture/overview.md) | 逻辑模块 `navigation` / `state` / `uart` 的总图位置。 |
 | [`docs/api/uart.md`](api/uart.md) | 线协议与会话：`CMD_VEL` 与 `MOTION_ACTION` 互斥；`IMU_STATE.relative_yaw` 无绝对航向。 |
 | [`vision/ipm_proto/`](../vision/ipm_proto/) | 已有 IPM/中心线 Python 原型，局部层可在此演进。 |
@@ -118,7 +118,7 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
 
 路径跟踪本身已经在纠航向：中心线横向误差 → ω。offset 主要给拓扑/选岔用（「转完 90° 之后是不是已经对准下一条边」），以及隧道出口一次性拉回。沿边进度 `s` 仍只用 `ODOM_STATE` 的平移，**不要**拿视觉角去改 `ds` 积分，否则 x/y 与朝向不一致会把倒车尺子算歪。
 
-90° 落地后用视觉验收：BEV 切线相对新边方向若差约 5°～15°，用一小段 `CMD_VEL` 补正，**不要**再发一次 90°。倒回 `from_node` 之后也先用视觉确认对准走廊，再正向寻线。
+90° 动作以 IMU 上电静止校准时的相对航向零点维护离散方向档位，不以视觉循迹结束瞬间的 yaw 重新置零；因此动作前的残余偏角会被本次转弯一起消除。落地后仍需用视觉验收：BEV 切线相对新边方向若差约 5°～15°，用一小段 `CMD_VEL` 补正，**不要**再发一次 90°。倒回 `from_node` 之后也先用视觉确认对准走廊，再正向寻线。
 
 ### 何时冻结视觉
 
@@ -155,7 +155,7 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
 
 拓扑只回答「走廊怎么连、堵了换哪条」。贴路、短距倒车、UID 播报都不进这张图。
 
-车辆的物理位置由已知起点、已执行边序列和沿边进度维护，不由标签编号反推。巡逻位置使用固定 `slot_id`；现场读出的 `card_number` 只用于建立 `slot_id ↔ card_number` 映射、播报和去重。两类节点的到点触发与状态推进详见 [拓扑定位、RFID 到点与路口转向](reference/navigation/topology-rfid-navigation.md)。
+车辆的物理位置由已知起点、已执行边序列和沿边进度维护，不由标签编号反推。当前 `--turn-at-junction` 完全忽略 UID；巡逻位置与普通路口仍使用各自原有的视觉到点状态机。详见 [拓扑定位、纯视觉到点与可选 RFID 测试](reference/navigation/topology-rfid-navigation.md)。
 
 ### 全局规划
 
@@ -179,7 +179,7 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
 | 列 `_2` | 中间**偏左**十字（底边为第 2 格 / ≈⑥） |
 | 列 `_3` | 中间**偏右**十字（底边为第 3 格 / ≈⑦） |
 | 列 `_4` | 右侧巡逻格（底边右格 / ≈⑧） |
-| 出发区 | `0_0`（接到第 1 行的 `1_2`、`1_3`） |
+| 出发区 | `0_0` 只接 `0_J`；`0_J` 再接第 1 行的 `1_2`、`1_3` |
 | 边 id | `"{u}__{v}"`（**必须加引号**；端点名字典序较小者在前） |
 | 与播报点号 | **拓扑名 ≠「到达 X 号」**；UID→X 在 Mission 配置里 |
 
@@ -187,8 +187,8 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
 
 ```text
                     0_0 出发区
-                   /         \
-                 1_2         1_3      ≈①           ≈⑫
+                       |
+                 1_2--0_J--1_3        ≈① / 顶端丁字口 / ≈⑫
                   |           |
         2_1 -- 2_2 -- 2_3 -- 2_4      ≈② / 十字 / 十字 / ≈⑪
          |      |      |      |
@@ -199,7 +199,7 @@ yaw_nav = imu.relative_yaw + yaw_offset_vision
         5_1 -- 5_2 -- 5_3 -- 5_4     ≈⑤⑥⑦⑧
 ```
 
-完整节点、边长、隧道初标见 **[`config/nav_topology.yaml`](../config/nav_topology.yaml)**（`meta.name: figure3_rowcol_v2`）。场测后只改 YAML，不必改命名规则。
+完整节点、边长、隧道初标见 **[`config/nav_topology.yaml`](../config/nav_topology.yaml)**（`meta.name: figure3_rowcol_v3`）。场测后只改 YAML，不必改命名规则。
 
 ## BEV 占用与局部规划
 
@@ -299,7 +299,7 @@ s  = max(0, s + ds)
 
 **每到一个拓扑节点就把 `s` 置 0**（含中间十字 `*_2`/`*_3`，不只是 12 个 UID 巡逻格），然后换 `current_edge` / `from_node`，记下新的 `x_prev,y_prev`。不置 0 则 `s` 变成从出发区起的总路程，倒车会按错距离退。不必每到点发 `RESET_ODOM`；清零的是软件里的 `s`。
 
-到点判定（前进时）：`s` 接近当前边 `length_m`（格子约 0.8 m，例如差 0.15 m 内），**或** BEV 出现分岔/横路。UID 只在部分巡逻格有，不能当所有十字的清零信号。
+到点判定（前进时）：`patrol_slot` 保留原来的任一侧端头锁存、检测带和视觉安全门限；普通 `junction` 保留命令指定侧的路口几何与 ODOM 末端保护。两者都在原条件满足后用 IMU/编码器完成最后 200 mm，`FORWARD_DONE` 才推进预期节点；当前模式不把 UID 用作任何节点的清零信号。
 
 障碍是随机的：到点时 **不能**预知「这点到下一障碍几米」。开走后每帧更新 `s`，硬堵塞那一帧的 `s` 才是「这点到障碍」的近似值。
 
@@ -307,7 +307,8 @@ s  = max(0, s + ds)
 
 目标是 **退回 `from_node`**，不是固定只倒 0.40 m。
 
-- 停条件：`s < 0.15 m`（视为已回到上一节点），或本段倒车位移 ≥ **0.70 m**（硬帽，小于一格 0.8 m），或超时。建议 `v ≈ -0.08～-0.15 m/s`，`ω ≈ 0`。
+- 成功条件：`s < 0.15 m`，视为已回到上一节点。倒车使用 `v ≈ -0.08～-0.15 m/s`，并根据前视中心线持续修正 `ω`，不能只锁存起始航向。
+- 安全失败条件：本段倒车位移 ≥ **0.70 m**（硬帽，小于一格 0.8 m）、视觉中心线连续丢失或超时。达到这些条件但 `s` 仍未回到入口时停车报错，不能伪造到点。
 - 已在路口（`s` 很小）但障碍仍贴脸：额外短退约 **0.40 m**（仍受 0.70 m 帽限制），只为腾空间、把障碍重新送进 BEV。
 - 一次没退够：再短退约 0.3 m，最多两三次，避免按漂掉的 `s` 一次倒穿。
 - 到路口后先用视觉确认对准新走廊，再按新边序列 **正向寻线**。不要在格子中间掉头。

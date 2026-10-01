@@ -64,7 +64,7 @@ flowchart TD
   route --> maneuver["路口动作<br/>直行/左转/右转"]
   maneuver --> follow["道路跟随"]
   follow --> uart["UART Session<br/>CMD_VEL / MOTION_ACTION"]
-  sensors["视觉 · ODOM · RFID"] --> follow
+  sensors["视觉 · ODOM · IMU"] --> follow
   sensors --> obstacle["障碍确认"]
   obstacle --> recovery["Blocked-edge Recovery"]
   recovery --> uart
@@ -136,12 +136,12 @@ plan_remaining(graph, set(graph.edges), current="0_0", home="0_0")
 2. 根据上一节点、当前节点和下一节点的拓扑坐标计算 `STRAIGHT/LEFT/RIGHT`；
 3. 完成路口动作并重新找到道路后，将下一条边设为 `current_edge`；
 4. 道路跟随期间持续更新 `edge_progress_m`；
-5. 根据 `to_node.role` 选择到达判据：`patrol_slot` 由新的 RFID 事件确认，`junction` 由 ODOM 末端门限、稳定路口视觉和到中心的 `FORWARD_DONE` 共同确认；接近两类节点时，侧边角只锁存，正前方 BEV 检测带稳定无 road mask 后才允许唯一一次 200 mm 有限前进；
+5. 保留两类原有到达判据：`patrol_slot` 使用任一侧端头锁存、检测带和视觉安全门限；`junction` 使用命令指定侧的路口几何与 ODOM 末端保护；两者完成原来的唯一一次 200 mm 后确认当前预期节点，不读取 UID；
 6. 将该边加入 `covered_edges`，推进 `route_index`，再处理下一条边。
 
 任何动作失败都不能推进路线索引。手动停止、UART 掉线和急停也必须冻结拓扑状态。
 
-RFID 卡号在比赛现场随机摆放，不能用于反推拓扑节点。首次到达 `patrol_slot` 时，由当前路线的 `to_node` 确定物理位置，再建立 `slot_to_card` / `card_to_slot` 映射；重访时检查映射一致，但只通过 `visited_cards` 控制是否重复播报。前三条中央隧道的端点是无标签 `junction`，第四条 `5_2__5_3` 的端点有标签，两类隧道必须分别使用对应的到达判据。
+当前 `--turn-at-junction` 不读取 RFID，卡号不会推进拓扑节点。四段隧道的端点仍按节点角色选择原来的 `patrol_slot` 或 `junction` 视觉交接。以后若恢复 UID 计分，只能把卡号映射与播报作为旁路接入，不能改变到点和转向判据。
 
 ## Blocked-edge recovery
 
@@ -188,7 +188,7 @@ stateDiagram-v2
 
 - 实现边级运行状态和路线索引；
 - 实现入边/出边到 `LEFT/RIGHT/STRAIGHT` 的确定性转换；
-- 对接巡逻点 RFID 到达和普通路口到达事件；
+- 保留两类原视觉到达事件，并验证巡逻点只取消 RFID 确认即可推进；
 - 只有到达确认才能完成边和推进节点；
 - 用假事件连续执行完整的 31 个初始边实例。
 

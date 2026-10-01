@@ -2,7 +2,7 @@
 
 杭州侦察机器人（公共安全赛项）上位机侧 **Mission / 拓扑任务层** 与 **调试 GUI 如何暴露该层状态** 的设计规格。目标是在不推翻 Stage-1 视觉寻线的前提下，说清楚「绕场顺序、出发选岔、UID 确认、回出发区」以及界面上要露出哪些真实字段。
 
-> **当前约定修正：** 本文早期用 `P1`～`P12` 同时表示物理位置和播报点号，容易混淆。当前实现应以 [拓扑定位、RFID 到点与路口转向](../../reference/navigation/topology-rfid-navigation.md) 和 `config/nav_topology.yaml` 的行列节点为准：固定物理位置使用 `slot_id`，现场标签内容使用 `card_number`，两者不得写死相等。有标签节点读卡后停车并按拓扑方向原地转 90°；无标签路口继续使用视觉与里程计交接。本文下面的 `P1`～`P12` 只保留为早期任务顺序示意，不作为运行时定位 ID。
+> **当前约定修正：** 本文是早期 UID 任务设计，下面的 UID 状态机不代表当前实车主链路。当前实现以 [拓扑定位、纯视觉到点与可选 RFID 测试](../../reference/navigation/topology-rfid-navigation.md) 和 `config/nav_topology.yaml` 为准：`patrol_slot` 与 `junction` 全部通过视觉路口和 IMU/编码器最后 200 mm 确认，`--turn-at-junction` 忽略 UID；RFID 只保留独立硬件测试。本文的 `P1`～`P12` 和 UID 接口仅作为历史任务/GUI设计，不作为运行时定位与转向依据。
 
 本文是设计稿，**不包含业务代码实现**。几何寻线细节以 Stage-1 规格为准，本文只定义与之的接口边界。
 

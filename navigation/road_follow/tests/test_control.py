@@ -62,6 +62,23 @@ class ControlTest(unittest.TestCase):
         self.assertAlmostEqual(cmd.omega_radps, -0.05, places=3)
         self.assertTrue(math.isfinite(cmd.omega_radps))
 
+    def test_steering_gain_strengthens_correction_without_changing_direction(self) -> None:
+        points = [(-0.05, y) for y in (0.25, 0.35, 0.45, 0.55, 0.70, 0.85, 0.95, 1.0)]
+        normal = command_from_centerline(points, road_pixels=2000, cfg=FollowConfig())
+        stronger = command_from_centerline(
+            points, road_pixels=2000, cfg=FollowConfig(steering_gain=1.7)
+        )
+        self.assertGreater(normal.omega_radps, 0.0)
+        self.assertAlmostEqual(stronger.omega_radps, normal.omega_radps * 1.7, places=6)
+
+    def test_short_visible_road_uses_slow_near_lookahead(self) -> None:
+        points = [(0.08, y) for y in (0.25, 0.28, 0.31, 0.34, 0.37, 0.40, 0.42, 0.43)]
+        cfg = FollowConfig(min_lookahead_m=0.28, near_mps=0.05)
+        cmd = command_from_centerline(points, road_pixels=2000, cfg=cfg)
+        self.assertEqual(cmd.reason, "follow_near")
+        self.assertAlmostEqual(cmd.v_mps, 0.05, places=3)
+        self.assertLess(cmd.omega_radps, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
