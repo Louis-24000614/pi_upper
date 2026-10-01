@@ -16,6 +16,7 @@ from pathlib import Path
 import cv2
 import yaml
 
+from vision.obstacle.blockage import HardBlockageJudge, hard_block_config_from_mapping
 from vision.obstacle.detect import ObstacleDetector, draw
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     capture = _open_camera(device, width, height)
     try:
         with ObstacleDetector(args.config, root=ROOT) as detector:
+            judge = HardBlockageJudge(hard_block_config_from_mapping(detector.config))
             warmed = 0
             while not stopping:
                 ok, frame = capture.read()
@@ -80,7 +82,15 @@ def main(argv: list[str] | None = None) -> int:
                 if warmed < 8:
                     continue
                 detections, elapsed_ms = detector.detect(frame)
-                print(_format(detections, elapsed_ms), flush=True)
+                observation = judge.update(detections, frame.shape)
+                print(
+                    f"{_format(detections, elapsed_ms)} "
+                    f"candidate={int(observation.candidate)} "
+                    f"stable={observation.stable_frames} "
+                    f"hard_blocked={int(observation.hard_blocked)} "
+                    f"reason={observation.reason}",
+                    flush=True,
+                )
                 if args.save is not None:
                     args.save.parent.mkdir(parents=True, exist_ok=True)
                     cv2.imwrite(str(args.save), draw(frame, detections))

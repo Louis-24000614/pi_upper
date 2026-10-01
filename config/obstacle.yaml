@@ -39,3 +39,15 @@ detect:
   camera_role: navigation_camera
   conf_thres: 0.45
   iou_thres: 0.5
+
+# 检测框到“当前道路整边堵塞”的判定。比例均相对原始图像宽高。
+# 确认后一直锁存，进入下一条道路时由上层显式 reset。
+hard_block:
+  confirm_frames: 3
+  min_score: 0.45
+  min_box_area_ratio: 0.002
+  min_bottom_ratio: 0.35
+  corridor_left_ratio: 0.20
+  corridor_right_ratio: 0.80
+  min_corridor_overlap: 0.30
+  min_track_iou: 0.20
