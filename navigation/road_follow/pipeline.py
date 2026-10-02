@@ -73,10 +73,17 @@ def command_from_mask_with_diagnostics(
     cfg: dict,
     smoother: CenterlineSmoother,
     follow: FollowConfig | None = None,
+    *,
+    projection: tuple[Ipm, np.ndarray] | None = None,
+    lazy_raw: bool = False,
 ) -> tuple[VelocityCommand, FollowDiagnostics]:
     """生成速度指令，同时返回可解释停车原因的几何诊断。"""
-    ipm = make_ipm(cfg, mask.shape)
-    bev_mask = ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
+    if projection is None:
+        ipm = make_ipm(cfg, mask.shape)
+        bev_mask = ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
+    else:
+        # 同一帧的中心线和路口共享投影；保持最近邻插值和诊断点数语义。
+        ipm, bev_mask = projection
     mask_gray = mask[:, :, 0] if mask.ndim == 3 else mask
     gray = bev_mask[:, :, 0] if bev_mask.ndim == 3 else bev_mask
     mask_road_pixels = _road_pixels(mask_gray)
@@ -85,8 +92,16 @@ def command_from_mask_with_diagnostics(
     prior_points = extract_centerline_with_width_prior(
         bev_mask, ipm.bev, road_prior_from_mapping(cfg)
     )
-    raw_points = extract_centerline(bev_mask, ipm.bev)
     used_fallback = len(prior_points) < gains.min_points
+    if lazy_raw and not used_fallback:
+        # 普通中心线没有参与控制时，诊断只需要“合法行数”，无须每行计算中位数。
+        # 保持 raw_points 的原有点数语义，而不是把未计算错误标成 0。
+        road = gray.astype(bool) if gray.dtype == np.bool_ or gray.max() <= 1 else gray > 127
+        raw_count = int(np.count_nonzero(np.count_nonzero(road, axis=1) >= 3))
+        raw_points = []
+    else:
+        raw_points = extract_centerline(bev_mask, ipm.bev)
+        raw_count = len(raw_points)
     points = raw_points if used_fallback else prior_points
     points = smoother.update(points)
     ys = [float(y) for _, y in points]
@@ -96,7 +111,7 @@ def command_from_mask_with_diagnostics(
         mask_road_pixels=mask_road_pixels,
         bev_road_pixels=road_pixels,
         prior_points=len(prior_points),
-        raw_points=len(raw_points),
+        raw_points=raw_count,
         output_points=len(points),
         used_fallback=used_fallback,
         y_min_m=min(ys) if ys else None,
@@ -105,6 +120,24 @@ def command_from_mask_with_diagnostics(
         near_x_m=near_lane_x(points),
     )
     return command, diagnostics
+
+
+class BevProjector:
+    """每个有序消费者持有一份 IPM；相机/BEV 参数或分辨率改变就失效。"""
+
+    def __init__(self) -> None:
+        self._key = None
+        self._ipm: Ipm | None = None
+
+    def project(self, mask: np.ndarray, cfg: dict) -> tuple[Ipm, np.ndarray]:
+        # 只比较影响投影的参数，速度/状态机变化不会重建矩阵。
+        key = (mask.shape[:2], tuple(sorted((cfg.get("camera") or {}).items())),
+               tuple(sorted((cfg.get("bev") or {}).items())))
+        if key != self._key:
+            self._ipm = make_ipm(cfg, mask.shape)
+            self._key = key
+        assert self._ipm is not None
+        return self._ipm, self._ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
 
 
 def _road_pixels(gray: np.ndarray) -> int:

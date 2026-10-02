@@ -1,0 +1,78 @@
+# 道路帧率 A/B 实验
+
+所有入口只读冻结录像，输出视觉控制意图，不打开相机或 UART。模型输入保持
+640×640；标定、阈值、速度、EMA、连续帧判据和协议不做调整。
+
+板端独立分支：`codex/seg-fps-ab`，工作目录 `/home/orangepi/pi_upper_seg_fps`。
+冻结素材 `/home/orangepi/seg_fps_data`，原始结果 `/home/orangepi/seg_fps_results`。
+本次环境使用 `/home/orangepi/vision_compare_pi_upper/bin/python`。
+
+```bash
+cd /home/orangepi/pi_upper_seg_fps
+export PYTHONPATH=.:navigation:vision
+python -m experiments.seg_fps.pairs --a a1 --b bev --label bev \
+  --video /home/orangepi/seg_fps_data/pi_upper/data/road/drive_20260926_160230_028280.avi \
+  --model /home/orangepi/seg_fps_data/pi_upper/models/road_yolo11n_seg.rknn \
+  --config /home/orangepi/seg_fps_data/pi_upper/config/nav_camera.yaml \
+  --output-dir /home/orangepi/seg_fps_results
+```
+
+版本按单一因素递增：`a0` 原始逻辑，`a1` 仅 NMS 坐标修正，`bev` 复用投影，
+`buffers` 继续复用分割临时内存，`fifo` 解码线程背压且不丢帧，`latest` 替换等待帧。
+测量模式：`pure` 只测 RKNN 同步调用及 IO；`seg` 包含分割预后处理；`full` 再加
+循迹及路口视觉计算。full 的范围不包含真实整车反馈与下位机动作。
+
+`--cores 1` 是 NPU0；`7` 是一个 context 允许三核；`1,2`/`1,2,4` 是各核独立
+context；`1,1,2,2,4,4` 是每核两个 context。每个 worker 同一时刻仅一个任务，
+输入输出不共享可写缓冲，消费者按提交顺序更新导航状态。
+
+每轮独立进程、相同预热，统一时间窗口按完成总数统计；原始逐帧耗时先存内存，
+结束后批量写 JSON。FIFO 的队列年龄包含解码背压，不能将长队列误认为低延迟。
+实时模式 `--realtime --speed 1` 用固定录像时间轴，年龄从该帧应发布时刻开始，
+不是相机曝光到控制的真实延迟。`--max-age .2` 拒绝过期结果；source/sequence
+检查拒绝旧源、重复与乱序，不让它们更新 EMA 或路口状态。
+
+`--record none|sync|async` 比较录像影响；AVI 时间轴由实际提交时间决定。
+异步队列替换等待帧并统计 `record_dropped`，正常退出排空队列，编码异常会抛出。
+有限队列只限制待编码帧，固定时间轴仍可能补写重复帧。
+
+```bash
+python -m experiments.seg_fps.regression \
+  --videos /home/orangepi/seg_fps_data/pi_upper/data/road \
+  --model /home/orangepi/seg_fps_data/pi_upper/models/road_yolo11n_seg.rknn \
+  --config /home/orangepi/seg_fps_data/pi_upper/config/nav_camera.yaml \
+  --output /home/orangepi/seg_fps_results/regression.json
+```
+
+逐帧回归共享同一次 RKNN 输出，严格比较原始预处理张量、A1 mask、缓冲 mask、
+BEV、诊断、控制和路口序列，单独记录 A0→A1 的行为变化。可指定
+`--reference-core` 对比另一核心的原始 tensor（绝对/相对容差各 1e-5）。
+不会把共享 tensor 的 CPU 回归冒充跨核心 NPU 回归。
+
+正式相机入口提供默认关闭的独立开关：`--fps-opt` 复用投影与缓冲，
+`--correct-nms` 单独修正 NMS，`--npu-core-mask` 选择单 context 核心，
+`--npu-contexts 3` 启用三个核各一个 context 的有界有序流水线，
+`--record-video ... --async-record-video` 开启异步录像。超过原有 200ms 预算的
+画面不更新视觉状态；转弯完成后清空旧代画面与证据，重新计数原有识路帧数。
+所有优化默认关闭，实际相机曝光/采集缓冲与车辆动作仍需台架验证。
+`--npu-contexts` 与单 context 的 `--npu-core-mask` 互斥；最新帧丢弃策略仅用于回放。
+
+本次按用户反馈接受三个 context 的吞吐/单帧延迟权衡：纯 RKNN 筛选中，
+相对两个 context 吞吐约 +68%，单帧 P95 约 +6.8%；完整视觉链路筛选约
+10.49→17.67 FPS，实际资源和各轮波动见报告。同步→异步录像约 +45.7%。
+原生标准/输入绑定 IO 与按需普通中心线没有明确 FPS 收益，保留为实验选项。
+
+用户随后要求先停测并关机。本次只完成筛选、部分正式轮次、软件回归和
+并发输出抽检；全部录像逐帧回归及连续 10 分钟稳定性测试尚未执行，不能声称通过。
+已有结果保留在 `/home/orangepi/seg_fps_results`，正式轮次未完成部分不参与汇总。
+
+原生 IO 后端默认关闭。`bash navigation/road_follow/native/build.sh` 编译后，可用
+`--backend c-standard|c-input-zero` 做回放 A/B，正式入口对应 `--rknn-backend`。
+输入绑定路径只改变输入 IO，输出仍走相同的标准 float 获取路径；报告不能将它
+写成输入输出全 zero-copy。每次查询原生布局/行跨度，显式同步输入缓存，返回
+输出数组时复制所有权。UINT8 的 NPU 归一化方式参考
+[Rockchip 官方示例](https://github.com/airockchip/rknn_model_zoo/blob/main/examples/yolo11/cpp/rknpu2/yolo11_zero_copy.cc)，
+需要用本项目真实模型逐元素及逐帧验证；不能仅依据示例认为结果等价。
+
+本次数据没有确认逐帧同步的 ODOM/IMU/动作完成日志；道路丢失、障碍确认和转弯
+流程的既有单元测试属于软件模拟，最终仍需要真实相机及静止台架确认。
