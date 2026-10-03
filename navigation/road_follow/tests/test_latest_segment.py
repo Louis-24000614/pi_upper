@@ -261,7 +261,8 @@ class LatestMainGateTest(unittest.TestCase):
         options = []
         def factory(*args, **kwargs):
             options.append(kwargs['result_order'])
-            return LatestSegmentStream(*args, factory=Segment, **kwargs)
+            kwargs['factory'] = Segment
+            return LatestSegmentStream(*args, **kwargs)
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder)/'config.yaml'
             config.write_text('{}\n')
@@ -278,7 +279,8 @@ class LatestMainGateTest(unittest.TestCase):
         capture, streams, events = Capture(), [], []
         capture.inputs.put(1)
         def factory(*args, **kwargs):
-            stream = LatestSegmentStream(*args, factory=Segment, **kwargs)
+            kwargs['factory'] = Segment
+            stream = LatestSegmentStream(*args, **kwargs)
             streams.append(stream)
             return stream
         class Recorder:

@@ -27,8 +27,8 @@ class SegmentedFrame:
 class OrderedSegmentStream:
     """每个 context 最多一个在途帧，按采集序消费，不能让快结果覆盖慢结果。"""
 
-    def __init__(self, model: Path, cores=(1,2,4), *, correct_nms=False,
-                 reuse_buffers=False, backend="lite", factory=RoadSegmenter,
+    def __init__(self, model: Path, cores=(1,2,4), *, correct_nms=True,
+                 reuse_buffers=True, backend="lite", factory=RoadSegmenter,
                  capture_timestamp=None):
         if not cores:
             raise ValueError("至少需要一个 NPU context")

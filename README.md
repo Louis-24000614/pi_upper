@@ -27,7 +27,7 @@
 - 下位机：STM32H743VIT6，ICM42688 IMU、编码器和 RFID 由下位机管理
 - UART：当前板端设备 `/dev/ttyS6`，921600 8N1，3.3 V TTL
 - 推理：RKNN Runtime；导航默认模型 `models/road_yolo11n_seg.rknn`
-- 主要软件：Python 3、OpenCV、NumPy、PyYAML、RKNNLite；C++17、CMake
+- 主要软件：Python 3、OpenCV、NumPy、PyYAML、threadpoolctl、RKNNLite；C++17、CMake
 
 摄像头、串口设备和导航参数以 [`config/nav_camera.yaml`](config/nav_camera.yaml) 为准。STM32 引脚和线协议以下位机工程及其 `UART_PROTOCOL.md` 为准，避免根据本文硬编码接线。
 
@@ -95,6 +95,19 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 ```
 
 只有显式添加 `--drive` 才会打开 UART 并驱动车辆。
+
+道路入口已经默认采用验证后的优化组合，无须追加优化参数：RKNN 三核各一个
+私有 context、按输入顺序消费；共享同帧 BEV/IPM 和复用分割工作缓冲；正确 NMS；
+OpenCV 8 线程、BLAS 1 线程；Linux 每 60 秒 GC 并归还空闲堆页。
+指定 `--record-video` 时自动使用有界异步编码，未请求录像时不会生成视频。
+ONNX 和显式指定单核的原有调试方式仍使用单 context。
+
+RK3588 普通启动会自动保存并临时固定合法最高 CPU/DDR/NPU 频率，正常退出、
+异常及 INT/TERM/HUP 时恢复原 governor/min/max；仅调频子命令调用 sudo，
+视觉/相机/串口仍以当前普通用户运行。sudo 沿用系统认证方式，程序不保存密码，
+无需再套 `experiments.seg_fps.run_with_frequency`。`--help` 不调频。
+最新帧策略、原生 IO/零拷贝和按需普通中心线仍是实验选项，未纳入默认。
+原有正向优化参数仍可用于兼容旧脚本；普通命令已经启用采纳项。
 
 ## 视觉直线循迹
 

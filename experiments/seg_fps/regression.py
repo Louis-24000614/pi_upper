@@ -122,7 +122,9 @@ def main():
                             cached_heads = ([x.copy() for x in outputs],
                                             None if ref is None else [x.copy() for x in ref])
                     pred, proto = _orient_heads(*outputs[:2])
-                    raw = decode_road_mask(pred, proto, ratio, left, top, image.shape[:2])
+                    # 正式默认已修正 NMS，历史 A0 对照必须显式请求旧行为。
+                    raw = decode_road_mask(pred, proto, ratio, left, top, image.shape[:2],
+                                           correct_nms=False)
                     a1 = decode_road_mask(pred, proto, ratio, left, top, image.shape[:2], correct_nms=True)
                     candidate = decode_road_mask(pred, proto, ratio, left, top, image.shape[:2],
                                                  correct_nms=True, buffers=buffers)

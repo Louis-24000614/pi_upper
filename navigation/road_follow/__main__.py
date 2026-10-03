@@ -61,6 +61,7 @@ from road_follow.parallel_segment import OrderedSegmentStream, CameraReadError
 from road_follow.latest_segment import LatestSegmentStream
 from road_follow.cpu_threads import cpu_thread_budget
 from road_follow.heap_reclaim import HeapReclaimer
+from road_follow.frequency_runtime import needs_frequency_guard, run_guarded
 
 ROOT = Path(__file__).resolve().parents[2]
 SLOW_S = 0.20
@@ -380,24 +381,29 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="道路分割寻线，经串口速度环驱动")
     parser.add_argument("--config", type=Path, default=ROOT / "config" / "nav_camera.yaml")
     parser.add_argument("--model", type=Path, default=ROOT / "models" / "road_yolo11n_seg.rknn")
-    parser.add_argument("--fps-opt", action="store_true", help="实验：复用 IPM/BEV 和分割临时缓冲")
+    # 已通过等价性和性能验证的组合成为默认值；旧正向参数保留兼容历史脚本，
+    # 无须为了使用优化追加启动参数。负向选项仅用于定位问题或对照回放。
+    parser.add_argument("--fps-opt", action=argparse.BooleanOptionalAction, default=True,
+                        help="默认复用 IPM/BEV 和分割临时缓冲")
     parser.add_argument("--lazy-raw-centerline", action="store_true", help="实验：普通中心线仅回退时计算，诊断点数不变")
-    parser.add_argument("--correct-nms", action="store_true", help="独立正确性修正：NMS 框使用宽高")
+    parser.add_argument("--correct-nms", action=argparse.BooleanOptionalAction, default=True,
+                        help="默认正确 NMS：框使用左上角和宽高")
     parser.add_argument("--npu-core-mask", type=int, choices=(1,2,4,3,7), default=None,
                         help="实验：单 context 的 NPU 核心位掩码；默认保持 0 号核")
-    parser.add_argument("--npu-contexts", type=int, choices=(1,2,3), default=1,
-                        help="实验：各核独立 context，有序流水线；默认单 context")
+    parser.add_argument("--npu-contexts", type=int, choices=(1,2,3), default=None,
+                        help="RKNN 默认三核各一 context、有序消费；ONNX 或指定单核时自动单 context")
     parser.add_argument("--latest-frame", action="store_true",
                         help="实验：独立读取线程只保留一帧，空闲 context 取最新画面")
     parser.add_argument("--latest-result-order", choices=("completion", "capture"),
                         default="completion", help="实验：最新帧结果按完成顺序或输入顺序消费")
     parser.add_argument("--rknn-backend", choices=("lite", "c-standard", "c-input-zero"),
                         default="lite", help="实验：RKNN IO 后端；C 路径需要先编译原生组件")
-    parser.add_argument("--async-record-video", action="store_true", help="实验：录像用有界编码队列")
-    parser.add_argument("--opencv-threads", type=int, help="实验：进程级 OpenCV 线程数；默认保持原配置")
-    parser.add_argument("--blas-threads", type=int, help="实验：BLAS 线程数，需 threadpoolctl；默认保持原配置")
-    parser.add_argument("--heap-trim-interval", type=float, default=0,
-                        help="实验：每 N 秒归还 libc 空闲堆页；0 关闭，建议 60")
+    parser.add_argument("--async-record-video", action=argparse.BooleanOptionalAction, default=None,
+                        help="请求录像时默认使用有界异步编码队列")
+    parser.add_argument("--opencv-threads", type=int, default=8, help="OpenCV 默认 8 线程")
+    parser.add_argument("--blas-threads", type=int, default=1, help="BLAS 默认单线程，避免争抢多路推理资源")
+    parser.add_argument("--heap-trim-interval", type=float, default=60 if sys.platform == 'linux' else 0,
+                        help="Linux 默认每 60 秒 GC 并归还空闲堆页；0 关闭")
     parser.add_argument("--drive", action="store_true", help="打开串口并使能，按寻线速度行驶")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
@@ -433,9 +439,19 @@ def main(argv: list[str] | None = None) -> int:
         help="障碍物连续出现后，用负速度和视觉纠偏倒回上一个路口",
     )
     args = parser.parse_args(argv)
+    if args.npu_contexts is None:
+        # 保留桌面 ONNX 和旧单核覆盖用法，不让默认三路破坏已有调试入口。
+        args.npu_contexts = 3 if args.model.suffix == '.rknn' and args.npu_core_mask is None else 1
+    if args.async_record_video is None:
+        args.async_record_video = args.record_video is not None
     for value in (args.opencv_threads, args.blas_threads):
         if value is not None and value < 1:
             parser.error("CPU 线程数必须大于零")
+    if needs_frequency_guard(args.model):
+        # 父保护进程先保存频率，再以当前普通用户重启同一入口；退出/中断负责恢复。
+        # 不把密码写入程序，也不要求额外优化参数。sudo 按现有系统策略认证。
+        arguments = list(argv) if argv is not None else sys.argv[1:]
+        return run_guarded([sys.executable, '-m', 'road_follow', *arguments])
     # 线程预算覆盖完整运行，worker 全部结束后才恢复，避免在途矩阵运算受影响。
     with cpu_thread_budget(args.opencv_threads, args.blas_threads):
         with HeapReclaimer(args.heap_trim_interval):
@@ -489,6 +505,7 @@ def _run(args, parser) -> int:
         stream_options = {"result_order": args.latest_result_order} if args.latest_frame else {}
         segment_stream = stream_type(args.model, cores=(1,2,4)[:args.npu_contexts],
             correct_nms=args.correct_nms, reuse_buffers=args.fps_opt, backend=args.rknn_backend,
+            factory=RoadSegmenter,
             **stream_options)
         segment_stream.warmup(np.zeros((height, width, 3), dtype=np.uint8))
     else:

@@ -75,7 +75,7 @@ def decode_road_mask(
     conf_thres: float = 0.45,
     iou_thres: float = 0.5,
     input_size: int = 640,
-    correct_nms: bool = False,
+    correct_nms: bool = True,
     buffers: SegmentBuffers | None = None,
     timings: dict | None = None,
 ) -> np.ndarray:
@@ -112,7 +112,8 @@ def decode_road_mask(
     xyxy[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] * 0.5
 
     # OpenCV Rect 需要左上角+宽高；原实现误传右下角，单独作为 A0→A1
-    # 正确性实验启用，不能把由此造成的输出变化算作等价性能优化。
+    # 现已默认修正。它与单纯性能优化不同，会改变少量重叠框的保留结果；
+    # correct_nms=False 仅为历史 A0 正确性对照保留，不能混淆两种基线。
     nms_boxes = xyxy.copy() if correct_nms else xyxy
     if correct_nms:
         nms_boxes[:, 2:4] -= nms_boxes[:, 0:2]
@@ -174,8 +175,9 @@ class RoadSegmenter:
     model_path: Path
     conf_thres: float = 0.45
     _session: object = None
-    correct_nms: bool = False
-    reuse_buffers: bool = False
+    correct_nms: bool = True
+    # 单个模型实例由所属 worker 独占；默认复用可写工作区，最终 mask 仍有独立所有权。
+    reuse_buffers: bool = True
     core_mask: int | None = None
     measure: bool = False
     _buffers: SegmentBuffers | None = None

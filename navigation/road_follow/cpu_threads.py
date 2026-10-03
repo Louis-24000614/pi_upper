@@ -16,7 +16,8 @@ def cpu_thread_budget(opencv_threads=None, blas_threads=None):
         if blas_threads is not None:
             if blas_threads < 1:
                 raise ValueError('BLAS 线程数必须大于零')
-            # 可选参数才依赖 threadpoolctl；默认入口不增加依赖或更改线程配置。
+            # 正式道路入口默认 BLAS=1，启动环境需安装 threadpoolctl；外层统一
+            # 限制后再启动 worker，退出后恢复，不能让各线程相互覆盖全局预算。
             from threadpoolctl import threadpool_limits
             limiter = threadpool_limits(limits=blas_threads, user_api='blas')
         yield

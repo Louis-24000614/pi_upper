@@ -6,3 +6,5 @@ dependencies:
   - python=3.10
   - pyside6
   - opencv
+  # 道路默认限制 BLAS 为一个线程，避免 NumPy 小矩阵与三个 NPU worker 争抢 CPU。
+  - threadpoolctl
