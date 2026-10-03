@@ -1,5 +1,6 @@
 """用事件控制读帧/推理竞争，验证最新帧策略的所有权和异常边界。"""
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import queue
 import threading
 import time
@@ -63,9 +64,10 @@ class Segment:
 
 
 class LatestSegmentTest(unittest.TestCase):
-    def make_stream(self, cores=(1,)):
+    def make_stream(self, cores=(1,), result_order="completion"):
         capture = Capture()
-        stream = LatestSegmentStream(Path("fake.rknn"), cores, factory=Segment)
+        stream = LatestSegmentStream(Path("fake.rknn"), cores, factory=Segment,
+                                     result_order=result_order)
         self.addCleanup(stream.close)
         stream.start(capture)
         return stream, capture
@@ -129,6 +131,79 @@ class LatestSegmentTest(unittest.TestCase):
         self.assertEqual(stream.read(capture).sequence, 2)
         self.assertEqual(stream.stats['out_of_order'], 1)
 
+    def test_capture_order_waits_for_running_older_frame_without_discard(self):
+        stream, capture = self.make_stream((1,2), result_order="capture")
+        for segment in stream.segments:
+            segment.block.clear()
+        capture.inputs.put(1)
+        wait_for(lambda: stream.stats['started'] == 1)
+        old = next(segment for segment in stream.segments if segment.began.is_set())
+        capture.inputs.put(2)
+        wait_for(lambda: stream.stats['started'] == 2)
+        new = next(segment for segment in stream.segments if segment is not old)
+        new.block.set()
+        wait_for(lambda: stream.stats['completed'] == 1)
+        # 快帧已经完成仍不能先交给导航；用受控慢帧验证等待，不靠真实 NPU 耗时。
+        entered = threading.Event()
+        def consume():
+            entered.set()
+            return stream.read(capture)
+        with ThreadPoolExecutor(max_workers=1) as consumer:
+            future = consumer.submit(consume)
+            try:
+                self.assertTrue(entered.wait(3))
+                with self.assertRaises(FutureTimeoutError):
+                    future.result(timeout=.03)
+            finally:
+                old.block.set()
+            first = future.result(timeout=3)
+        second = stream.read(capture)
+        self.assertEqual((first.sequence, second.sequence), (0,1))
+        self.assertEqual(stream.stats['out_of_order'], 0)
+        self.assertEqual(stream.stats['max_results'], 2)
+        np.testing.assert_array_equal(first.mask, np.ones((8,8)))
+        np.testing.assert_array_equal(second.mask, np.full((8,8),2))
+
+    def test_capture_order_skips_replaced_sequence_numbers(self):
+        stream, capture = self.make_stream(result_order="capture")
+        segment = stream.segments[0]
+        segment.block.clear()
+        capture.inputs.put(1)
+        self.assertTrue(segment.began.wait(3))
+        for value in range(2,11):
+            capture.inputs.put(value)
+        wait_for(lambda: stream.stats['captured'] == 10)
+        segment.block.set()
+        self.assertEqual(stream.read(capture).sequence, 0)
+        # 单帧替换会造成输入序号有空洞，排序只等实际开工的帧，不能永久等 1..8。
+        self.assertEqual(stream.read(capture).sequence, 9)
+        self.assertEqual(stream.stats['out_of_order'], 0)
+
+    def test_capture_order_does_not_wait_for_inflight_previous_generation(self):
+        stream, capture = self.make_stream((1,2), result_order="capture")
+        for segment in stream.segments:
+            segment.block.clear()
+        capture.inputs.put(1)
+        wait_for(lambda: stream.stats['started'] == 1)
+        old = next(segment for segment in stream.segments if segment.began.is_set())
+        capture.inputs.put(2)
+        wait_for(lambda: stream.stats['started'] == 2)
+        new = next(segment for segment in stream.segments if segment is not old)
+        new.block.set()
+        wait_for(lambda: stream.stats['completed'] == 1)
+        wait_for(lambda: capture.calls == 3)
+        stream.invalidate()
+        # read 已经跨过转弯边界，先舍弃这一帧，再发布新方向的帧。
+        capture.inputs.put(3)
+        wait_for(lambda: stream.stats['captured'] == 3)
+        capture.inputs.put(4)
+        try:
+            result = stream.read(capture)
+            self.assertEqual((result.source, int(result.mask[0,0])), (1,4))
+            self.assertFalse(old.block.is_set())
+        finally:
+            old.block.set()
+
     def test_invalidate_fences_read_started_before_turn_and_inflight_results(self):
         stream, capture = self.make_stream()
         segment = stream.segments[0]
@@ -178,6 +253,25 @@ class LatestSegmentTest(unittest.TestCase):
 
 
 class LatestMainGateTest(unittest.TestCase):
+    def test_capture_order_option_reaches_stream(self):
+        import road_follow.__main__ as entry
+        import tempfile
+        capture = Capture()
+        capture.inputs.put(1)
+        options = []
+        def factory(*args, **kwargs):
+            options.append(kwargs['result_order'])
+            return LatestSegmentStream(*args, factory=Segment, **kwargs)
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder)/'config.yaml'
+            config.write_text('{}\n')
+            with patch.object(entry, 'LatestSegmentStream', side_effect=factory), \
+                    patch.object(entry, '_open_camera', return_value=capture), \
+                    patch.object(entry.signal, 'signal'), patch.object(entry, '_event'):
+                self.assertEqual(entry.main(['--model','fake.rknn','--config',str(config),
+                    '--latest-frame','--latest-result-order','capture','--frames','1']),0)
+        self.assertEqual(options, ['capture'])
+
     def test_reader_stops_before_recording_is_closed(self):
         import road_follow.__main__ as entry
         import tempfile
@@ -223,6 +317,17 @@ class LatestMainGateTest(unittest.TestCase):
             factory.side_effect = lambda *a, **kw: entry.OrderedSegmentStream(*a, **kw)
             with patch.object(entry, 'main', side_effect=lambda argv:
                               original_main(argv+['--latest-frame'])):
+                case = gate_tests.MainFrameGateTest()
+                self.assertEqual(case.check_main(), ['0.000 0.000\n','0.100 0.200\n','0 0\n'])
+                self.assertEqual(case.check_main(True), ['0 0\n'])
+
+    def test_capture_order_keeps_expiry_and_action_mutex(self):
+        import road_follow.__main__ as entry
+        original_main = entry.main
+        with patch.object(entry, 'LatestSegmentStream') as factory:
+            factory.side_effect = lambda *a, **kw: entry.OrderedSegmentStream(*a, **kw)
+            with patch.object(entry, 'main', side_effect=lambda argv: original_main(
+                    argv+['--latest-frame','--latest-result-order','capture'])):
                 case = gate_tests.MainFrameGateTest()
                 self.assertEqual(case.check_main(), ['0.000 0.000\n','0.100 0.200\n','0 0\n'])
                 self.assertEqual(case.check_main(True), ['0 0\n'])

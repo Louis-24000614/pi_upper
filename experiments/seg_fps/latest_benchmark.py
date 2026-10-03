@@ -22,9 +22,10 @@ from experiments.seg_fps.telemetry import snapshot, summarize
 
 def run(args):
     capture = ClockedCapture(args.video, args.source_fps, args.driver_capacity)
-    stream_type = LatestSegmentStream if args.strategy == 'latest' else OrderedSegmentStream
+    stream_type = OrderedSegmentStream if args.strategy == 'ordered' else LatestSegmentStream
+    stream_options = ({'result_order': 'capture'} if args.strategy == 'latest-ordered' else {})
     stream = stream_type(args.model, (1,2,4), correct_nms=True, reuse_buffers=True,
-                         capture_timestamp=lambda: capture.captured_s)
+                         capture_timestamp=lambda: capture.captured_s, **stream_options)
     gate = ResultGate(max_age_s=SLOW_S)
     navigation = Navigation(yaml.safe_load(args.config.read_text()), True)
     rows = deque(maxlen=args.retained_rows or None)
@@ -65,6 +66,7 @@ def run(args):
             row = dict(sequence=result.sequence, source=result.source,
                        worker_ms=result.inference_s*1000,
                        queue_ms=(result.started_s-result.captured_s)*1000,
+                       result_wait_ms=(now-result.finished_s)*1000,
                        result_age_ms=(now-result.captured_s)*1000, accepted=fresh)
             if fresh:
                 navigation.process(result.mask)
@@ -112,7 +114,7 @@ def run(args):
                     rejections=gate.counts, cpu_percent=locals().get('cpu_s',0)/args.seconds*100,
                     rss_peak_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                     metrics={key: summarize([row[key] for row in rows]) for key in
-                        ['worker_ms','queue_ms','result_age_ms','age_ms']},
+                        ['worker_ms','queue_ms','result_wait_ms','result_age_ms','age_ms']},
                     accepted_age_ms=summarize([row['age_ms'] for row in rows if row['accepted']]),
                     raw=list(rows), metrics_scope=f'last {len(rows)} results; FPS all window',
                     resources=resources, decode_ms=summarize(capture.decode_ms),
@@ -122,7 +124,9 @@ def run(args):
                     cores=[1,2,4], model_sha256=hashlib.sha256(args.model.read_bytes()).hexdigest(),
                     config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),
                     before=locals().get('before'), after=snapshot(),
-                    scope='AVI independent publish clock; simulated driver FIFO; no camera/UART/vehicle')
+                    scope=('AVI unlimited decode; no simulated driver FIFO; no camera/UART/vehicle'
+                           if args.source_fps == 0 else
+                           'AVI independent publish clock; simulated driver FIFO; no camera/UART/vehicle'))
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print('RESULT', args.strategy, args.source_fps, completed, accepted,
@@ -136,7 +140,7 @@ def main():
     p.add_argument('--model', type=Path, required=True)
     p.add_argument('--config', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--strategy', choices=('ordered','latest'), required=True)
+    p.add_argument('--strategy', choices=('ordered','latest','latest-ordered'), required=True)
     p.add_argument('--seconds', type=float, default=30)
     p.add_argument('--source-fps', type=float, default=30, help='模拟发布率；0 表示不限制读取')
     p.add_argument('--driver-capacity', type=int, default=4)

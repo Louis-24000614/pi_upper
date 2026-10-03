@@ -9,11 +9,17 @@ from road_follow.parallel_segment import CameraReadError, OrderedSegmentStream
 class LatestSegmentStream(OrderedSegmentStream):
     """只替换未开工的图像，已开工的推理完成后交给有序/时效检查。"""
 
-    def __init__(self, *args, capture_timestamp=None, **kwargs):
+    def __init__(self, *args, capture_timestamp=None, result_order="completion", **kwargs):
+        if result_order not in ("completion", "capture"):
+            raise ValueError("结果顺序必须为 completion 或 capture")
         super().__init__(*args, **kwargs)
         self._condition = threading.Condition()
         self._latest = None
         self._ready = deque()
+        self._result_order = result_order
+        # 必须在取走输入的同一个锁内登记在途序号。否则快结果先完成时，
+        # 消费者可能误以为没有更早的帧，仍然造成导航时间顺序倒退。
+        self._inflight = {}
         self._reader = None
         self._capture = None
         self._on_capture = None
@@ -103,10 +109,12 @@ class LatestSegmentStream(OrderedSegmentStream):
                     if self.closed or self._fatal_error is not None:
                         return
                     packet, self._latest = self._latest, None
+                    self._inflight[index] = (packet[0], packet[1])
                     self.stats["started"] += 1
                 # 每个线程始终使用自己的模型/输入工作区，不排队提交第二个推理任务。
                 result = self._work(self.segments[index], *packet)
                 with self._condition:
+                    self._inflight.pop(index, None)
                     self.stats["completed"] += 1
                     if self.closed:
                         return
@@ -127,19 +135,37 @@ class LatestSegmentStream(OrderedSegmentStream):
                 self._fatal_error = exc
                 self._condition.notify_all()
 
+    def _next_ready_index(self):
+        """调用方持有条件锁；仅等待已开工的更早帧，不等待被替换的序号。"""
+        if not self._ready:
+            return None
+        if self._result_order == "completion":
+            return 0
+        index = min(range(len(self._ready)), key=lambda i: self._ready[i][1].sequence)
+        result = self._ready[index][1]
+        if any(source == self.source and sequence < result.sequence
+               for sequence, source in self._inflight.values()):
+            return None
+        # 结果端仍受每个 context 一份结果的背压约束，排序不能引入无界缓存。
+        # 等待会增加帧龄；原入口在消费前继续执行 200ms 过期检查，过期不更新导航。
+        return index
+
     def read(self, capture, on_capture=None):
         self.start(capture, on_capture)
         with self._condition:
             while True:
                 self._condition.wait_for(lambda: self.closed or self._fatal_error is not None
-                                         or self._camera_error is not None or self._ready)
+                                         or self._camera_error is not None
+                                         or self._next_ready_index() is not None)
                 if self._fatal_error is not None:
                     raise self._fatal_error
                 if self.closed:
                     raise RuntimeError("分割流水线已经关闭")
                 if self._camera_error is not None:
                     raise self._camera_error
-                _, result = self._ready.popleft()
+                index = self._next_ready_index()
+                _, result = self._ready[index]
+                del self._ready[index]
                 self._condition.notify_all()
                 if result.source != self.source:
                     self.stats["old_source"] += 1

@@ -389,6 +389,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="实验：各核独立 context，有序流水线；默认单 context")
     parser.add_argument("--latest-frame", action="store_true",
                         help="实验：独立读取线程只保留一帧，空闲 context 取最新画面")
+    parser.add_argument("--latest-result-order", choices=("completion", "capture"),
+                        default="completion", help="实验：最新帧结果按完成顺序或输入顺序消费")
     parser.add_argument("--rknn-backend", choices=("lite", "c-standard", "c-input-zero"),
                         default="lite", help="实验：RKNN IO 后端；C 路径需要先编译原生组件")
     parser.add_argument("--async-record-video", action="store_true", help="实验：录像用有界编码队列")
@@ -444,6 +446,8 @@ def _run(args, parser) -> int:
     """解析与运行分开，保证模型、采集和异常退出均位于线程预算作用域内。"""
     if args.async_record_video and args.record_video is None:
         parser.error("--async-record-video 需要 --record-video")
+    if args.latest_result_order != "completion" and not args.latest_frame:
+        parser.error("--latest-result-order capture 需要 --latest-frame")
     if (args.npu_contexts > 1 or args.latest_frame) and (args.npu_core_mask is not None or args.model.suffix != ".rknn"):
         parser.error("多 context 需要 RKNN 模型，并且不能与 --npu-core-mask 同时使用")
 
@@ -482,8 +486,10 @@ def _run(args, parser) -> int:
     segmenter, segment_stream = None, None
     if args.npu_contexts > 1 or args.latest_frame:
         stream_type = LatestSegmentStream if args.latest_frame else OrderedSegmentStream
+        stream_options = {"result_order": args.latest_result_order} if args.latest_frame else {}
         segment_stream = stream_type(args.model, cores=(1,2,4)[:args.npu_contexts],
-            correct_nms=args.correct_nms, reuse_buffers=args.fps_opt, backend=args.rknn_backend)
+            correct_nms=args.correct_nms, reuse_buffers=args.fps_opt, backend=args.rknn_backend,
+            **stream_options)
         segment_stream.warmup(np.zeros((height, width, 3), dtype=np.uint8))
     else:
         segmenter = RoadSegmenter(args.model, correct_nms=args.correct_nms,

@@ -70,12 +70,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('videos','model','config','output'):
         p.add_argument('--'+name, type=Path, required=True)
+    p.add_argument('--result-order', choices=('completion','capture'), default='completion')
     args = p.parse_args()
     paths = sorted(args.videos.glob('*.avi'))
     if len(paths) < 9:
         p.error('至少需要九段完整录像')
     chosen = [paths[i] for i in np.linspace(0,len(paths)-1,9,dtype=int)]
-    report = dict(videos=[], total_frames=0, errors=[],
+    report = dict(videos=[], total_frames=0, errors=[], result_order=args.result_order,
         model_sha256=hashlib.sha256(args.model.read_bytes()).hexdigest(),
         config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),
         scope='9 complete videos; lossless acknowledgement fixture; cached identical NN input only; not FPS')
@@ -87,7 +88,8 @@ def main():
             for path in chosen:
                 capture = AcknowledgedCapture(path)
                 stream = LatestSegmentStream(args.model, (1,2,4), factory=CachedSegment,
-                                             correct_nms=True, reuse_buffers=True)
+                                             correct_nms=True, reuse_buffers=True,
+                                             result_order=args.result_order)
                 navigations = [Navigation(cfg, True), Navigation(cfg, True)]
                 began, retained = time.monotonic(), None
                 try:
