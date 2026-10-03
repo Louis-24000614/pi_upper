@@ -25,6 +25,12 @@ def main():
     parser.add_argument("--backend-b", default="lite")
     parser.add_argument("--mixed-a", action="store_true")
     parser.add_argument("--mixed-b", action="store_true")
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--sample-interval", type=float, default=10)
+    parser.add_argument("--opencv-threads-a", type=int)
+    parser.add_argument("--opencv-threads-b", type=int)
+    parser.add_argument("--blas-threads-a", type=int)
+    parser.add_argument("--blas-threads-b", type=int)
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
@@ -44,9 +50,15 @@ def main():
                        "--cores", getattr(args, "cores_"+name),
                        "--record", getattr(args, "record_"+name),
                        "--backend", getattr(args, "backend_"+name),
+                       "--warmup", str(args.warmup),
+                       "--sample-interval", str(args.sample_interval),
                        "--seconds", str(args.seconds), "--speed", str(args.speed)]
             if args.realtime:
                 command.append("--realtime")
+            for library in ("opencv", "blas"):
+                value = getattr(args, library+"_threads_"+name)
+                if value is not None:
+                    command.extend(["--"+library+"-threads", str(value)])
             if getattr(args, "mixed_"+name):
                 command.append("--mixed-load")
             with output.with_suffix(".log").open("w") as log:

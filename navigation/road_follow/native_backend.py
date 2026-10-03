@@ -1,6 +1,7 @@
 """实验用 C API 适配层；每个 context 独立，返回数组拷贝拥有独立生命周期。"""
 import ctypes as C
 from pathlib import Path
+import time
 import numpy as np
 
 
@@ -47,9 +48,12 @@ class NativeRknnSession:
         self.lib.road_rknn_times(self.handle, times)
         self.last_timings = dict(zip(["input_io_ms", "run_ms", "output_io_ms"], times))
         # C 内部 float 缓冲下一次推理会复用，必须在交给调用者前复制。
-        return [np.ctypeslib.as_array(self.lib.road_rknn_output(self.handle,i),
+        began = time.perf_counter()
+        outputs = [np.ctypeslib.as_array(self.lib.road_rknn_output(self.handle,i),
                                      shape=(int(np.prod(shape)),)).reshape(shape).copy()
                 for i,shape in enumerate(self.shapes)]
+        self.last_timings["python_output_copy_ms"] = (time.perf_counter()-began)*1000
+        return outputs
 
     def release(self):
         if self.handle:

@@ -32,5 +32,5 @@ def summarize(samples) -> dict:
     data = np.asarray(samples, dtype=np.float64)
     if not len(data):
         return {}
-    return {"mean": float(data.mean()), "p50": float(np.percentile(data, 50)),
+    return {"count": int(len(data)), "mean": float(data.mean()), "p50": float(np.percentile(data, 50)),
             "p95": float(np.percentile(data, 95)), "max": float(data.max())}

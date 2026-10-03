@@ -77,8 +77,10 @@ def decode_road_mask(
     input_size: int = 640,
     correct_nms: bool = False,
     buffers: SegmentBuffers | None = None,
+    timings: dict | None = None,
 ) -> np.ndarray:
     """把分割头变成原图大小的 0/255 道路 mask。没有够置信度的框时返回全 0。"""
+    began = time.perf_counter() if timings is not None else 0.0
     pred = np.squeeze(pred)
     proto = np.squeeze(proto)
     if pred.ndim != 2 or proto.ndim != 3:
@@ -122,9 +124,11 @@ def decode_road_mask(
 
     xyxy = xyxy[indices]
     coeffs = coeffs[indices]
+    matrix_began = time.perf_counter() if timings is not None else 0.0
     channels, mask_h, mask_w = proto.shape
     flat = proto.reshape(channels, -1).astype(np.float32)
     masks = _sigmoid(coeffs @ flat).reshape(-1, mask_h, mask_w)
+    merge_began = time.perf_counter() if timings is not None else 0.0
 
     merged = np.zeros((input_size, input_size), dtype=bool) if buffers is None else buffers.merged
     if buffers is not None:
@@ -143,6 +147,7 @@ def decode_road_mask(
         merged[y1:y2, x1:x2] |= patch
 
     resized_h = int(round(height * ratio))
+    restore_began = time.perf_counter() if timings is not None else 0.0
     resized_w = int(round(width * ratio))
     cropped = merged[top : top + resized_h, left : left + resized_w]
     if cropped.size == 0:
@@ -152,6 +157,13 @@ def decode_road_mask(
         (width, height),
         interpolation=cv2.INTER_NEAREST,
     )
+    if timings is not None:
+        # 子项嵌套于 post_ms，不可再与 post_ms 相加；无有效框时字典为空。
+        ended = time.perf_counter()
+        timings.update(post_filter_ms=(matrix_began-began)*1000,
+                       post_matrix_sigmoid_ms=(merge_began-matrix_began)*1000,
+                       post_resize_merge_ms=(restore_began-merge_began)*1000,
+                       post_restore_ms=(ended-restore_began)*1000)
     return restored
 
 
@@ -222,6 +234,7 @@ class RoadSegmenter:
             pred, proto = session.run(None, {input_name: blob})
             pred, proto = _orient_heads(pred, proto)
         t2 = time.perf_counter() if self.measure else 0.0
+        post_timings = {} if self.measure else None
         result = decode_road_mask(
             pred,
             proto,
@@ -232,11 +245,12 @@ class RoadSegmenter:
             conf_thres=self.conf_thres,
             correct_nms=self.correct_nms,
             buffers=self._buffers,
+            timings=post_timings,
         )
         if self.measure:
             t3 = time.perf_counter()
             self.last_timings = {"pre_ms": (t1-t0)*1000, "rknn_ms": (t2-t1)*1000,
-                                 "post_ms": (t3-t2)*1000}
+                                 "post_ms": (t3-t2)*1000, **post_timings}
         return result
 
     def close(self) -> None:

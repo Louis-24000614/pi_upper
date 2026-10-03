@@ -2,6 +2,7 @@
 import argparse
 from collections import deque
 import json
+import os
 from pathlib import Path
 import resource
 import time
@@ -10,6 +11,8 @@ import numpy as np
 import yaml
 from road_follow.parallel_segment import OrderedSegmentStream
 from road_follow.__main__ import SLOW_S
+from road_follow.cpu_threads import cpu_thread_budget
+from road_follow.heap_reclaim import HeapReclaimer
 from experiments.seg_fps.navigation import Navigation
 from experiments.seg_fps.frames import Frame, ResultGate
 from experiments.seg_fps.telemetry import snapshot, summarize
@@ -46,18 +49,29 @@ def main():
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--cores", default="1,2,4")
-    p.add_argument("--seconds", type=float, default=600)
+    p.add_argument("--seconds", type=float, default=300)
+    p.add_argument("--backend", choices=("lite", "c-standard", "c-input-zero"), default="lite")
+    p.add_argument("--opencv-threads", type=int)
+    p.add_argument("--blas-threads", type=int)
+    p.add_argument("--heap-trim-interval", type=float, default=0)
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     if args.seconds <= 0:
         p.error("时长必须大于零")
+    with cpu_thread_budget(args.opencv_threads, args.blas_threads):
+        with HeapReclaimer(args.heap_trim_interval) as reclaimer:
+            run(args, reclaimer)
+
+
+def run(args, reclaimer):
     cores = [int(x) for x in args.cores.split(",")]
     capture = LoopCapture(args.video)
-    stream = OrderedSegmentStream(args.model, cores, correct_nms=True, reuse_buffers=True)
+    stream = OrderedSegmentStream(args.model, cores, correct_nms=True, reuse_buffers=True,
+                                  backend=args.backend)
     navigation = Navigation(yaml.safe_load(args.config.read_text()), True)
     gate = ResultGate(max_age_s=SLOW_S)
     rows, resources, errors = deque(maxlen=4096), [], []
-    completed = accepted = last = progress_completed = progress_accepted = 0
+    completed = accepted = worker_slow = last = progress_completed = progress_accepted = 0
     began = cpu_began = None
     before = snapshot()
     try:
@@ -72,6 +86,7 @@ def main():
                 raise AssertionError("结果重复或乱序")
             last = result.sequence+1
             completed += 1
+            worker_slow += result.inference_s > SLOW_S
             packet = Frame(result.sequence, result.sequence/capture.fps,
                            result.captured_s, result.captured_s, result.source, result.image)
             fresh = gate.accept(packet, time.monotonic())
@@ -105,15 +120,22 @@ def main():
             raise
         finally:
             capture.cap.release()
+            reclaimer.close()
             args.output.write_text(json.dumps({"passed": not errors, "errors": errors,
                 "seconds": elapsed, "completed": completed, "consumed": accepted,
                 "fps": completed/max(elapsed,1e-6), "consumed_fps": accepted/max(elapsed,1e-6),
-                "cores": cores, "backend": "lite", "variant": "buffers", "mode": "full",
+                "cores": cores, "backend": args.backend, "variant": "buffers", "mode": "full",
+                "opencv_threads": cv2.getNumThreads(), "blas_threads": args.blas_threads,
+                "allocator_environment": {name: os.getenv(name) for name in
+                    ('MALLOC_ARENA_MAX', 'MALLOC_MMAP_THRESHOLD_', 'MALLOC_TRIM_THRESHOLD_')},
+                "heap_reclaim": {"interval_s": args.heap_trim_interval,
+                                 "samples": list(reclaimer.samples), "errors": reclaimer.errors},
                 "cpu_percent": cpu_s/max(elapsed,1e-6)*100,
                 "rss_peak_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 "metrics": {name: summarize([r[name] for r in rows])
                             for name in ["worker_ms", "age_ms"]},
                 "rejections": gate.counts, "slow_stop_count": 0,
+                "worker_slow_count": worker_slow,
                 "metrics_scope": f"last {len(rows)} completed frames; FPS uses all completions",
                 "before": before, "after": snapshot(), "resources": resources, "raw": list(rows),
                 "scope": "actual OrderedSegmentStream with AVI adapter; visual only, no ODOM/IMU/UART"}, indent=2))

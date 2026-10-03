@@ -18,6 +18,7 @@ from road_follow.recording import VideoRecorder
 from road_follow.async_recording import AsyncVideoRecorder
 from road_follow.control import VelocityCommand
 from road_follow.__main__ import SLOW_S
+from road_follow.cpu_threads import cpu_thread_budget
 from experiments.seg_fps.frames import VideoFrames, ResultGate
 from experiments.seg_fps.navigation import Navigation
 from experiments.seg_fps.telemetry import snapshot, summarize
@@ -51,19 +52,25 @@ def run(args) -> dict:
     events = deque(maxlen=args.retained_rows or None)
     if args.retained_rows:
         frames.decode_ms = deque(maxlen=args.retained_rows)
-    counts = {"completed": 0, "consumed": 0, "slow_stop": 0}
+    counts = {"completed": 0, "consumed": 0, "slow_stop": 0, "worker_slow": 0}
     last_identity = -1
 
     def save_row(row):
         counts["completed"] += 1
         counts["consumed"] += not row.get("rejected", False)
         counts["slow_stop"] += row.get("slow_stop", False)
+        counts["worker_slow"] += row.get("worker_slow", False)
         rows.append(row)
     gate = ResultGate(max_age_s=args.max_age if args.realtime else None)
     before = snapshot()
     env = {"opencv_threads": cv2.getNumThreads(),
            "openblas_threads": os.getenv("OPENBLAS_NUM_THREADS"),
            "omp_threads": os.getenv("OMP_NUM_THREADS")}
+    try:
+        from threadpoolctl import threadpool_info
+        env["threadpools"] = threadpool_info()
+    except ImportError:
+        env["threadpools"] = "unavailable"
     recorder = None
     mixed = None
     mixed_report = None
@@ -73,7 +80,7 @@ def run(args) -> dict:
         recorder = (VideoRecorder(record_path) if args.record == "sync"
                     else AsyncVideoRecorder(record_path))
     try:
-        # 每个 context 相同 5 次预热，初始化、预热与输入池准备均不计入统计。
+        # 双方使用相同预热；保留逐次时间，以便判断是否稳态，不能盲套 200 次。
         capture = cv2.VideoCapture(str(args.video))
         for _ in range(8):
             ok, image = capture.read()
@@ -85,12 +92,18 @@ def run(args) -> dict:
             raise RuntimeError("录像没有可解码帧")
         # 即使标准 IO 只读输入，也给每个 context 独立 RAM 池，避免隐式别名。
         pure_pools = [[tensor.copy() for tensor in pure_pool] for _ in segments]
+        warmup_rows = []
         for index, segment in enumerate(segments):
-            def warmup(segment=segment):
+            def warmup(segment=segment, index=index):
                 session = segment._load()
-                for tensor in pure_pools[index][:5]:
+                samples = []
+                for step in range(args.warmup):
+                    tensor = pure_pools[index][step % len(pure_pool)]
+                    began = time.monotonic()
                     session.inference(inputs=[tensor], data_format=["nhwc"])
-            executors[index].submit(warmup).result()
+                    samples.append((time.monotonic()-began)*1000)
+                return samples
+            warmup_rows.append(executors[index].submit(warmup).result())
         if args.mixed_load:
             from experiments.seg_fps.mixed_load import MixedLoad
             # 受控负载使用既有服务和障碍模型；单独报告，不能混入单道路收益。
@@ -127,7 +140,7 @@ def run(args) -> dict:
         deadline = start + args.seconds
         previous = None
         resource_samples = []
-        next_sample = start + 10
+        next_sample = start + args.sample_interval
         next_progress, progress_completed, progress_consumed = start+60, 0, 0
         # 每个 worker 最多一个在途任务，控制队列年龄，不用长队列换吞吐。
         while time.monotonic() < deadline or pending:
@@ -167,6 +180,7 @@ def run(args) -> dict:
             consumed = time.monotonic()
             row = {"id": identity, "start_s": began-start, "end_s": finished-start,
                    **timings, "worker_ms": (finished-began)*1000}
+            row["worker_slow"] = row["worker_ms"] > SLOW_S*1000
             if frame is not None:
                 row.update(frame_id=frame.sequence, video_s=frame.video_s,
                            source=frame.source, publish_s=frame.published_s-start,
@@ -197,7 +211,7 @@ def run(args) -> dict:
             save_row(row)
             if time.monotonic() >= next_sample:
                 resource_samples.append({"elapsed_s": time.monotonic()-start, **snapshot()})
-                next_sample += 10
+                next_sample += args.sample_interval
             if time.monotonic() >= next_progress:
                 print("PROGRESS", json.dumps({"elapsed_s": time.monotonic()-start,
                       "completed_last_minute": counts["completed"]-progress_completed,
@@ -211,6 +225,9 @@ def run(args) -> dict:
         metrics = {key: summarize([r[key] for r in rows if key in r])
                    for key in ["pre_ms", "rknn_ms", "post_ms", "nav_ms", "worker_ms",
                                "input_io_ms", "run_ms", "output_io_ms",
+                               "python_output_copy_ms",
+                               "post_filter_ms", "post_matrix_sigmoid_ms",
+                               "post_resize_merge_ms", "post_restore_ms",
                                "queue_ms", "age_ms", "result_age_ms"]}
         accepted = counts["consumed"]
         if recorder is not None:
@@ -234,6 +251,10 @@ def run(args) -> dict:
                            "speed": args.speed, "max_age_s": args.max_age},
                 "record_dropped": getattr(recorder, "dropped", 0),
                 "slow_stop_count": counts["slow_stop"],
+                "worker_slow_count": counts["worker_slow"],
+                "warmup_iterations_per_context": args.warmup,
+                "warmup_call_ms": warmup_rows,
+                "resource_sample_interval_s": args.sample_interval,
                 "metrics_scope": "all completed frames" if not args.retained_rows
                                  else f"last {len(rows)} completed frames; FPS uses all completions",
                 "retained_rows": args.retained_rows,
@@ -269,12 +290,19 @@ def main():
     parser.add_argument("--retained-rows", type=int, default=0,
                         help="长稳诊断最多保留 N 帧样本；0 保留全部，完成数仍覆盖完整窗口")
     parser.add_argument("--mixed-load", action="store_true", help="受控障碍/刀具/人脸检测混合负载")
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--sample-interval", type=float, default=10)
+    parser.add_argument("--opencv-threads", type=int)
+    parser.add_argument("--blas-threads", type=int)
     args = parser.parse_args()
     if args.seconds <= 0:
         parser.error("统计窗口必须大于零")
     if args.retained_rows < 0:
         parser.error("诊断保留数量不能为负数")
-    report = run(args)
+    if args.warmup < 1 or args.sample_interval <= 0:
+        parser.error("预热次数和资源采样间隔必须为正数")
+    with cpu_thread_budget(args.opencv_threads, args.blas_threads):
+        report = run(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps({k: report[k] for k in ["variant", "mode", "cores", "fps", "consumed_fps",

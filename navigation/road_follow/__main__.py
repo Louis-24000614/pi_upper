@@ -58,6 +58,8 @@ from road_follow.rfid_turn import (
 )
 from road_follow.segment import RoadSegmenter
 from road_follow.parallel_segment import OrderedSegmentStream, CameraReadError
+from road_follow.cpu_threads import cpu_thread_budget
+from road_follow.heap_reclaim import HeapReclaimer
 
 ROOT = Path(__file__).resolve().parents[2]
 SLOW_S = 0.20
@@ -387,6 +389,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rknn-backend", choices=("lite", "c-standard", "c-input-zero"),
                         default="lite", help="实验：RKNN IO 后端；C 路径需要先编译原生组件")
     parser.add_argument("--async-record-video", action="store_true", help="实验：录像用有界编码队列")
+    parser.add_argument("--opencv-threads", type=int, help="实验：进程级 OpenCV 线程数；默认保持原配置")
+    parser.add_argument("--blas-threads", type=int, help="实验：BLAS 线程数，需 threadpoolctl；默认保持原配置")
+    parser.add_argument("--heap-trim-interval", type=float, default=0,
+                        help="实验：每 N 秒归还 libc 空闲堆页；0 关闭，建议 60")
     parser.add_argument("--drive", action="store_true", help="打开串口并使能，按寻线速度行驶")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
@@ -422,6 +428,17 @@ def main(argv: list[str] | None = None) -> int:
         help="障碍物连续出现后，用负速度和视觉纠偏倒回上一个路口",
     )
     args = parser.parse_args(argv)
+    for value in (args.opencv_threads, args.blas_threads):
+        if value is not None and value < 1:
+            parser.error("CPU 线程数必须大于零")
+    # 线程预算覆盖完整运行，worker 全部结束后才恢复，避免在途矩阵运算受影响。
+    with cpu_thread_budget(args.opencv_threads, args.blas_threads):
+        with HeapReclaimer(args.heap_trim_interval):
+            return _run(args, parser)
+
+
+def _run(args, parser) -> int:
+    """解析与运行分开，保证模型、采集和异常退出均位于线程预算作用域内。"""
     if args.async_record_video and args.record_video is None:
         parser.error("--async-record-video 需要 --record-video")
     if args.npu_contexts > 1 and (args.npu_core_mask is not None or args.model.suffix != ".rknn"):

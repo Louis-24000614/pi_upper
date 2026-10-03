@@ -85,3 +85,33 @@ BEV、诊断、控制和路口序列，单独记录 A0→A1 的行为变化。�
 
 本次数据没有确认逐帧同步的 ODOM/IMU/动作完成日志；道路丢失、障碍确认和转弯
 流程的既有单元测试属于软件模拟，最终仍需要真实相机及静止台架确认。
+
+2026-10-03 按 07 补充建议完成下一轮，结果见 SUPPLEMENT_RESULTS.md。
+五组同一合法最高频率对照中，只将 NumPy/BLAS 从 8 降至 1 线程，完整回放平均
+22.55→34.69 FPS（+53.84%）；单帧 P95 151.56→89.93ms。OpenCV 保持原 8 线程，
+Lite 后端和三个 context 保留，六 context、C IO 及强制 mmap 回收未纳入最终组合。
+
+原普通调频下实际程序只有 19.78/18.18 处理/有效 FPS，不能用锁频基准替代。
+最终合法固频 + BLAS=1 + 每 60 秒 GC/空闲堆页回收，实际流水线五分钟
+33.55 FPS，10,066 帧全部通过导航前 200ms 时效门，异常/乱序/过期均为零。
+回收间隔默认关闭；启用后记录完整资源曲线，五分钟结论不外推为三十分钟。
+最新 stability.py 默认时长已改为用户要求的 300 秒，前文十分钟为已完成历史结果。
+
+推荐试运行（不开串口；实际模型和相机配置按项目默认，性能素材另有冻结路径）：
+
+    export PYTHONPATH=.:navigation:vision
+    /home/orangepi/vision_compare_pi_upper/bin/python -m experiments.seg_fps.run_with_frequency \
+      --policy all-max -- /home/orangepi/vision_compare_pi_upper/bin/python -m road_follow \
+      --fps-opt --correct-nms --npu-contexts 3 --blas-threads 1 --heap-trim-interval 60
+
+启动器先授权 sudo，只有 CPU/DDR/NPU 调频命令用 root，主程序仍以普通用户运行。
+原 governor/min/max 写入新快照，正常退出及 INT/TERM/HUP 会在子命令结束后恢复，
+并逐域读回比对。使用新的 --state 路径，禁止覆盖原快照。--sudo-stdin 仅供批处理
+读取一次密码，密码不进入命令参数或日志，运行期间自动续期本进程的 sudo 票据。
+生产入口不自动修改频率，所有新开关默认保持原行为；GPU、OPP、电压和温控未改。
+
+regression_threads.py 对相同九段全部 4006 帧使用真实 mask 入口比较线程预算，
+RGB、原始 tensor、mask、EMA、控制和路口均一致；完全相同的相邻模型输入只在
+正确性回归缓存输出，不进入性能测试。高频 GC 下另有三 context 并发 20 帧
+所有权、tensor、mask、顺序及软件速度序列专项，88 项道路测试和三项启动器恢复
+检查通过。最新数据保存在 /home/orangepi/seg_fps_results/supplement_20261003_1420。
