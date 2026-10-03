@@ -41,6 +41,7 @@ python -m experiments.seg_fps.regression \
   --videos /home/orangepi/seg_fps_data/pi_upper/data/road \
   --model /home/orangepi/seg_fps_data/pi_upper/models/road_yolo11n_seg.rknn \
   --config /home/orangepi/seg_fps_data/pi_upper/config/nav_camera.yaml \
+  --video-sample-count 9 --reuse-adjacent-heads \
   --output /home/orangepi/seg_fps_results/regression.json
 ```
 
@@ -48,6 +49,10 @@ python -m experiments.seg_fps.regression \
 BEV、诊断、控制和路口序列，单独记录 A0→A1 的行为变化。可指定
 `--reference-core` 对比另一核心的原始 tensor（绝对/相对容差各 1e-5）。
 不会把共享 tensor 的 CPU 回归冒充跨核心 NPU 回归。
+`--video-sample-count 9` 在排序后的录像中均匀选取九段，默认逐帧完整检查所选片段；
+`--sample-per-video N` 才会进一步抽取片段内的帧。均匀抽帧的稀疏观测序列不能用于
+声明完整路口时序通过。`--reuse-adjacent-heads` 只在正确性回归复用完全相同的
+相邻图像输出，CPU mask/BEV、EMA 与路口仍逐帧运行，不用于吞吐计数。
 
 正式相机入口提供默认关闭的独立开关：`--fps-opt` 复用投影与缓冲，
 `--correct-nms` 单独修正 NMS，`--npu-core-mask` 选择单 context 核心，
@@ -62,9 +67,13 @@ BEV、诊断、控制和路口序列，单独记录 A0→A1 的行为变化。�
 10.49→17.67 FPS，实际资源和各轮波动见报告。同步→异步录像约 +45.7%。
 原生标准/输入绑定 IO 与按需普通中心线没有明确 FPS 收益，保留为实验选项。
 
-用户随后要求先停测并关机。本次只完成筛选、部分正式轮次、软件回归和
-并发输出抽检；全部录像逐帧回归及连续 10 分钟稳定性测试尚未执行，不能声称通过。
-已有结果保留在 `/home/orangepi/seg_fps_results`，正式轮次未完成部分不参与汇总。
+重启后五对 60 秒正式验证：A1 单 context 与三 context 组合平均
+6.26→19.53 FPS（配对平均 +212.0%）；单帧工作 P95 168.44→194.80ms。
+10 分钟实际 OrderedSegmentStream 连续验证完成 10,729 帧，9,610 帧通过导航前
+200ms 时效门，处理/有效更新分别为 17.88/16.02 FPS，无异常或乱序。
+按用户最终要求，完整回放均匀选取的九段；结果、录像帧数、NMS 单独变化和资源
+曲线见 RESULTS.md，不声称全部 29 段通过。实时/混合负载后续缩短为一对 20 秒
+抽检，不能当成统计显著性结论。所有中断记录保留，不混入完整轮次的平均。
 
 原生 IO 后端默认关闭。`bash navigation/road_follow/native/build.sh` 编译后，可用
 `--backend c-standard|c-input-zero` 做回放 A/B，正式入口对应 `--rknn-backend`。
