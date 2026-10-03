@@ -141,3 +141,15 @@ context 仍独占模型及输入工作区。读取线程不断解码并发布独
 相机缓冲配置。`latest_regression.py` 用无损握手源检查九段全部帧，避免丢帧掩盖
 错误；仅此正确性回归缓存完全相同的相邻模型输入，不能用其耗时报告 FPS。
 结果见 LATEST_RESULTS.md。
+
+2026-10-03 补充结果消费顺序实验：`--latest-frame --latest-result-order capture`
+保留单帧输入替换，但暂存快结果、只等待实际开工且属于当前来源代次的更早帧，
+导航前仍执行原 200ms 门。默认 `completion` 保持既有 latest 行为，latest 本身
+仍默认关闭。回放选择 `--strategy latest-ordered`；配对可指定
+`--strategies latest latest-ordered` 或 `--strategies ordered latest-ordered`。
+五对各边 60 秒、不限速对照中，latest 完成序→输入序为 28.84→31.10 有效 FPS，
+平均帧龄 108.67→114.77ms、P95 137.83→151.87ms，晚到丢弃 1061→0。
+相对原有 Ordered 的三对各边 30 秒补充对照仍较差：33.17→30.93 FPS，
+平均帧龄 89.33→115.39ms。因此继续推荐原有 Ordered，不自动启用 latest。
+五分钟稳定性 31.17 有效 FPS、2 帧过期拒绝、0 乱序/异常；103 项测试通过。
+细节与两组对照的不同范围见 CAPTURE_ORDER_RESULTS.md。
