@@ -58,6 +58,7 @@ from road_follow.rfid_turn import (
 )
 from road_follow.segment import RoadSegmenter
 from road_follow.parallel_segment import OrderedSegmentStream, CameraReadError
+from road_follow.latest_segment import LatestSegmentStream
 from road_follow.cpu_threads import cpu_thread_budget
 from road_follow.heap_reclaim import HeapReclaimer
 
@@ -386,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="实验：单 context 的 NPU 核心位掩码；默认保持 0 号核")
     parser.add_argument("--npu-contexts", type=int, choices=(1,2,3), default=1,
                         help="实验：各核独立 context，有序流水线；默认单 context")
+    parser.add_argument("--latest-frame", action="store_true",
+                        help="实验：独立读取线程只保留一帧，空闲 context 取最新画面")
     parser.add_argument("--rknn-backend", choices=("lite", "c-standard", "c-input-zero"),
                         default="lite", help="实验：RKNN IO 后端；C 路径需要先编译原生组件")
     parser.add_argument("--async-record-video", action="store_true", help="实验：录像用有界编码队列")
@@ -441,7 +444,7 @@ def _run(args, parser) -> int:
     """解析与运行分开，保证模型、采集和异常退出均位于线程预算作用域内。"""
     if args.async_record_video and args.record_video is None:
         parser.error("--async-record-video 需要 --record-video")
-    if args.npu_contexts > 1 and (args.npu_core_mask is not None or args.model.suffix != ".rknn"):
+    if (args.npu_contexts > 1 or args.latest_frame) and (args.npu_core_mask is not None or args.model.suffix != ".rknn"):
         parser.error("多 context 需要 RKNN 模型，并且不能与 --npu-core-mask 同时使用")
 
     if args.left_at_junction and args.turn_at_junction not in (None, "left"):
@@ -477,8 +480,9 @@ def _run(args, parser) -> int:
         print(f"找不到 {uart_bin}，先编译 uart_vel", file=sys.stderr)
         return 1
     segmenter, segment_stream = None, None
-    if args.npu_contexts > 1:
-        segment_stream = OrderedSegmentStream(args.model, cores=(1,2,4)[:args.npu_contexts],
+    if args.npu_contexts > 1 or args.latest_frame:
+        stream_type = LatestSegmentStream if args.latest_frame else OrderedSegmentStream
+        segment_stream = stream_type(args.model, cores=(1,2,4)[:args.npu_contexts],
             correct_nms=args.correct_nms, reuse_buffers=args.fps_opt, backend=args.rknn_backend)
         segment_stream.warmup(np.zeros((height, width, 3), dtype=np.uint8))
     else:
@@ -1005,26 +1009,41 @@ def _run(args, parser) -> int:
         recording_stopped_s = time.monotonic()
         _stop_bridge(bridge)
         try:
-            if recorder is not None:
-                recorder.close(recording_stopped_s)
-                if recorder.frames_written:
-                    _event(
-                        "录像",
-                        f"已保存：{recorder.path}（{recorder.frames_written} 帧）",
-                    )
+            # latest 的录像回调运行在读取线程；先结束生产者再关闭编码器。
+            if args.latest_frame and segment_stream is not None:
+                segment_stream.close()
         finally:
-            # 编码线程异常也要释放相机和 NPU；否则下一次启动会残留资源。
-            try:
-                if detector is not None:
-                    detector.close()
-            finally:
-                if capture is not None:
-                    capture.release()
-                if segment_stream is not None:
-                    segment_stream.close()
-                elif segmenter is not None:
-                    segmenter.close()
+            _finish_resources(recorder, recording_stopped_s, detector, capture,
+                              segment_stream, segmenter, args.latest_frame)
     return 0
+
+
+def _finish_resources(recorder, stopped_s, detector, capture, stream, segmenter, latest):
+    """保持异常清理顺序，任何一路释放失败也继续释放其余资源。"""
+    try:
+        if recorder is not None:
+            recorder.close(stopped_s)
+            if recorder.frames_written:
+                _event("录像", f"已保存：{recorder.path}（{recorder.frames_written} 帧）")
+    finally:
+        # 编码线程异常也要释放相机和 NPU；否则下一次启动会残留资源。
+        try:
+            if detector is not None:
+                detector.close()
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                finally:
+                    # latest 模式由读取线程释放句柄，不能和 read 并发释放。
+                    if capture is not None and not (latest and getattr(stream, 'owns_capture', False)):
+                        capture.release()
+            elif segmenter is not None:
+                try:
+                    segmenter.close()
+                finally:
+                    if capture is not None:
+                        capture.release()
 
 
 if __name__ == "__main__":
