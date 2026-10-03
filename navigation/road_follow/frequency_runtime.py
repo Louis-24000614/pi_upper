@@ -40,14 +40,24 @@ def main(argv=None):
     return run_guarded(command, policy=args.policy, state=args.state, sudo_stdin=args.sudo_stdin)
 
 
-def run_guarded(command, *, policy='all-max', state=None, sudo_stdin=False):
+def run_guarded(command, *, policy='all-max', state=None, sudo_stdin=None):
     """父进程负责调频与恢复，子进程负责模型/相机/串口；信号也覆盖初始化阶段。"""
     if sys.platform != 'linux' or os.geteuid() == 0:
         raise RuntimeError('请在板端以普通用户启动；仅调频子命令使用 sudo')
     state = state or Path(f'/tmp/road_frequency_{time.time_ns()}_{os.getpid()}.json')
     if state.exists():
         raise RuntimeError('快照已存在，不能覆盖原配置')
-    if sudo_stdin:
+    authenticated = False
+    if sudo_stdin is None:
+        # 非终端 sudo 票据可能按父 PID 隔离，不能假设父 shell 已认证就能复用。
+        # 优先无交互验证；需要认证时，终端沿用 sudo 提示，管道则从 stdin 读一次。
+        # 只读本次系统认证，密码不会传入命令参数、环境变量或保存到磁盘。
+        probe = subprocess.run(['sudo','-n','-v'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        authenticated = probe.returncode == 0
+        sudo_stdin = not sys.stdin.isatty()
+    if authenticated:
+        pass
+    elif sudo_stdin:
         password = sys.stdin.buffer.readline(4096)
         if not password:
             raise RuntimeError('没有读取到 sudo 密码')
