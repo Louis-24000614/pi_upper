@@ -18,8 +18,9 @@ camera:
   cy: 360.0
 
 bev:
-  # 16 cm / 28° 时 1280×720 大约只看到车前 0.15–1.0 m，再远没有像素。
-  y_min: 0.20
+  # 16 cm / 28° 时画面底边中线大约看到车前 0.11 m，近边取 0.12 m。
+  # 再远大约到 1.0 m，之外没有地面像素。近处左右仍会被 85° 视场裁掉。
+  y_min: 0.12
   y_max: 1.00
   x_min: -0.5
   x_max: 0.5
@@ -49,7 +50,7 @@ follow:
   # 正常视觉循迹稍微降速，给分割和转向纠偏留出更多反应时间。
   cruise_mps: 0.08
   turn_mps: 0.05
-  lookahead_m: 0.35
+  lookahead_m: 0.30
   turn_abs_x_m: 0.08
   min_points: 8
   min_road_pixels: 400
@@ -58,8 +59,8 @@ follow:
   x_bias_m: 0.00
   # 增强视觉纠偏；仍受 max_abs_omega 限制。
   steering_gain: 2.0
-  # 固定 35 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
-  min_lookahead_m: 0.28
+  # 固定 30 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
+  min_lookahead_m: 0.24
   near_mps: 0.05
 
 # 同色过分割时的几何兜底（vision/ipm_proto）
@@ -71,7 +72,8 @@ road_prior:
   max_width_m: 0.32
   min_pixels: 3
 
-# 侧向支路先锁存；正前方检测带稳定无路后，交给下位机用编码器定距、IMU 保持航向。
+# 侧向支路按地图锁存；到点检测方式由 nav_topology.yaml 中 arrival 决定。
+# visual_end 看检测带，visual_odom 看支路和里程；最后由下位机执行定距。
 # 自动转弯只有命令行显式指定 --turn-at-junction/--left-at-junction 才启用。
 junction_turn:
   stable_frames: 2
@@ -81,52 +83,52 @@ junction_turn:
   camera_ahead_of_turn_center_m: 0.00  # 实测：相机光心比两轮中心靠前的距离
   stop_before_center_m: 0.00
   forward_speed_mmps: 50
-  # 每次转弯交接后固定前进 20 cm，明确停车后再原地转。
-  turn_forward_m: 0.20
+  # 每次转弯交接后固定前进 15 cm，明确停车后再原地转。
+  turn_forward_m: 0.15
   stop_settle_ms: 2000
   min_forward_mm: 50
   max_forward_mm: 650
   reacquire_frames: 3
-  # 侧向的角只负责锁存路口；之后仍然视觉循迹，由正前方检测带判断交接。
-  # 检测带稳定无 road mask 后，IMU 锁航向再走 20 cm 到路口中心。
+  # visual_end 策略：侧向的角只锁存路口，正前方检测带判断交接。
+  # 检测带稳定无 road mask 后，IMU 锁航向再走 15 cm 到路口中心。
   road_end_enabled: true
   road_end_min_y_m: 0.20
   # 实车回放中蓝色检测带占比已降到 0.08 时，走廊最远点约为 0.37 m。
   road_end_max_y_m: 0.40
   # 图中蓝色区域：BEV 正前方 34–48 cm 的中央走廊。
-  # 侧边角只锁存路口；这里的 road mask 占比连续 3 帧 <=10% 才走最后 20 cm。
+  # 侧边角只锁存路口；这里的 road mask 占比连续 3 帧 <=10% 才走最后 15 cm。
   road_end_band_min_y_m: 0.34
   road_end_band_max_y_m: 0.48
   road_end_band_max_ratio: 0.10
   road_end_missing_frames: 3
-  # 支路已锁存但视觉预瞄刚丢失时，末端通常还在约 0.42 m；允许最后一次 20 cm 交接。
+  # 支路已锁存但视觉预瞄刚丢失时，末端通常还在约 0.42 m；允许最后一次 15 cm 交接。
   road_end_stopped_max_y_m: 0.45
-  blind_forward_m: 0.20
+  blind_forward_m: 0.15
   road_end_max_abs_lane_x_m: 0.08
   road_end_min_lane_width_m: 0.14
   road_end_max_lane_width_m: 0.32
-  # 侧路角无论远近都只锁存方向，不直接触发 20 cm。
+  # 侧路角无论远近都只锁存方向，不直接触发 15 cm。
   branch_observe_min_distance_m: 0.18
   branch_observe_max_distance_m: 0.95
   # 最近 8 帧里有 2 帧看到部分支路就锁存，之后被墙遮住也不清除。
   branch_vote_window: 8
   branch_vote_min: 2
-  # 完全没有视觉证据时，ODOM 到预计节点前 5 cm 停车等待，禁止盲转。
+  # 仅普通路口尚未交接时，ODOM 到预计节点前 5 cm 保护停车；巡检点不启用。
   odom_stop_margin_m: 0.05
 
 # 保留原巡检点视觉接近参数；--turn-at-junction 只取消 UID 输入，下面的
-# 侧边锁存、检测带、20 cm 和速度值仍按原样使用。独立 --turn-at-rfid
+# 侧边锁存、检测带、15 cm 和速度值仍按原样使用。独立 --turn-at-rfid
 # 硬件测试也复用本段的停车/重新捕获参数。
 rfid_turn:
   stop_settle_ms: 2000
   reacquire_frames: 3
   # 巡逻点先用视觉循迹；左右任一矮沿端头只负责锁存。
-  # 蓝色正前方检测带的 road mask 稳定消失后，才盲走一次 20 cm。
+  # 蓝色正前方检测带的 road mask 稳定消失后，才盲走一次 15 cm。
   edge_visible_frames: 2
   road_end_missing_frames: 3
   road_end_band_max_ratio: 0.10
-  search_step_distance_mm: 200
-  # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
+  search_step_distance_mm: 150
+  # 最后 15 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
   # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
 

@@ -10,7 +10,7 @@ from road_follow.control import VelocityCommand
 
 @dataclass(frozen=True)
 class RfidArrivalConfig:
-    step_distance_mm: int = 200
+    step_distance_mm: int = 150
     search_speed_mmps: int = 50
     edge_visible_frames: int = 2
     road_end_missing_frames: int = 3
@@ -32,13 +32,14 @@ class RfidArrival:
     # 保存本次接近过程中实际见过的侧边方向；标签号码不参与位置判断。
     edge_left_seen: bool = False
     edge_right_seen: bool = False
+    odom_handoff_frames: int = 0
 
 
 def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
     raw = cfg.get("rfid_turn", {}) or {}
     return RfidArrivalConfig(
         step_distance_mm=min(
-            300, max(1, int(raw.get("search_step_distance_mm", 200)))
+            300, max(1, int(raw.get("search_step_distance_mm", 150)))
         ),
         search_speed_mmps=min(
             400, max(20, int(raw.get("search_speed_mmps", 50)))
@@ -66,12 +67,17 @@ def step_rfid_arrival(
     edge_right_visible: bool = False,
     forward_band_ratio: float = 1.0,
     visual_safe: bool = True,
+    arrival_mode: str = "visual_end",
+    odom_handoff: bool = False,
+    odom_stable_frames: int = 2,
 ) -> tuple[RfidArrival, VelocityCommand]:
     """侧边端头只负责锁存；正前方检测带稳定无 road mask 后才直走一次。"""
     received = _drain_notes(notes)
 
     if state.phase == "fault":
         return state, VelocityCommand(0.0, 0.0, "stop_rfid_not_found")
+    if state.phase == "odom_wait":
+        return state, VelocityCommand(0.0, 0.0, "stop_arrival_guard")
     if state.phase == "arrived":
         return state, VelocityCommand(0.0, 0.0, "rfid_arrived")
 
@@ -101,7 +107,7 @@ def step_rfid_arrival(
             return state, VelocityCommand(0.0, 0.0, "rfid_searching")
         state.searched_mm += state.active_step_mm
         state.active_step_mm = 0
-        # 只取消读卡确认：原来的 20 cm 完成后直接确认当前拓扑巡检点。
+        # 只取消读卡确认：定距完成后直接确认当前拓扑巡检点。
         state.phase = "arrived"
         return state, VelocityCommand(0.0, 0.0, "rfid_arrived")
 
@@ -118,16 +124,20 @@ def step_rfid_arrival(
             state.edge_left_seen = False
             state.edge_right_seen = False
 
-    if state.edge_latched:
+    if state.edge_latched and arrival_mode == "visual_end":
         if forward_band_ratio <= cfg.road_end_band_max_ratio:
             state.road_end_missing_frames += 1
         else:
             state.road_end_missing_frames = 0
 
-    if (
-        not state.edge_latched
-        or state.road_end_missing_frames < cfg.road_end_missing_frames
-    ):
+    if arrival_mode == "visual_odom":
+        state.odom_handoff_frames = (
+            state.odom_handoff_frames + 1 if state.edge_latched and odom_handoff else 0
+        )
+        ready = state.odom_handoff_frames >= max(1, odom_stable_frames)
+    else:
+        ready = state.road_end_missing_frames >= cfg.road_end_missing_frames
+    if not state.edge_latched or not ready:
         return state, visual
     if not visual_safe:
         state.phase = "fault"

@@ -80,6 +80,7 @@ int main(int argc, char** argv) {
   bool announced = false;
   uint64_t last_status_ms = 0;
   uint64_t last_odom_ms = 0;
+  uint64_t seen_odom_us = 0;
   FiniteAction finite_action = FiniteAction::kNone;
   uint64_t action_ms = 0;
   uint64_t action_timeout_ms = 20000;
@@ -262,8 +263,10 @@ int main(int argc, char** argv) {
 
     const uart::Telemetry& odom_tel = session.telemetry();
     if (odom_tel.has_odom && (odom_tel.odom.status_flags & uart::kOdomValid) != 0 &&
+        odom_tel.odom_us != seen_odom_us &&
         now_ms - last_odom_ms >= 50) {
       last_odom_ms = now_ms;
+      seen_odom_us = odom_tel.odom_us;
       const uart::OdomState& odom = odom_tel.odom;
       std::ostringstream line;
       line << std::fixed << std::setprecision(3) << "ODOM " << odom.x_m << " " << odom.y_m << " "

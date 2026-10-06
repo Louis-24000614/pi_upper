@@ -17,7 +17,7 @@ class JunctionTurnConfig:
     camera_ahead_of_turn_center_m: float = 0.0
     stop_before_center_m: float = 0.0
     forward_speed_mmps: int = 50
-    turn_forward_m: float = 0.20
+    turn_forward_m: float = 0.15
     stop_settle_s: float = 2.0
     min_forward_mm: int = 50
     max_forward_mm: int = 650
@@ -30,7 +30,7 @@ class JunctionTurnConfig:
     road_end_band_max_ratio: float = 0.10
     road_end_missing_frames: int = 3
     # 角看不见之后，IMU 定距再走这段到路口中心。
-    blind_forward_m: float = 0.20
+    blind_forward_m: float = 0.15
     road_end_max_abs_lane_x_m: float = 0.08
     road_end_min_lane_width_m: float = 0.14
     road_end_max_lane_width_m: float = 0.32
@@ -84,7 +84,7 @@ def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
         ),
         stop_before_center_m=float(raw.get("stop_before_center_m", 0.0)),
         forward_speed_mmps=max(1, int(raw.get("forward_speed_mmps", 50))),
-        turn_forward_m=max(0.001, float(raw.get("turn_forward_m", 0.20))),
+        turn_forward_m=max(0.001, float(raw.get("turn_forward_m", 0.15))),
         stop_settle_s=max(
             0.0, float(raw.get("stop_settle_ms", 2000)) / 1000.0
         ),
@@ -103,7 +103,7 @@ def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
         road_end_missing_frames=max(
             1, int(raw.get("road_end_missing_frames", 3))
         ),
-        blind_forward_m=float(raw.get("blind_forward_m", 0.20)),
+        blind_forward_m=float(raw.get("blind_forward_m", 0.15)),
         road_end_max_abs_lane_x_m=float(
             raw.get("road_end_max_abs_lane_x_m", 0.08)
         ),
@@ -143,7 +143,7 @@ def road_end_turn_cue(
     approach_latched: bool = False,
     forward_band_ratio: float = 0.0,
 ) -> JunctionCue:
-    """支路已锁存且正前方检测带的 road mask 消失时，才允许最后 20 cm。"""
+    """支路已锁存且正前方检测带的 road mask 消失时，才允许最后一次定距。"""
     stopped_after_latch = approach_latched and command.reason == "stop_lookahead"
     max_end_y = (
         cfg.road_end_stopped_max_y_m
@@ -265,7 +265,7 @@ def step_junction_turn(
         if cue.source in ("road_end", "odom_handoff"):
             distance_ok = cue.distance_m is not None and cue.distance_m > 0.0
         elif cue.source == "side_branch":
-            # 侧边角只用来确认「这是路口」，不再直接触发最后 20 cm。
+            # 侧边角只用来确认「这是路口」，不再直接触发最后一次定距。
             distance_ok = False
         else:
             distance_ok = (
@@ -296,7 +296,7 @@ def step_junction_turn(
         if state.arm < required_frames:
             return state, command
 
-        # 路口交接后统一只前进 20 cm，避免视觉距离抖动改变转弯起点。
+        # 路口交接后统一只前进配置的定距，避免视觉距离抖动改变转弯起点。
         forward_mm = int(round(cfg.turn_forward_m * 1000.0))
         if not (cfg.min_forward_mm <= forward_mm <= cfg.max_forward_mm):
             state.arm = 0

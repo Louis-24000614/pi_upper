@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -15,11 +16,46 @@ DEFAULT_TOPOLOGY = _REPO_ROOT / "config" / "nav_topology.yaml"
 
 
 @dataclass(frozen=True)
+class ArrivalSettings:
+    """节点默认值或有向驶入覆盖；None 表示继承。"""
+
+    mode: str | None = None
+    handoff_progress_m: float | None = None
+    final_forward_m: float | None = None
+    guard_progress_m: float | None = None
+
+
+def arrival_settings_from_mapping(raw: dict | None) -> ArrivalSettings:
+    if raw is None:
+        return ArrivalSettings()
+    if not isinstance(raw, dict):
+        raise ValueError("arrival 必须是 mapping")
+    unknown = set(raw) - {"mode", "handoff_progress_m", "final_forward_m", "guard_progress_m"}
+    if unknown:
+        raise ValueError(f"未知 arrival 字段: {sorted(unknown)}")
+    mode = raw.get("mode")
+    if mode is not None and mode not in ("visual_end", "visual_odom"):
+        raise ValueError(f"未知到点策略: {mode}")
+    distances = {}
+    for name in ("handoff_progress_m", "final_forward_m", "guard_progress_m"):
+        value = raw.get(name)
+        if value is not None:
+            if isinstance(value, bool):
+                raise ValueError(f"{name} 必须是距离")
+            value = float(value)
+            if not math.isfinite(value) or value < 0 or (name == "final_forward_m" and value == 0):
+                raise ValueError(f"{name} 必须是有限非负距离，最后前进距离必须大于0")
+        distances[name] = value
+    return ArrivalSettings(mode=mode, **distances)
+
+
+@dataclass(frozen=True)
 class Node:
     id: str
     x: float
     y: float
     role: str = ""
+    arrival: ArrivalSettings = field(default_factory=ArrivalSettings)
 
 
 @dataclass(frozen=True)
@@ -40,6 +76,7 @@ class TopologyGraph:
     nodes: dict[str, Node]
     edges: dict[str, Edge]
     blocked: set[str] = field(default_factory=set)
+    arrival_overrides: dict[tuple[str, str], ArrivalSettings] = field(default_factory=dict)
 
     def set_edge_blocked(self, edge_id: str, blocked: bool = True) -> None:
         if edge_id not in self.edges:
@@ -83,6 +120,7 @@ def load_topology(path: Path | str | None = None) -> TopologyGraph:
             x=float(info["x"]),
             y=float(info["y"]),
             role=str(info.get("role", "")),
+            arrival=arrival_settings_from_mapping(info.get("arrival")),
         )
 
     edges: dict[str, Edge] = {}
@@ -101,10 +139,32 @@ def load_topology(path: Path | str | None = None) -> TopologyGraph:
             tunnel=bool(item.get("tunnel", False)),
         )
 
+    overrides: dict[tuple[str, str], ArrivalSettings] = {}
+    raw_overrides = data.get("arrival_overrides") or []
+    if not isinstance(raw_overrides, list):
+        raise ValueError("arrival_overrides 必须是列表")
+    for item in raw_overrides:
+        if not isinstance(item, dict):
+            raise ValueError("arrival_overrides 条目必须是 mapping")
+        source, target = str(item.get("from_node", "")), str(item.get("to_node", ""))
+        if not any(
+            (edge.u == source and edge.v == target)
+            or (edge.bidirectional and edge.v == source and edge.u == target)
+            for edge in edges.values()
+        ):
+            raise ValueError(f"到点覆盖引用不存在的有向道路: {source} -> {target}")
+        key = (source, target)
+        if key in overrides:
+            raise ValueError(f"重复到点覆盖: {source} -> {target}")
+        overrides[key] = arrival_settings_from_mapping(
+            {name: value for name, value in item.items() if name not in ("from_node", "to_node")}
+        )
+
     return TopologyGraph(
         meta=dict(data.get("meta") or {}),
         nodes=nodes,
         edges=edges,
+        arrival_overrides=overrides,
     )
 
 

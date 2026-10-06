@@ -43,7 +43,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "forward")
         self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(self.sent, ["forward 150 50"])
 
         self.notes.put("FORWARD_DONE")
         state, command = step_junction_turn(
@@ -51,7 +51,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "arrived")
         self.assertEqual(command.reason, "arrived")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(self.sent, ["forward 150 50"])
 
         state = apply_departure(state, "right", self.send)
         self.assertEqual(state.phase, "stopping")
@@ -153,7 +153,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "forward")
         self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(self.sent, ["forward 150 50"])
 
     def test_finite_action_failure_latches_stop(self) -> None:
         state = JunctionTurn(phase="forward", side="right", forward_mm=200)
@@ -183,7 +183,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertTrue(cue.detected)
         self.assertEqual(cue.source, "road_end")
-        self.assertAlmostEqual(cue.distance_m or 0.0, 0.20)
+        self.assertAlmostEqual(cue.distance_m or 0.0, 0.15)
 
     def test_road_end_cue_requires_safe_follow_window(self) -> None:
         cases = (
@@ -231,7 +231,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "forward")
         self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(self.sent, ["forward 150 50"])
 
     def test_far_branch_is_latched_until_hidden_road_end(self) -> None:
         state = JunctionTurn()
@@ -278,7 +278,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "forward")
         self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(self.sent, ["forward 150 50"])
 
     def test_latched_branch_handoffs_after_lookahead_stops(self) -> None:
         state = JunctionTurn()
@@ -322,7 +322,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "forward")
         self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(self.sent, ["forward 150 50"])
 
     def test_lookahead_stop_without_branch_latch_does_not_blind_move(self) -> None:
         stopped = VelocityCommand(0.0, 0.0, "stop_lookahead")

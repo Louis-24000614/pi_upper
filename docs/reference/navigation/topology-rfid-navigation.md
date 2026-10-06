@@ -78,7 +78,11 @@ ODOM 末端保护只作用于普通 `junction`，没有扩展到 `patrol_slot`�
 
 因此，视觉看到的是左侧支路并不代表一定左转；它只证明车辆接近一个路口。比如 Agent 的下一条边在右侧，即使本次首先锁存的是左侧证据，停车后仍按拓扑右转。
 
-命令中的 `--turn-at-junction right` 继续表示普通路口观察右侧开口；`left` 同理。它不覆盖 Agent 根据入边和出边计算出的最终动作。巡检点的原状态机仍独立记录实际看见的左侧、右侧或两侧。
+命令中的 `--turn-at-junction right/left` 保留为兼容的拓扑任务启动参数。开口根据地图和驶入方向计算，任一符合地图的侧向证据即可锁存，不再强制只看指定侧。Agent 根据入边和出边计算最终动作。
+
+到点方式由节点 `arrival.mode` 选择：`visual_end` 依赖侧向锁存和检测带连续低占比；`visual_odom` 依赖侧向锁存、视觉正常和有效 ODOM 交接距离。巡检点未配置时默认 `visual_end`，十字路口明确配置为 `visual_odom`。顶层 `arrival_overrides` 可按有向 `from_node` / `to_node` 覆盖策略、交接距离、最后前进距离和保护位置。当前只对 `1_2 → 2_2` 保留 0.80 m 交接、再前进 0.20 m。
+
+仅普通路口未成功交接时，在保护位置停车（默认边长减 0.05 m），保持当前目标，不推进 Agent。巡检点不启用固定距离保护，`guard_progress_m` 对其不产生停车作用；默认继续等待原来的侧边锁存和检测带条件，因此视觉一直未满足时可能越过目标，需要实车核对。两类节点正向视觉接近阶段缺少 0.5 秒内的新 ODOM 都停车，不能用旧里程启动动作；视觉丢路和动作失败停车逻辑保留。距离保护仅在接近阶段生效，不打断已启动的有限动作。出发区动作和原路倒车仍由原流程处理。
 
 ## 路径状态推进顺序
 
@@ -110,7 +114,7 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
   --record-video 2>&1 | tee data/road/drive_test_2.log
 ```
 
-整个任务中不会读取 UID 作为到点条件。普通路口仍取 `junction_turn.turn_forward_m=0.20`；巡检点仍取原来的 `rfid_turn.search_step_distance_mm=200`；速度均保持原值 50 mm/s。这次修改没有改变任何参数值。
+整个任务中不会读取 UID 作为到点条件。未单独配置最后距离时，普通路口取 `junction_turn.turn_forward_m=0.20`，巡检点取 `rfid_turn.search_step_distance_mm=200`；速度仍保持 50 mm/s。若修改 UART ODOM 转发，先执行 `cmake --build build-turn --target uart_vel -j2`，再运行上面的命令。
 
 ## RFID 独立测试
 

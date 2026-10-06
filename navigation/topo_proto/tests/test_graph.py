@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from topo_proto.graph import load_topology, shortest_path
+import yaml
+
+from topo_proto.graph import arrival_settings_from_mapping, load_topology, shortest_path
 
 
 class TopologyGraphTests(unittest.TestCase):
@@ -41,6 +45,40 @@ class TopologyGraphTests(unittest.TestCase):
                 "5_2__5_3",
             },
         )
+
+    def test_arrival_metadata_and_directed_override_are_loaded(self) -> None:
+        self.assertEqual(self.graph.nodes["2_2"].arrival.mode, "visual_odom")
+        self.assertIsNone(self.graph.nodes["1_2"].arrival.mode)
+        self.assertEqual(self.graph.arrival_overrides[("1_2", "2_2")].handoff_progress_m, 0.80)
+        self.assertNotIn(("2_2", "1_2"), self.graph.arrival_overrides)
+
+    def test_legacy_map_and_bad_arrival_configs(self) -> None:
+        data = {
+            "nodes": {"a": {"x": 0, "y": 0}, "b": {"x": 1, "y": 0}},
+            "edges": [{"id": "a__b", "u": "a", "v": "b", "length_m": 1}],
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "topology.yaml"
+            path.write_text(yaml.safe_dump(data), encoding="utf-8")
+            graph = load_topology(path)
+            self.assertEqual(graph.arrival_overrides, {})
+            self.assertIsNone(graph.nodes["b"].arrival.mode)
+            for overrides in (
+                [{"from_node": "b", "to_node": "missing"}],
+                [{"from_node": "a", "to_node": "b"}] * 2,
+                [{"from_node": "a", "to_node": "b", "unknown": 1}],
+            ):
+                data["arrival_overrides"] = overrides
+                path.write_text(yaml.safe_dump(data), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_topology(path)
+        for config in (
+            {"mode": "blind"}, {"guard_progress_m": float("nan")},
+            {"final_forward_m": -1}, {"handoff_progress_m": True},
+            {"handoff_progres_m": 0.8},
+        ):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                arrival_settings_from_mapping(config)
 
     def test_start_to_goal_reachable(self) -> None:
         path = shortest_path(self.graph, "0_0", "5_2")

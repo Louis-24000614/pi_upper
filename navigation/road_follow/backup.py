@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 from road_follow.control import VelocityCommand
@@ -32,20 +33,29 @@ class EdgeProgress:
     s_m: float = 0.0
     _x: float | None = None
     _y: float | None = None
+    last_sample_s: float | None = None
 
     def reset(self) -> None:
         self.s_m = 0.0
         self._x = None
         self._y = None
+        self.last_sample_s = None
 
-    def update(self, x_m: float, y_m: float, yaw_rad: float) -> float:
+    def update(self, x_m: float, y_m: float, yaw_rad: float, received_s: float | None = None) -> float:
         """用本帧航向把平面位移投到走廊上。倒车时 s 减小，但不小于 0。"""
+        if not all(math.isfinite(value) for value in (x_m, y_m, yaw_rad)):
+            self.last_sample_s = None
+            return self.s_m
+        self.last_sample_s = time.monotonic() if received_s is None else received_s
         if self._x is not None and self._y is not None:
             ds = (x_m - self._x) * math.cos(yaw_rad) + (y_m - self._y) * math.sin(yaw_rad)
             self.s_m = max(0.0, self.s_m + ds)
         self._x = x_m
         self._y = y_m
         return self.s_m
+
+    def is_fresh(self, now_s: float, timeout_s: float = 0.5) -> bool:
+        return self.last_sample_s is not None and 0 <= now_s - self.last_sample_s <= timeout_s
 
 
 @dataclass

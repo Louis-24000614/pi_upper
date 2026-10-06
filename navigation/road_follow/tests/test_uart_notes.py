@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import queue
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stderr
 from types import SimpleNamespace
 
@@ -15,11 +16,11 @@ class UartNoteDispatchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.actions: queue.Queue[str] = queue.Queue()
         self.rfid: queue.Queue[tuple[int, int]] = queue.Queue()
-        self.odom: queue.Queue[tuple[float, float, float]] = queue.Queue()
+        self.odom: queue.Queue[tuple[float, float, float, float]] = queue.Queue()
 
     def run_notes(self, lines: list[str], *, rfid_enabled: bool) -> None:
         proc = SimpleNamespace(stdout=iter(lines))
-        with redirect_stderr(io.StringIO()):
+        with redirect_stderr(io.StringIO()), patch("road_follow.__main__.time.monotonic", return_value=10.0):
             _watch_uart_notes(
                 proc,
                 self.actions,
@@ -41,7 +42,7 @@ class UartNoteDispatchTest(unittest.TestCase):
 
         self.assertTrue(self.rfid.empty())
         self.assertEqual(self.actions.get_nowait(), "FORWARD_DONE")
-        self.assertEqual(self.odom.get_nowait(), (1.0, 2.0, -0.5))
+        self.assertEqual(self.odom.get_nowait(), (1.0, 2.0, -0.5, 10.0))
 
     def test_explicit_rfid_mode_dispatches_card_event(self) -> None:
         self.run_notes(["RFID_EVENT 7 3\n"], rfid_enabled=True)
