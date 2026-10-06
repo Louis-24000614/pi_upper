@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from camera_controls import CameraDevice, V4L2Control, list_cameras, set_control, v4l2_available
+from apriltag_dialog import ApriltagCalibrationDialog
 from face_client import FaceClient
 from knife_client import KnifeClient
 from knife_roi import KnifeRoiDialog
@@ -166,6 +167,7 @@ class MainWindow(QMainWindow):
         self.camera_epoch = 0
         self.recognition_frame_id = 0
         self.recognition_frame_at = 0.0
+        self.navigation_frame_at = 0.0
         self.pending_knife_id: str | None = None
         self.pending_face_id: str | None = None
         self.face_results: list[dict] = []
@@ -392,6 +394,20 @@ class MainWindow(QMainWindow):
             ("当前目标", self._value("--")), ("当前位置", self._value("--")),
             ("识别计时", self.run_elapsed),
         )))
+        self.test2_panel = QWidget()
+        test2_layout = QVBoxLayout(self.test2_panel)
+        test2_layout.setContentsMargins(0, 0, 0, 0)
+        test2_hint = QLabel("测试2：导航摄像头检测 tag36h11 ID 0 四角，黑色外沿 134 mm。\n"
+                           "计算并保存标签坐标下的 H，不替换当前导航参数。")
+        test2_hint.setWordWrap(True)
+        test2_layout.addWidget(test2_hint)
+        self.test2_calibrate_button = QPushButton("AprilTag 四点标定 / 查看 H")
+        self.test2_calibrate_button.setObjectName("primaryButton")
+        self.test2_calibrate_button.setMinimumHeight(48)
+        self.test2_calibrate_button.clicked.connect(self._calibrate_test2)
+        test2_layout.addWidget(self.test2_calibrate_button)
+        self.test2_panel.setVisible(False)
+        layout.addWidget(self.test2_panel)
         for text, object_name, action in (
             ("开始测试1识别", "primaryButton", self._start_test1),
             ("停止识别", "stopButton", self._stop_test1),
@@ -760,6 +776,8 @@ class MainWindow(QMainWindow):
         self._update_camera_ui()
 
     def _on_frame_ready(self, path: str, frame: object, fps: float) -> None:
+        if path == self.role_sources["navigation_camera"]:
+            self.navigation_frame_at = time.monotonic()
         self.physical_frames[path] = frame
         self.physical_fps[path] = fps
         self.camera_errors.pop(path, None)
@@ -859,6 +877,30 @@ class MainWindow(QMainWindow):
         self.current_task = task
         self.footer_task.setText(f"任务：{task}")
         self.run_current_task.setText(task)
+        self.test2_panel.setVisible(task == "测试2")
+        if task == "测试2":
+            self.pages.setCurrentIndex(3)
+
+    def _test2_snapshot(self):
+        source = self.role_sources["navigation_camera"]
+        frame = self.navigation_frame
+        if not source or frame is None:
+            raise ValueError("没有导航摄像头画面；请先在调参页确认逻辑相机映射")
+        if time.monotonic() - self.navigation_frame_at > 2.5:
+            raise ValueError("导航摄像头画面已过期，请等待新帧")
+        return frame, source
+
+    def _calibrate_test2(self) -> None:
+        if self.current_task != "测试2":
+            self._log("请先选择测试2，再进行 AprilTag 四点标定。")
+            return
+        try:
+            dialog = ApriltagCalibrationDialog(self._test2_snapshot, self)
+            dialog.exec()
+            if dialog.saved_path is not None:
+                self._log(f"测试2 H 已保存：{dialog.saved_path}；导航 H 来源未改变。")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._log(f"测试2标定无法打开：{exc}")
 
     def _set_knife_status(self, message: str) -> None:
         self.run_knife.setText(message)
@@ -1066,6 +1108,7 @@ class MainWindow(QMainWindow):
             self.mapping_notice.setText("需要检测到两路物理 USB 摄像头后，才能交换输入源。")
             return
         self.role_sources["recognition_camera"], self.role_sources["navigation_camera"] = navigation, recognition
+        self.navigation_frame_at = 0.0
         self.knife_roi = None
         self.knife_roi_notice.setText("刀具取景：摄像头已切换，自动框选单刀")
         self._invalidate_recognition()
