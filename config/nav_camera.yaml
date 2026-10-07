@@ -53,7 +53,8 @@ follow:
   lookahead_m: 0.30
   turn_abs_x_m: 0.08
   min_points: 8
-  min_road_pixels: 400
+  # 墙角分割常只剩 250～380 px，400 会把还能看到的路判成没路。
+  min_road_pixels: 200
   max_abs_omega: 1.0
   # 实车录像中道路中心已经向左移，但原 +3 cm 偏置抵消了大部分左转纠偏。
   x_bias_m: 0.00
@@ -83,31 +84,31 @@ junction_turn:
   camera_ahead_of_turn_center_m: 0.00  # 实测：相机光心比两轮中心靠前的距离
   stop_before_center_m: 0.00
   forward_speed_mmps: 50
-  # 每次转弯交接后固定前进 15 cm，明确停车后再原地转。
-  turn_forward_m: 0.15
+  # 每次转弯交接后固定前进 20 cm，明确停车后再原地转。
+  turn_forward_m: 0.20
   stop_settle_ms: 2000
   min_forward_mm: 50
   max_forward_mm: 650
   reacquire_frames: 3
   # visual_end 策略：侧向的角只锁存路口，正前方检测带判断交接。
-  # 检测带稳定无 road mask 后，IMU 锁航向再走 15 cm 到路口中心。
+  # 检测带稳定无 road mask 后，IMU 锁航向再走 20 cm 到路口中心。
   road_end_enabled: true
   road_end_min_y_m: 0.20
   # 实车回放中蓝色检测带占比已降到 0.08 时，走廊最远点约为 0.37 m。
   road_end_max_y_m: 0.40
   # 图中蓝色区域：BEV 正前方 34–48 cm 的中央走廊。
-  # 侧边角只锁存路口；这里的 road mask 占比连续 3 帧 <=10% 才走最后 15 cm。
+  # 侧边角只锁存路口；这里的 road mask 占比连续 3 帧 <=10% 才走最后 20 cm。
   road_end_band_min_y_m: 0.34
   road_end_band_max_y_m: 0.48
   road_end_band_max_ratio: 0.10
   road_end_missing_frames: 3
-  # 支路已锁存但视觉预瞄刚丢失时，末端通常还在约 0.42 m；允许最后一次 15 cm 交接。
+  # 支路已锁存但视觉预瞄刚丢失时，末端通常还在约 0.42 m；允许最后一次 20 cm 交接。
   road_end_stopped_max_y_m: 0.45
-  blind_forward_m: 0.15
+  blind_forward_m: 0.20
   road_end_max_abs_lane_x_m: 0.08
   road_end_min_lane_width_m: 0.14
   road_end_max_lane_width_m: 0.32
-  # 侧路角无论远近都只锁存方向，不直接触发 15 cm。
+  # 侧路角无论远近都只锁存方向，不直接触发 20 cm。
   branch_observe_min_distance_m: 0.18
   branch_observe_max_distance_m: 0.95
   # 最近 8 帧里有 2 帧看到部分支路就锁存，之后被墙遮住也不清除。
@@ -123,12 +124,12 @@ rfid_turn:
   stop_settle_ms: 2000
   reacquire_frames: 3
   # 巡逻点先用视觉循迹；左右任一矮沿端头只负责锁存。
-  # 蓝色正前方检测带的 road mask 稳定消失后，才盲走一次 15 cm。
+  # 蓝色正前方检测带的 road mask 稳定消失后，才盲走一次 20 cm。
   edge_visible_frames: 2
   road_end_missing_frames: 3
   road_end_band_max_ratio: 0.10
-  search_step_distance_mm: 150
-  # 最后 15 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
+  search_step_distance_mm: 200
+  # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
   # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
 

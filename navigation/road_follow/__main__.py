@@ -36,8 +36,14 @@ from road_follow.junction_turn import (
     JunctionTurn,
     junction_turn_config_from_mapping,
 )
-from road_follow.pipeline import command_from_mask_with_diagnostics, make_ipm
+from road_follow.obstacle_route import (
+    ObstacleRecovery,
+    detection_armed,
+    step_obstacle_route,
+)
+from road_follow.pipeline import BevProjector, command_from_mask_with_diagnostics, make_ipm
 from road_follow.recording import VideoRecorder
+from road_follow.async_recording import AsyncVideoRecorder
 from road_follow.rfid_arrival import (
     RfidArrival,
     rfid_arrival_config_from_mapping,
@@ -48,6 +54,11 @@ from road_follow.rfid_turn import (
     step_rfid_turn,
 )
 from road_follow.segment import RoadSegmenter
+from road_follow.parallel_segment import OrderedSegmentStream, CameraReadError
+from road_follow.latest_segment import LatestSegmentStream
+from road_follow.cpu_threads import cpu_thread_budget
+from road_follow.heap_reclaim import HeapReclaimer
+from road_follow.frequency_runtime import needs_frequency_guard, run_guarded
 
 ROOT = Path(__file__).resolve().parents[2]
 SLOW_S = 0.20
@@ -56,6 +67,7 @@ STATUS_LOG_INTERVAL_S = 2.0
 COMMAND_NAMES = {
     "follow": "视觉循迹",
     "follow_near": "近距离低速循迹",
+    "align": "交接前摆正",
     "entrance_forward": "出发区定距前进",
     "entrance_stop": "出发区停车",
     "entrance_stop_settle": "出发区等待停稳",
@@ -63,6 +75,7 @@ COMMAND_NAMES = {
     "entrance_reacquire": "转弯后重新识别道路",
     "entrance_recovery": "转弯后低速恢复",
     "blind_forward": "路口定距前进",
+    "heading_hold": "锁视觉航向",
     "forward": "定距前进",
     "forward_wait": "等待定距前进",
     "stopping": "正在停车",
@@ -96,6 +109,7 @@ COMMAND_NAMES = {
     "stop_rfid_unsafe": "停车：RFID 搜索时视觉条件不安全",
     "backup": "视觉纠偏倒车",
     "visual_backup": "视觉纠偏倒车",
+    "backup_hold": "停车：遇障后等待停稳",
     "stop_backup": "停车：准备倒车",
     "stop_backup_fault": "停车：倒车动作失败",
     "stop_backup_distance_limit": "停车：达到最大倒车距离",
@@ -142,8 +156,10 @@ ACTION_NAMES = {
 PHASE_NAMES = {
     "pending": "准备",
     "follow": "视觉循迹",
+    "align": "交接前摆正",
     "approach": "接近路口",
     "forward": "定距前进",
+    "heading_hold": "锁视觉航向",
     "blind_forward": "定距搜索",
     "searching": "定距搜索",
     "stopping_wait": "等待停车确认",
@@ -154,6 +170,7 @@ PHASE_NAMES = {
     "recovery": "低速恢复",
     "arrived": "已到达",
     "backup": "倒车",
+    "holding": "遇障后等待停稳",
     "backing": "正在倒车",
     "cooldown": "倒车结束缓冲",
     "odom_wait": "到点保护停车，等待人工处理",
@@ -190,6 +207,7 @@ def _status_signature(
     rfid_turn: RfidTurn,
     rfid_arrival: RfidArrival,
     backup: Backup,
+    recovery_phase: str = "idle",
 ) -> tuple[object, ...]:
     """只有这些关键状态改变时才立即打印，连续数值变化不触发刷屏。"""
     return (
@@ -204,16 +222,20 @@ def _status_signature(
         rfid_arrival.edge_left_seen,
         rfid_arrival.edge_right_seen,
         backup.phase,
+        recovery_phase,
     )
 
 
 def _junction_read(
-    mask: np.ndarray, cfg: dict, tracker: JunctionTracker
+    mask: np.ndarray, cfg: dict, tracker: JunctionTracker, *, projection=None
 ) -> tuple[str, JunctionRead]:
     """返回稳定类型和本帧几何；失败时不参与转弯。"""
     try:
-        ipm = make_ipm(cfg, mask.shape)
-        bev = ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
+        if projection is None:
+            ipm = make_ipm(cfg, mask.shape)
+            bev = ipm.warp_to_bev(mask, flags=cv2.INTER_NEAREST)
+        else:
+            ipm, bev = projection
         raw = cfg.get("junction_turn", {}) or {}
         reading = classify_junction(
             bev,
@@ -339,10 +361,59 @@ def _velocity_for_departure(state: JunctionTurn, visual: VelocityCommand) -> Vel
     return VelocityCommand(0.0, 0.0, state.phase)
 
 
+def _finite_action_active(
+    entrance, junction_turn, rfid_turn, rfid_arrival, backup, recovery=None
+):
+    """有限动作期间不能插入 CMD_VEL。视觉倒车本身就是负速度，必须继续下发。"""
+    recovery_phase = "idle" if recovery is None else recovery.phase
+    return (entrance.phase in ("forward", "stopping_wait", "stopping", "turning")
+            or junction_turn.phase in ("forward", "stopping", "stopped", "turning")
+            or rfid_turn.phase in ("searching", "stopping_wait", "turning")
+            or rfid_arrival.phase in ("blind_forward", "stopping_wait")
+            or recovery_phase in ("holding", "stopping", "stopped", "turning"))
+
+
+def _invalidate_turn_frames(before, states, stream, smoother):
+    """TURN_DONE 后当前/在途画面可能拍于转弯前，重新识路必须使用新一代帧。"""
+    changed = [state for phase, state in zip(before, states)
+               if phase == "turning" and state.phase not in ("turning", "fault")]
+    if not changed:
+        return False
+    for state in changed:
+        # 状态函数可能已把当前旧画面计入 clear；撤回这些证据，帧数阈值仍用原配置。
+        state.phase, state.clear = "reacquire", 0
+    smoother.reset()
+    stream.invalidate()
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="道路分割寻线，经串口速度环驱动")
     parser.add_argument("--config", type=Path, default=ROOT / "config" / "nav_camera.yaml")
     parser.add_argument("--model", type=Path, default=ROOT / "models" / "road_yolo11n_seg.rknn")
+    # 已通过等价性和性能验证的组合成为默认值；旧正向参数保留兼容历史脚本，
+    # 无须为了使用优化追加启动参数。负向选项仅用于定位问题或对照回放。
+    parser.add_argument("--fps-opt", action=argparse.BooleanOptionalAction, default=True,
+                        help="默认复用 IPM/BEV 和分割临时缓冲")
+    parser.add_argument("--lazy-raw-centerline", action="store_true", help="实验：普通中心线仅回退时计算，诊断点数不变")
+    parser.add_argument("--correct-nms", action=argparse.BooleanOptionalAction, default=True,
+                        help="默认正确 NMS：框使用左上角和宽高")
+    parser.add_argument("--npu-core-mask", type=int, choices=(1,2,4,3,7), default=None,
+                        help="实验：单 context 的 NPU 核心位掩码；默认保持 0 号核")
+    parser.add_argument("--npu-contexts", type=int, choices=(1,2,3), default=None,
+                        help="RKNN 默认三核各一 context、有序消费；ONNX 或指定单核时自动单 context")
+    parser.add_argument("--latest-frame", action="store_true",
+                        help="实验：独立读取线程只保留一帧，空闲 context 取最新画面")
+    parser.add_argument("--latest-result-order", choices=("completion", "capture"),
+                        default="completion", help="实验：最新帧结果按完成顺序或输入顺序消费")
+    parser.add_argument("--rknn-backend", choices=("lite", "c-standard", "c-input-zero"),
+                        default="lite", help="实验：RKNN IO 后端；C 路径需要先编译原生组件")
+    parser.add_argument("--async-record-video", action=argparse.BooleanOptionalAction, default=None,
+                        help="请求录像时默认使用有界异步编码队列")
+    parser.add_argument("--opencv-threads", type=int, default=8, help="OpenCV 默认 8 线程")
+    parser.add_argument("--blas-threads", type=int, default=1, help="BLAS 默认单线程，避免争抢多路推理资源")
+    parser.add_argument("--heap-trim-interval", type=float, default=60 if sys.platform == 'linux' else 0,
+                        help="Linux 默认每 60 秒 GC 并归还空闲堆页；0 关闭")
     parser.add_argument("--drive", action="store_true", help="打开串口并使能，按寻线速度行驶")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
@@ -378,6 +449,33 @@ def main(argv: list[str] | None = None) -> int:
         help="障碍物连续出现后，用负速度和视觉纠偏倒回上一个路口",
     )
     args = parser.parse_args(argv)
+    if args.npu_contexts is None:
+        # 保留桌面 ONNX 和旧单核覆盖用法，不让默认三路破坏已有调试入口。
+        args.npu_contexts = 3 if args.model.suffix == '.rknn' and args.npu_core_mask is None else 1
+    if args.async_record_video is None:
+        args.async_record_video = args.record_video is not None
+    for value in (args.opencv_threads, args.blas_threads):
+        if value is not None and value < 1:
+            parser.error("CPU 线程数必须大于零")
+    if needs_frequency_guard(args.model):
+        # 父保护进程先保存频率，再以当前普通用户重启同一入口；退出/中断负责恢复。
+        # 不把密码写入程序，也不要求额外优化参数。sudo 按现有系统策略认证。
+        arguments = list(argv) if argv is not None else sys.argv[1:]
+        return run_guarded([sys.executable, '-m', 'road_follow', *arguments])
+    # 线程预算覆盖完整运行，worker 全部结束后才恢复，避免在途矩阵运算受影响。
+    with cpu_thread_budget(args.opencv_threads, args.blas_threads):
+        with HeapReclaimer(args.heap_trim_interval):
+            return _run(args, parser)
+
+
+def _run(args, parser) -> int:
+    """解析与运行分开，保证模型、采集和异常退出均位于线程预算作用域内。"""
+    if args.async_record_video and args.record_video is None:
+        parser.error("--async-record-video 需要 --record-video")
+    if args.latest_result_order != "completion" and not args.latest_frame:
+        parser.error("--latest-result-order capture 需要 --latest-frame")
+    if (args.npu_contexts > 1 or args.latest_frame) and (args.npu_core_mask is not None or args.model.suffix != ".rknn"):
+        parser.error("多 context 需要 RKNN 模型，并且不能与 --npu-core-mask 同时使用")
 
     if args.left_at_junction and args.turn_at_junction not in (None, "left"):
         parser.error("--left-at-junction 不能与 --turn-at-junction right 同时使用")
@@ -390,16 +488,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("遇障倒车需要 --drive，才会向下位机持续发送负速度 CMD_VEL")
 
     recorder = None
+    record_path = None
     if args.record_video is not None:
         record_path = (
             ROOT / "data" / "road" / f"drive_{datetime.now():%Y%m%d_%H%M%S_%f}.avi"
             if args.record_video == ""
             else Path(args.record_video)
         )
-        try:
-            recorder = VideoRecorder(record_path)
-        except (ValueError, FileExistsError) as exc:
-            parser.error(str(exc))
+        if record_path.suffix.lower() != ".avi" or record_path.exists():
+            parser.error("录像必须使用新的 .avi 路径，不能覆盖已有文件")
 
     cfg = _load_config(args.config)
     capture_cfg = cfg.get("capture", {}) or {}
@@ -408,16 +505,33 @@ def main(argv: list[str] | None = None) -> int:
     width = int(capture_cfg.get("width", 1280))
     height = int(capture_cfg.get("height", 720))
 
-    segmenter = RoadSegmenter(args.model)
-    segmenter.mask(np.zeros((height, width, 3), dtype=np.uint8))
+    uart_bin = args.uart_bin or (ROOT / "build" / "uart" / "uart_vel")
+    if args.drive and not uart_bin.is_file():
+        print(f"找不到 {uart_bin}，先编译 uart_vel", file=sys.stderr)
+        return 1
+    segmenter, segment_stream = None, None
+    if args.npu_contexts > 1 or args.latest_frame:
+        stream_type = LatestSegmentStream if args.latest_frame else OrderedSegmentStream
+        stream_options = {"result_order": args.latest_result_order} if args.latest_frame else {}
+        segment_stream = stream_type(args.model, cores=(1,2,4)[:args.npu_contexts],
+            correct_nms=args.correct_nms, reuse_buffers=args.fps_opt, backend=args.rknn_backend,
+            factory=RoadSegmenter,
+            **stream_options)
+        segment_stream.warmup(np.zeros((height, width, 3), dtype=np.uint8))
+    else:
+        segmenter = RoadSegmenter(args.model, correct_nms=args.correct_nms,
+                                  reuse_buffers=args.fps_opt, core_mask=args.npu_core_mask,
+                                  backend=args.rknn_backend)
+        try:
+            segmenter.mask(np.zeros((height, width, 3), dtype=np.uint8))
+        except BaseException:
+            segmenter.close()
+            raise
     smoother = temporal_from_mapping(cfg)
     junctions = JunctionTracker()
+    projector = BevProjector() if args.fps_opt else None
     bridge: subprocess.Popen | None = None
-    uart_bin = args.uart_bin or (ROOT / "build" / "uart" / "uart_vel")
     if args.drive:
-        if not uart_bin.is_file():
-            print(f"找不到 {uart_bin}，先编译 uart_vel", file=sys.stderr)
-            return 1
         serial = str(uart_cfg.get("device", "/dev/ttyS6"))
         baud = str(int(uart_cfg.get("baud", 921600)))
         bridge = subprocess.Popen(
@@ -457,22 +571,40 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyError, ValueError) as exc:
             _event("错误", f"拓扑任务加载失败：{exc}")
             _stop_bridge(bridge)
+            if segment_stream is not None:
+                segment_stream.close()
+            elif segmenter is not None:
+                segmenter.close()
             return 1
         if type(first).__name__ != "FollowEdge":
             print(f"Agent 没有给出第一条路: {first}", file=sys.stderr)
             _stop_bridge(bridge)
+            if segment_stream is not None:
+                segment_stream.close()
+            elif segmenter is not None:
+                segmenter.close()
             return 1
         _event("路线", f"开始路段 {first.edge_id}：{first.from_node} → {first.to_node}")
     detector = None
     obstacle_judge = None
-    if args.backup_on_obstacle:
+    obstacle_recovery = ObstacleRecovery() if route_agent is not None else None
+    if args.backup_on_obstacle or obstacle_recovery is not None:
         from vision.obstacle.blockage import HardBlockageJudge, hard_block_config_from_mapping
         from vision.obstacle.detect import ObstacleDetector
 
-        detector = ObstacleDetector(ROOT / "config" / "obstacle.yaml", root=ROOT)
-        obstacle_judge = HardBlockageJudge(
-            hard_block_config_from_mapping(detector.config)
-        )
+        try:
+            detector = ObstacleDetector(ROOT / "config" / "obstacle.yaml", root=ROOT)
+            obstacle_judge = HardBlockageJudge(
+                hard_block_config_from_mapping(detector.config)
+            )
+        except (OSError, RuntimeError, ValueError, ImportError) as exc:
+            _event("错误", f"障碍模型加载失败：{exc}")
+            _stop_bridge(bridge)
+            if segment_stream is not None:
+                segment_stream.close()
+            elif segmenter is not None:
+                segmenter.close()
+            return 1
     rfid_turn = RfidTurn(side=args.turn_at_rfid or "none")
     rfid_turn_cfg = rfid_turn_config_from_mapping(cfg)
     rfid_arrival = RfidArrival()
@@ -494,6 +626,10 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             _event("错误", f"到点策略配置无效：{exc}")
             _stop_bridge(bridge)
+            if segment_stream is not None:
+                segment_stream.close()
+            elif segmenter is not None:
+                segmenter.close()
             return 1
 
     stopping = False
@@ -501,6 +637,16 @@ def main(argv: list[str] | None = None) -> int:
     last_status_s = 0.0
     last_camera_warning_s = 0.0
     last_arrival_reason = ""
+    last_expired_warning_s = 0.0
+    recording_started = False
+
+    def _record_frame(frame, captured_s):
+        nonlocal recording_started
+        if recorder is not None:
+            recorder.write(frame, captured_s)
+            if not recording_started:
+                _event("录像", f"开始录制：{recorder.path}")
+                recording_started = True
 
     def _request_stop(signum, _frame) -> None:
         del signum
@@ -513,9 +659,21 @@ def main(argv: list[str] | None = None) -> int:
     capture: cv2.VideoCapture | None = None
     frames = 0
     try:
+        # 所有前置初始化成功后才启动编码线程，避免模型/串口初始化失败时线程滞留。
+        if record_path is not None:
+            recorder = (AsyncVideoRecorder(record_path) if args.async_record_video
+                        else VideoRecorder(record_path))
         capture = _open_camera(device, width, height)
         while not stopping:
-            ok, frame = capture.read()
+            if segment_stream is not None:
+                try:
+                    result = segment_stream.read(capture, _record_frame)
+                    ok, frame = True, result.image
+                except CameraReadError:
+                    segment_stream.invalidate()
+                    ok, frame = False, None
+            else:
+                ok, frame = capture.read()
             if not ok:
                 now_s = time.monotonic()
                 if now_s - last_camera_warning_s >= STATUS_LOG_INTERVAL_S:
@@ -526,21 +684,39 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(0.05)
                 continue
 
-            if recorder is not None:
-                first_recorded_frame = recorder.frames_written == 0
-                recorder.write(frame, time.monotonic())
-                if first_recorded_frame:
-                    _event("录像", f"开始录制：{recorder.path}")
-
-            t0 = time.monotonic()
-            mask = segmenter.mask(frame)
-            infer_s = time.monotonic() - t0
+            if segment_stream is not None:
+                mask, infer_s = result.mask, result.inference_s
+                if time.monotonic()-result.captured_s > SLOW_S:
+                    # 超时帧不能更新 EMA/路口证据。普通循迹发零速度；有限动作保持
+                    # 原互斥规则，由下位机完成既定动作，不重复发送动作或中途覆盖。
+                    if bridge is not None and not _finite_action_active(
+                            entrance, junction_turn, rfid_turn, rfid_arrival, backup,
+                            obstacle_recovery):
+                        if not write_velocity(bridge, "0.000 0.000"):
+                            return 1
+                    now_s = time.monotonic()
+                    if now_s-last_expired_warning_s >= STATUS_LOG_INTERVAL_S:
+                        _event("警告", "分割画面超过 200ms，丢弃本帧导航证据")
+                        last_expired_warning_s = now_s
+                    frames += 1
+                    if args.frames and frames >= args.frames:
+                        break
+                    continue
+            else:
+                _record_frame(frame, time.monotonic())
+                t0 = time.monotonic()
+                mask = segmenter.mask(frame)
+                infer_s = time.monotonic() - t0
+            turn_states = (entrance, junction_turn, rfid_turn)
+            turn_phases_before = tuple(state.phase for state in turn_states)
+            # 投影仅当前帧复用；状态机和 EMA 仍在原来的单线程中按原帧序更新。
+            projection = projector.project(mask, cfg) if projector else None
             command, follow_diag = command_from_mask_with_diagnostics(
-                mask, cfg, smoother
+                mask, cfg, smoother, projection=projection, lazy_raw=args.lazy_raw_centerline
             )
             if infer_s > SLOW_S:
                 command = VelocityCommand(0.0, 0.0, "stop_slow")
-            opening, junction = _junction_read(mask, cfg, junctions)
+            opening, junction = _junction_read(mask, cfg, junctions, projection=projection)
             if turn_side is not None:
                 while True:
                     try:
@@ -591,144 +767,229 @@ def main(argv: list[str] | None = None) -> int:
                     if entrance.phase == "done":
                         progress.reset()
             elif turn_side is not None and bridge is not None:
-                previous_phase = junction_turn.phase
-                visual_command = command
-                target = None
-                if route_agent is not None and route_agent.state.current_edge:
-                    edge = route_agent.graph.edges[route_agent.state.current_edge]
-                    target = route_agent.graph.nodes.get(route_agent.state.to_node or "")
-                    key = (edge.id, route_agent.state.from_node, target.id)
-                    if key != arrival_key:
-                        arrival_policy = resolve_arrival_policy(
-                            route_agent.graph, route_agent.state.from_node, target.id,
-                            edge.length_m, junction_turn_cfg, rfid_arrival_cfg,
-                        )
-                        arrival_key = key
-                        rfid_arrival = RfidArrival()
-                        guard_label = (
-                            "禁用（巡检点固定距离保护）"
-                            if target.role == "patrol_slot"
-                            else f"{arrival_policy.guard_progress_m:.2f} m"
-                        )
-                        _event(
-                            "到点策略",
-                            f"驶入={arrival_policy.from_node} → {target.id}，"
-                            f"策略={arrival_policy.mode}，"
-                            f"预期开口={','.join(arrival_policy.expected_openings) or '无'}，"
-                            f"交接={arrival_policy.handoff_progress_m:.2f} m，"
-                            f"定距={arrival_policy.final_forward_m:.2f} m，"
-                            f"保护={guard_label}",
-                        )
-                if target is not None and arrival_policy is not None:
-                    previous_rfid_phase = rfid_arrival.phase
-                    follow_cfg = cfg.get("follow", {}) or {}
-                    visual_safe = (
-                        command.reason not in ("stop_slow", "stop_camera")
-                        and follow_diag.bev_road_pixels
-                        >= int(follow_cfg.get("min_road_pixels", 400))
-                        and follow_diag.output_points
-                        >= int(follow_cfg.get("min_points", 8))
+                recovery_owns = False
+                if obstacle_recovery is not None and route_agent is not None:
+                    armed = detection_armed(
+                        entrance_done=True,
+                        agent_phase=route_agent.state.phase,
+                        junction_phase=junction_turn.phase,
+                        recovery_phase=obstacle_recovery.phase,
                     )
-                    junction_turn, rfid_arrival, command, trigger = step_route_arrival(
-                        arrival_policy,
-                        patrol=target.role == "patrol_slot",
-                        state=junction_turn, patrol_state=rfid_arrival,
-                        reading=junction, opening=opening, command=command,
-                        progress_m=progress.s_m,
-                        odom_valid=progress.is_fresh(time.monotonic()),
-                        notes=action_notes,
-                        send=lambda line: write_velocity(bridge, line),
-                        junction_cfg=junction_turn_cfg,
-                        patrol_cfg=rfid_arrival_cfg,
-                        visual_safe=visual_safe,
-                    )
-                    if trigger and (
-                        trigger not in ("guard", "odom_stale")
-                        or previous_phase != junction_turn.phase
-                        or command.reason != last_arrival_reason
-                    ):
-                        _event(
-                            "安全停车" if trigger in ("guard", "odom_stale") else "到点交接",
-                            f"目标={target.id}，策略={arrival_policy.mode}，"
-                            f"原因={trigger}，进度={progress.s_m:.2f} m，"
-                            f"检测带={junction.forward_band_ratio:.2f}",
-                        )
-                    last_arrival_reason = command.reason
-                    if rfid_arrival.phase != previous_rfid_phase:
-                        _event(
-                            "巡检点",
-                            f"{_phase_name(previous_rfid_phase)} → "
-                            f"{_phase_name(rfid_arrival.phase)}；"
-                            f"位置={target.id}，"
-                            f"侧边={_rfid_edge_name(rfid_arrival)}，"
-                            f"已前进={rfid_arrival.searched_mm} mm",
-                        )
-                    if rfid_arrival.phase == "arrived" and route_agent is not None:
-                        junction_turn.phase = "arrived"
-                        rfid_arrival = RfidArrival()
-                    if junction_turn.phase == "arrived" and route_agent is not None:
-                        junction_turn = handoff_arrival(
-                            junction_turn,
-                            route_agent,
-                            node_xy,
-                            lambda line: write_velocity(bridge, line),
-                            junction_turn_cfg.stop_settle_s,
-                        )
-                        command = _velocity_for_departure(
-                            junction_turn, visual_command
-                        )
-                else:
-                    # 完成/故障时 Agent 没有下一目标，不能回落到视觉前进指令。
-                    command = VelocityCommand(
-                        0.0, 0.0, "done" if junction_turn.phase == "done" else "stop_action_fail"
-                    )
-                if junction_turn.phase == "backup":
-                    backup_before = backup.phase
-                    backup, command = step_backup(
-                        backup,
-                        backup.phase == "idle",
-                        follow_diag.near_x_m,
-                        progress.s_m,
-                        command,
-                        time.monotonic(),
-                        backup_cfg,
-                    )
-                    if backup.phase == "done" and backup_before != "done":
-                        if command.reason == "backup_done_at_entry":
-                            junction_turn.phase = "fault"
-                            command = VelocityCommand(0.0, 0.0, "stop_action_fail")
-                            _event("倒车", "失败：车辆已经位于路段入口")
-                        else:
-                            finished_at = route_agent.state.to_node if route_agent is not None else None
-                            finished = (
-                                route_agent.node_reached(finished_at)
-                                if route_agent is not None and finished_at
-                                else None
-                            )
-                            progress.reset()
-                            backup = Backup()
-                            if type(finished).__name__ == "Stop":
-                                junction_turn.phase = "fault"
-                                junction_turn.departure = "none"
-                                command = VelocityCommand(0.0, 0.0, "stop_action_fail")
-                            else:
-                                junction_turn.phase = "follow"
-                                junction_turn.suppress_cue = True
-                                junction_turn.departure = "none"
-                                command = visual_command
+                    confirmed = False
+                    if armed and detector is not None and obstacle_judge is not None:
+                        detections, _elapsed_ms = detector.detect(frame)
+                        observation = obstacle_judge.update(detections, frame.shape)
+                        confirmed = observation.just_confirmed
+                        if confirmed:
                             _event(
-                                "倒车",
-                                f"完成；下一动作={type(finished).__name__ if finished else '无'}",
+                                "障碍物",
+                                f"确认道路被阻挡；置信度={observation.score:.2f}，"
+                                f"连续={observation.stable_frames} 帧，"
+                                f"路段进度={progress.s_m:.2f} m",
                             )
-                if previous_phase != "follow" and junction_turn.phase == "follow":
-                    progress.reset()
-                if junction_turn.phase != previous_phase:
-                    _event(
-                        "路口",
-                        f"{_phase_name(previous_phase)} → {_phase_name(junction_turn.phase)}；"
-                        f"规划={DIRECTION_NAMES.get(junction_turn.departure, junction_turn.departure)}，"
-                        f"定距={junction_turn.forward_mm} mm",
-                    )
+                    if obstacle_recovery.phase != "idle" or confirmed:
+                        recovery_owns = True
+                        recovery_before = obstacle_recovery.phase
+                        obstacle_recovery, backup, outcome = step_obstacle_route(
+                            obstacle_recovery,
+                            backup,
+                            armed=armed,
+                            confirmed=confirmed,
+                            agent=route_agent,
+                            node_xy=node_xy,
+                            progress_s_m=progress.s_m,
+                            near_x_m=follow_diag.near_x_m,
+                            command=command,
+                            now_s=time.monotonic(),
+                            notes=action_notes,
+                            send=lambda line: write_velocity(bridge, line),
+                            backup_cfg=backup_cfg,
+                            stop_settle_s=junction_turn_cfg.stop_settle_s,
+                            reacquire_frames=junction_turn_cfg.reacquire_frames,
+                        )
+                        command = outcome.command
+                        if outcome.reset_smoother:
+                            smoother.reset()
+                            if segment_stream is not None:
+                                segment_stream.invalidate()
+                        if outcome.reset_progress:
+                            progress.reset()
+                            if obstacle_judge is not None:
+                                obstacle_judge.reset()
+                            junction_turn.phase = "follow"
+                            junction_turn.suppress_cue = True
+                            junction_turn.departure = "none"
+                            junction_turn.side = "none"
+                            junction_turn.clear = 0
+                            junction_turn.branch_latched = False
+                            junction_turn.branch_votes.clear()
+                            rfid_arrival = RfidArrival()
+                            arrival_key = None
+                            _event(
+                                "路线",
+                                "障碍边已封闭，下一路段从 "
+                                f"{route_agent.state.from_node} 重新计里程",
+                            )
+                        if obstacle_recovery.phase != recovery_before:
+                            turn = ""
+                            if obstacle_recovery.side in ("left", "right"):
+                                times = "两次" if obstacle_recovery.quarters_remaining > 1 else ""
+                                turn = (
+                                    f"，转向={times}"
+                                    f"{DIRECTION_NAMES[obstacle_recovery.side]}"
+                                )
+                            _event(
+                                "障碍回退",
+                                f"{_phase_name(recovery_before)} → "
+                                f"{_phase_name(obstacle_recovery.phase)}；"
+                                f"路段进度={progress.s_m:.2f} m{turn}",
+                            )
+                if not recovery_owns:
+                    previous_phase = junction_turn.phase
+                    visual_command = command
+                    target = None
+                    if route_agent is not None and route_agent.state.current_edge:
+                        edge = route_agent.graph.edges[route_agent.state.current_edge]
+                        target = route_agent.graph.nodes.get(route_agent.state.to_node or "")
+                        key = (edge.id, route_agent.state.from_node, target.id)
+                        if key != arrival_key:
+                            arrival_policy = resolve_arrival_policy(
+                                route_agent.graph, route_agent.state.from_node, target.id,
+                                edge.length_m, junction_turn_cfg, rfid_arrival_cfg,
+                            )
+                            arrival_key = key
+                            rfid_arrival = RfidArrival()
+                            guard_label = (
+                                "禁用（尽头巡检点固定距离保护）"
+                                if (
+                                    target.role == "patrol_slot"
+                                    and arrival_policy.mode == "visual_end"
+                                )
+                                else f"{arrival_policy.guard_progress_m:.2f} m"
+                            )
+                            _event(
+                                "到点策略",
+                                f"驶入={arrival_policy.from_node} → {target.id}，"
+                                f"策略={arrival_policy.mode}，"
+                                f"预期开口={','.join(arrival_policy.expected_openings) or '无'}，"
+                                f"交接={arrival_policy.handoff_progress_m:.2f} m，"
+                                f"定距={arrival_policy.final_forward_m:.2f} m，"
+                                f"保护={guard_label}",
+                            )
+                    if target is not None and arrival_policy is not None:
+                        previous_rfid_phase = rfid_arrival.phase
+                        follow_cfg = cfg.get("follow", {}) or {}
+                        visual_safe = (
+                            command.reason not in ("stop_slow", "stop_camera")
+                            and follow_diag.bev_road_pixels
+                            >= int(follow_cfg.get("min_road_pixels", 200))
+                            and follow_diag.output_points
+                            >= int(follow_cfg.get("min_points", 8))
+                        )
+                        junction_turn, rfid_arrival, command, trigger = step_route_arrival(
+                            arrival_policy,
+                            patrol=target.role == "patrol_slot",
+                            state=junction_turn, patrol_state=rfid_arrival,
+                            reading=junction, opening=opening, command=command,
+                            progress_m=progress.s_m,
+                            odom_valid=progress.is_fresh(time.monotonic()),
+                            notes=action_notes,
+                            send=lambda line: write_velocity(bridge, line),
+                            junction_cfg=junction_turn_cfg,
+                            patrol_cfg=rfid_arrival_cfg,
+                            visual_safe=visual_safe,
+                            near_x_m=follow_diag.near_x_m,
+                            lane_heading_rad=follow_diag.lane_heading_rad,
+                            yaw_rad=progress.yaw_rad,
+                        )
+                        if trigger and (
+                            trigger not in ("guard", "odom_stale")
+                            or previous_phase != junction_turn.phase
+                            or command.reason != last_arrival_reason
+                        ):
+                            _event(
+                                "安全停车" if trigger in ("guard", "odom_stale") else "到点交接",
+                                f"目标={target.id}，策略={arrival_policy.mode}，"
+                                f"原因={trigger}，进度={progress.s_m:.2f} m，"
+                                f"检测带={junction.forward_band_ratio:.2f}",
+                            )
+                        last_arrival_reason = command.reason
+                        if rfid_arrival.phase != previous_rfid_phase:
+                            _event(
+                                "巡检点",
+                                f"{_phase_name(previous_rfid_phase)} → "
+                                f"{_phase_name(rfid_arrival.phase)}；"
+                                f"位置={target.id}，"
+                                f"侧边={_rfid_edge_name(rfid_arrival)}，"
+                                f"已前进={rfid_arrival.searched_mm} mm",
+                            )
+                        if rfid_arrival.phase == "arrived" and route_agent is not None:
+                            junction_turn.phase = "arrived"
+                            rfid_arrival = RfidArrival()
+                        if junction_turn.phase == "arrived" and route_agent is not None:
+                            junction_turn = handoff_arrival(
+                                junction_turn,
+                                route_agent,
+                                node_xy,
+                                lambda line: write_velocity(bridge, line),
+                                junction_turn_cfg.stop_settle_s,
+                            )
+                            command = _velocity_for_departure(
+                                junction_turn, visual_command
+                            )
+                    else:
+                        # 完成/故障时 Agent 没有下一目标，不能回落到视觉前进指令。
+                        command = VelocityCommand(
+                            0.0, 0.0, "done" if junction_turn.phase == "done" else "stop_action_fail"
+                        )
+                    if junction_turn.phase == "backup":
+                        backup_before = backup.phase
+                        backup, command = step_backup(
+                            backup,
+                            backup.phase == "idle",
+                            follow_diag.near_x_m,
+                            progress.s_m,
+                            command,
+                            time.monotonic(),
+                            backup_cfg,
+                        )
+                        if backup.phase == "done" and backup_before != "done":
+                            if command.reason == "backup_done_at_entry":
+                                junction_turn.phase = "fault"
+                                command = VelocityCommand(0.0, 0.0, "stop_action_fail")
+                                _event("倒车", "失败：车辆已经位于路段入口")
+                            else:
+                                finished_at = route_agent.state.to_node if route_agent is not None else None
+                                finished = (
+                                    route_agent.node_reached(finished_at)
+                                    if route_agent is not None and finished_at
+                                    else None
+                                )
+                                progress.reset()
+                                backup = Backup()
+                                if type(finished).__name__ == "Stop":
+                                    junction_turn.phase = "fault"
+                                    junction_turn.departure = "none"
+                                    command = VelocityCommand(0.0, 0.0, "stop_action_fail")
+                                else:
+                                    junction_turn.phase = "follow"
+                                    junction_turn.suppress_cue = True
+                                    junction_turn.departure = "none"
+                                    command = visual_command
+                                _event(
+                                    "倒车",
+                                    f"完成；下一动作={type(finished).__name__ if finished else '无'}",
+                                )
+                    if previous_phase != "follow" and junction_turn.phase == "follow":
+                        # 贯通点和尽头点确认到达后都清沿边里程，下一条从 0 计。
+                        progress.reset()
+                    if junction_turn.phase != previous_phase:
+                        _event(
+                            "路口",
+                            f"{_phase_name(previous_phase)} → {_phase_name(junction_turn.phase)}；"
+                            f"规划={DIRECTION_NAMES.get(junction_turn.departure, junction_turn.departure)}，"
+                            f"定距={junction_turn.forward_mm} mm",
+                        )
 
             if args.turn_at_rfid is not None and bridge is not None:
                 detection = None
@@ -798,6 +1059,10 @@ def main(argv: list[str] | None = None) -> int:
                         f"已倒车={backup.reverse_distance_m:.2f} m",
                     )
 
+            if segment_stream is not None and _invalidate_turn_frames(
+                    turn_phases_before, turn_states, segment_stream, smoother):
+                junctions = JunctionTracker()
+                command = VelocityCommand(0.0, 0.0, "reacquire")
             line = f"{command.v_mps:.3f} {command.omega_radps:.3f}"
             y_range = (
                 "不可见"
@@ -821,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
                 rfid_turn,
                 rfid_arrival,
                 backup,
+                "idle" if obstacle_recovery is None else obstacle_recovery.phase,
             )
             now_s = time.monotonic()
             if (
@@ -845,6 +1111,8 @@ def main(argv: list[str] | None = None) -> int:
                             f"路段进度={progress.s_m:.2f} m",
                         )
                     )
+                if obstacle_recovery is not None and obstacle_recovery.phase != "idle":
+                    details.append(f"障碍回退={_phase_name(obstacle_recovery.phase)}")
                 if rfid_arrival.edge_latched or rfid_arrival.phase != "follow":
                     details.extend(
                         (
@@ -856,24 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
                 _event("状态", "；".join(details))
                 last_status_signature = status_signature
                 last_status_s = now_s
-            if entrance.phase in (
-                "forward",
-                "stopping_wait",
-                "stopping",
-                "turning",
-            ) or junction_turn.phase in (
-                "forward",
-                "stopping",
-                "stopped",
-                "turning",
-            ) or rfid_turn.phase in (
-                "searching",
-                "stopping_wait",
-                "turning",
-            ) or rfid_arrival.phase in (
-                "blind_forward",
-                "stopping_wait",
-            ) or backup.phase == "backing":
+            if _finite_action_active(entrance, junction_turn, rfid_turn, rfid_arrival, backup, obstacle_recovery):
                 frames += 1
                 if args.frames and frames >= args.frames:
                     break
@@ -898,18 +1149,42 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         recording_stopped_s = time.monotonic()
         _stop_bridge(bridge)
-        if recorder is not None:
-            recorder.close(recording_stopped_s)
-            if recorder.frames_written:
-                _event(
-                    "录像",
-                    f"已保存：{recorder.path}（{recorder.frames_written} 帧）",
-                )
-        if detector is not None:
-            detector.close()
-        if capture is not None:
-            capture.release()
+        try:
+            # latest 的录像回调运行在读取线程；先结束生产者再关闭编码器。
+            if args.latest_frame and segment_stream is not None:
+                segment_stream.close()
+        finally:
+            _finish_resources(recorder, recording_stopped_s, detector, capture,
+                              segment_stream, segmenter, args.latest_frame)
     return 0
+
+
+def _finish_resources(recorder, stopped_s, detector, capture, stream, segmenter, latest):
+    """保持异常清理顺序，任何一路释放失败也继续释放其余资源。"""
+    try:
+        if recorder is not None:
+            recorder.close(stopped_s)
+            if recorder.frames_written:
+                _event("录像", f"已保存：{recorder.path}（{recorder.frames_written} 帧）")
+    finally:
+        # 编码线程异常也要释放相机和 NPU；否则下一次启动会残留资源。
+        try:
+            if detector is not None:
+                detector.close()
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                finally:
+                    # latest 模式由读取线程释放句柄，不能和 read 并发释放。
+                    if capture is not None and not (latest and getattr(stream, 'owns_capture', False)):
+                        capture.release()
+            elif segmenter is not None:
+                try:
+                    segmenter.close()
+                finally:
+                    if capture is not None:
+                        capture.release()
 
 
 if __name__ == "__main__":

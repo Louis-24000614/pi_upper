@@ -8,8 +8,8 @@ export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-/home/orangepi/.Xauthority}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 
-# 与主界面共用 Conda 环境，避免两套解释器加载不同版本的 Qt/OpenCV。
-PYTHON="${PYTHON:-/home/orangepi/miniconda3/envs/pi_upper/bin/python}"
+# 与浏览器拍照脚本共用 pyside6-venv，避免两套解释器加载不同版本的 Qt/OpenCV。
+PYTHON="${PYTHON:-/home/orangepi/pyside6-venv/bin/python}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # EDID data on small HDMI panels is not always reliable.  Do not abort the

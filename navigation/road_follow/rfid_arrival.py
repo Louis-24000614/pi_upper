@@ -2,24 +2,39 @@
 
 from __future__ import annotations
 
+import math
 import queue
+import time
 from dataclasses import dataclass
 
-from road_follow.control import VelocityCommand
+from road_follow.control import (
+    VelocityCommand,
+    align_ready_to_creep,
+    align_settle_command,
+    alignment_command,
+    heading_hold_command,
+    heading_needs_align,
+)
 
 
 @dataclass(frozen=True)
 class RfidArrivalConfig:
-    step_distance_mm: int = 150
+    step_distance_mm: int = 200
     search_speed_mmps: int = 50
     edge_visible_frames: int = 2
     road_end_missing_frames: int = 3
     road_end_band_max_ratio: float = 0.10
+    align_max_abs_x_m: float = 0.02
+    align_max_abs_heading_rad: float = 0.05
+    align_stable_frames: int = 5
+    align_timeout_s: float = 1.5
+    align_gain: float = 4.0
+    align_max_abs_omega: float = 0.5
 
 
 @dataclass
 class RfidArrival:
-    """视觉循迹直到矮沿端头消失，再仅盲走一次固定距离。"""
+    """视觉循迹直到交接，再按锁存的直行航向用里程走完最后一段。"""
 
     phase: str = "follow"
     searched_mm: int = 0
@@ -33,13 +48,17 @@ class RfidArrival:
     edge_left_seen: bool = False
     edge_right_seen: bool = False
     odom_handoff_frames: int = 0
+    align_started_s: float = 0.0
+    align_stable: int = 0
+    hold_start_m: float | None = None
+    hold_yaw_rad: float | None = None
 
 
 def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
     raw = cfg.get("rfid_turn", {}) or {}
     return RfidArrivalConfig(
         step_distance_mm=min(
-            300, max(1, int(raw.get("search_step_distance_mm", 150)))
+            300, max(1, int(raw.get("search_step_distance_mm", 200)))
         ),
         search_speed_mmps=min(
             400, max(20, int(raw.get("search_speed_mmps", 50)))
@@ -70,9 +89,16 @@ def step_rfid_arrival(
     arrival_mode: str = "visual_end",
     odom_handoff: bool = False,
     odom_stable_frames: int = 2,
+    near_x_m: float | None = None,
+    lane_heading_rad: float | None = None,
+    yaw_rad: float | None = None,
+    now_s: float | None = None,
+    progress_m: float | None = None,
+    odom_valid: bool = True,
 ) -> tuple[RfidArrival, VelocityCommand]:
     """侧边端头只负责锁存；正前方检测带稳定无 road mask 后才直走一次。"""
     received = _drain_notes(notes)
+    current_s = time.monotonic() if now_s is None else now_s
 
     if state.phase == "fault":
         return state, VelocityCommand(0.0, 0.0, "stop_rfid_not_found")
@@ -99,17 +125,35 @@ def step_rfid_arrival(
             return state, VelocityCommand(0.0, 0.0, "stop_rfid_action_fail")
         return state, VelocityCommand(0.0, 0.0, "stop_rfid_action")
 
-    if state.phase == "blind_forward":
-        if "FORWARD_FAIL" in received:
-            state.phase = "fault"
-            return state, VelocityCommand(0.0, 0.0, "stop_rfid_search_fail")
-        if "FORWARD_DONE" not in received:
-            return state, VelocityCommand(0.0, 0.0, "rfid_searching")
-        state.searched_mm += state.active_step_mm
-        state.active_step_mm = 0
-        # 只取消读卡确认：定距完成后直接确认当前拓扑巡检点。
-        state.phase = "arrived"
-        return state, VelocityCommand(0.0, 0.0, "rfid_arrived")
+    if state.phase == "heading_hold":
+        return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+    if state.phase == "align":
+        if (
+            arrival_mode == "visual_end"
+            and forward_band_ratio > cfg.road_end_band_max_ratio
+        ):
+            state.phase = "follow"
+            state.road_end_missing_frames = 0
+            state.align_stable = 0
+            return state, visual
+        ready, state.align_stable = align_ready_to_creep(
+            lane_heading_rad,
+            state.align_started_s,
+            state.align_stable,
+            current_s,
+            max_abs_x_m=cfg.align_max_abs_heading_rad,
+            required_frames=cfg.align_stable_frames,
+            timeout_s=cfg.align_timeout_s,
+        )
+        if not ready:
+            return state, align_settle_command(
+                lane_heading_rad,
+                cfg.align_gain,
+                cfg.align_max_abs_omega,
+                cfg.align_max_abs_heading_rad,
+            )
+        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
     any_edge_visible = edge_visible or edge_left_visible or edge_right_visible
     if any_edge_visible:
@@ -140,24 +184,74 @@ def step_rfid_arrival(
     if not state.edge_latched or not ready:
         return state, visual
     if not visual_safe:
-        state.phase = "fault"
-        return state, VelocityCommand(0.0, 0.0, "stop_rfid_unsafe")
-    if _send_next_step(state, send, cfg):
-        state.phase = "blind_forward"
-        return state, VelocityCommand(0.0, 0.0, "rfid_searching")
-    state.phase = "fault"
-    return state, VelocityCommand(0.0, 0.0, "stop_rfid_search_fail")
+        # 整幅路消失不能当成到墙，也不锁故障；画面恢复后继续循迹。
+        state.road_end_missing_frames = 0
+        return state, visual
+    if heading_needs_align(lane_heading_rad, cfg.align_max_abs_heading_rad):
+        state.phase = "align"
+        state.align_started_s = current_s
+        state.align_stable = 0
+        return state, alignment_command(
+            float(lane_heading_rad), cfg.align_gain, cfg.align_max_abs_omega
+        )
+    return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
 
-def _send_next_step(state: RfidArrival, send, cfg: RfidArrivalConfig) -> bool:
-    distance = cfg.step_distance_mm
-    if distance <= 0:
-        return False
-    if not send(f"forward {distance} {cfg.search_speed_mmps}"):
-        return False
-    state.active_step_mm = distance
-    state.phase = "blind_forward"
-    return True
+def _measured_progress(progress_m: float | None, odom_valid: bool) -> float | None:
+    if not odom_valid or progress_m is None:
+        return None
+    value = float(progress_m)
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _remember_hold_yaw(state: RfidArrival, yaw_rad: float | None) -> None:
+    if state.hold_yaw_rad is not None or yaw_rad is None or not math.isfinite(yaw_rad):
+        return
+    state.hold_yaw_rad = float(yaw_rad)
+
+
+def _step_heading_hold(
+    state: RfidArrival,
+    progress_m: float | None,
+    odom_valid: bool,
+    cfg: RfidArrivalConfig,
+    yaw_rad: float | None = None,
+) -> tuple[RfidArrival, VelocityCommand]:
+    """锁存摆正后的航向。里程中断只停车，恢复后仍从原来的起点和航向计量。"""
+    measured = _measured_progress(progress_m, odom_valid)
+    if measured is None:
+        return state, VelocityCommand(0.0, 0.0, "stop_odom_stale")
+    if state.hold_start_m is None:
+        state.hold_start_m = measured
+    _remember_hold_yaw(state, yaw_rad)
+    if measured + 1e-6 >= state.hold_start_m + cfg.step_distance_mm / 1000.0:
+        state.searched_mm += state.active_step_mm
+        state.active_step_mm = 0
+        state.phase = "arrived"
+        return state, VelocityCommand(0.0, 0.0, "rfid_arrived")
+    return state, heading_hold_command(
+        cfg.search_speed_mmps / 1000.0,
+        yaw_rad,
+        state.hold_yaw_rad,
+        cfg.align_gain,
+        cfg.align_max_abs_omega,
+    )
+
+
+def _begin_heading_hold(
+    state: RfidArrival,
+    progress_m: float | None,
+    odom_valid: bool,
+    cfg: RfidArrivalConfig,
+    yaw_rad: float | None = None,
+) -> tuple[RfidArrival, VelocityCommand]:
+    state.active_step_mm = cfg.step_distance_mm
+    state.phase = "heading_hold"
+    state.hold_start_m = None
+    state.hold_yaw_rad = None
+    return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
 
 def _valid_detection(detection: tuple[int, int] | None) -> bool:

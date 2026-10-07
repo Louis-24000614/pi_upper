@@ -30,6 +30,28 @@ class ArrivalPolicy:
     expected_openings: tuple[str, ...]
 
 
+def _exit_directions(graph, from_node: str, to_node: str) -> set[str]:
+    """驶入方向上，目标点其余连边相对车头的开口。正前约 45° 内算 forward。"""
+    a, b = graph.nodes[from_node], graph.nodes[to_node]
+    ix, iy = b.x - a.x, b.y - a.y
+    if math.hypot(ix, iy) < 1e-6:
+        raise ValueError(f"驶入节点坐标重合: {from_node} -> {to_node}")
+    directions = set()
+    # 使用物理连边，即使道路临时封闭，侧向开口的几何形状仍然存在。
+    for edge in graph.edges.values():
+        neighbor = edge.v if edge.u == to_node else edge.u if edge.v == to_node else None
+        if neighbor is None or neighbor == from_node:
+            continue
+        c = graph.nodes[neighbor]
+        ox, oy = c.x - b.x, c.y - b.y
+        angle = math.atan2(ix * oy - iy * ox, ix * ox + iy * oy)
+        if abs(angle) <= math.pi / 4:
+            directions.add("forward")
+        elif abs(angle) < 3 * math.pi / 4:
+            directions.add("left" if angle > 0 else "right")
+    return directions
+
+
 def resolve_arrival_policy(
     graph: TopologyGraph,
     from_node: str,
@@ -48,7 +70,13 @@ def resolve_arrival_policy(
             value = getattr(target.arrival, name)
         return default if value is None else value
 
-    mode = setting("mode", "visual_odom" if target.role == "junction" else "visual_end")
+    directions = _exit_directions(graph, from_node, to_node)
+    default_mode = (
+        "visual_odom"
+        if target.role == "junction" or "forward" in directions
+        else "visual_end"
+    )
+    mode = setting("mode", default_mode)
     final = setting(
         "final_forward_m",
         patrol_cfg.step_distance_mm / 1000.0
@@ -64,23 +92,6 @@ def resolve_arrival_policy(
     ):
         raise ValueError(f"不安全的到点距离配置: {from_node} -> {to_node}")
 
-    a, b = graph.nodes[from_node], target
-    ix, iy = b.x - a.x, b.y - a.y
-    if math.hypot(ix, iy) < 1e-6:
-        raise ValueError(f"驶入节点坐标重合: {from_node} -> {to_node}")
-    directions = set()
-    # 使用物理连边，即使道路临时封闭，侧向开口的几何形状仍然存在。
-    for edge in graph.edges.values():
-        neighbor = edge.v if edge.u == to_node else edge.u if edge.v == to_node else None
-        if neighbor is None or neighbor == from_node:
-            continue
-        c = graph.nodes[neighbor]
-        ox, oy = c.x - b.x, c.y - b.y
-        angle = math.atan2(ix * oy - iy * ox, ix * ox + iy * oy)
-        if abs(angle) <= math.pi / 4:
-            directions.add("forward")
-        elif abs(angle) < 3 * math.pi / 4:
-            directions.add("left" if angle > 0 else "right")
     return ArrivalPolicy(
         from_node, to_node, mode, handoff, final, guard,
         tuple(side for side in ("forward", "left", "right") if side in directions),
@@ -102,16 +113,26 @@ def step_route_arrival(
     policy, *, patrol, state, patrol_state, reading, opening, command,
     progress_m, odom_valid, notes, send, junction_cfg, patrol_cfg,
     visual_safe=True,
+    near_x_m=None,
+    lane_heading_rad=None,
+    yaw_rad=None,
 ):
-    """共享地图选择和 ODOM 新鲜度检查；距离保护只用于普通路口。"""
+    """共享地图选择和 ODOM 新鲜度检查。贯通点按边长保护，尽头巡检点仍等墙。"""
     approaching = state.phase in ("follow", "approach") and (
         not patrol or patrol_state.phase == "follow"
     )
     if approaching:
-        # 普通路口在有限动作前检查距离上限；巡检点继续等待视觉交接，
-        # 不因地图边长与实测视觉触发位置的偏差提前锁定停车。
-        if not patrol and odom_valid and progress_m + 1e-6 >= policy.guard_progress_m:
-            state.phase = "odom_wait"
+        # 尽头巡检点的墙可能晚于边长，不能用固定距离截断。
+        # 贯通点正前方还有路，超过边长保护仍未交接就停车。
+        if (
+            (not patrol or policy.mode == "visual_odom")
+            and odom_valid
+            and progress_m + 1e-6 >= policy.guard_progress_m
+        ):
+            if patrol:
+                patrol_state.phase = "odom_wait"
+            else:
+                state.phase = "odom_wait"
             return state, patrol_state, VelocityCommand(0.0, 0.0, "stop_arrival_guard"), "guard"
         if not odom_valid:
             state.arm = 0
@@ -143,8 +164,13 @@ def step_route_arrival(
             arrival_mode=policy.mode,
             odom_handoff=(progress_m + 1e-6 >= policy.handoff_progress_m and is_visual_follow(command)),
             odom_stable_frames=junction_cfg.stable_frames,
+            near_x_m=near_x_m,
+            lane_heading_rad=lane_heading_rad,
+            yaw_rad=yaw_rad,
+            progress_m=progress_m,
+            odom_valid=odom_valid,
         )
-        source = policy.mode if before == "follow" and patrol_state.phase == "blind_forward" else ""
+        source = policy.mode if before in ("follow", "align") and patrol_state.phase == "heading_hold" else ""
         return state, patrol_state, command, source
 
     cfg = replace(junction_cfg, turn_forward_m=policy.final_forward_m)
@@ -167,6 +193,10 @@ def step_route_arrival(
         if end_cue.detected:
             cue = end_cue
     before = state.phase
-    state, command = step_junction_turn(state, cue, command, notes, send, cfg)
-    source = cue.source if before in ("follow", "approach") and state.phase == "forward" else ""
+    state, command = step_junction_turn(
+        state, cue, command, notes, send, cfg, near_x_m=near_x_m,
+        progress_m=progress_m, odom_valid=odom_valid,
+        lane_heading_rad=lane_heading_rad, yaw_rad=yaw_rad,
+    )
+    source = cue.source if before in ("follow", "approach", "align") and state.phase == "heading_hold" else ""
     return state, patrol_state, command, source

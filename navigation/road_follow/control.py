@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
@@ -17,7 +18,7 @@ class FollowConfig:
     lookahead_m: float = 0.45
     turn_abs_x_m: float = 0.08
     min_points: int = 8
-    min_road_pixels: int = 400
+    min_road_pixels: int = 200
     max_abs_omega: float = 1.0
     # 纯跟踪角速度增益。用于补偿底盘左右轮差异造成的转向响应不足。
     steering_gain: float = 1.0
@@ -35,6 +36,93 @@ class VelocityCommand:
     reason: str
 
 
+def near_centerline_needs_align(near_x_m: float | None, max_abs_x_m: float) -> bool:
+    """近处中心线缺失或已经在阈值内时，不进入原地摆正。"""
+    return near_x_m is not None and abs(near_x_m) > max_abs_x_m
+
+
+def heading_needs_align(lane_heading_rad: float | None, max_abs_heading_rad: float) -> bool:
+    """道路方向未知或已经对齐时，不原地转车头。横向偏差不在这里处理。"""
+    return (
+        lane_heading_rad is not None
+        and math.isfinite(lane_heading_rad)
+        and abs(lane_heading_rad) > max_abs_heading_rad
+    )
+
+
+def heading_hold_command(
+    v_mps: float,
+    yaw_rad: float | None,
+    target_yaw_rad: float | None,
+    gain: float,
+    max_abs_omega: float,
+) -> VelocityCommand:
+    """按锁存航向修正。目标在当前航向左侧时角速度为正。"""
+    omega = 0.0
+    if (
+        yaw_rad is not None
+        and target_yaw_rad is not None
+        and math.isfinite(yaw_rad)
+        and math.isfinite(target_yaw_rad)
+        and math.isfinite(gain)
+    ):
+        error = math.atan2(
+            math.sin(target_yaw_rad - yaw_rad),
+            math.cos(target_yaw_rad - yaw_rad),
+        )
+        omega = float(gain) * error
+        limit = abs(float(max_abs_omega))
+        if omega > limit:
+            omega = limit
+        elif omega < -limit:
+            omega = -limit
+    return VelocityCommand(v_mps, omega, "heading_hold")
+
+
+def align_ready_to_creep(
+    near_x_m: float | None,
+    started_s: float,
+    stable_frames: int,
+    now_s: float,
+    *,
+    max_abs_x_m: float,
+    required_frames: int,
+    timeout_s: float,
+) -> tuple[bool, int]:
+    """摆正结束条件。测量消失时继续等待；只有连续稳住或超时才放行。"""
+    if now_s - started_s >= timeout_s:
+        return True, stable_frames
+    if near_x_m is None or not math.isfinite(near_x_m):
+        return False, 0
+    if abs(near_x_m) <= max_abs_x_m:
+        stable_frames += 1
+        return stable_frames >= required_frames, stable_frames
+    return False, 0
+
+
+def align_settle_command(
+    error: float | None,
+    gain: float,
+    max_abs_omega: float,
+    max_abs_error: float,
+) -> VelocityCommand:
+    """误差进带或测量消失时停车等待，不再边数稳定帧边转。"""
+    if error is None or not math.isfinite(error) or abs(error) <= max_abs_error:
+        return VelocityCommand(0.0, 0.0, "align")
+    return alignment_command(error, gain, max_abs_omega)
+
+
+def alignment_command(near_x_m: float, gain: float, max_abs_omega: float) -> VelocityCommand:
+    """原地摆正：线速度为 0，近处中心线在右侧时角速度为负。"""
+    omega = -float(gain) * float(near_x_m)
+    limit = abs(float(max_abs_omega))
+    if omega > limit:
+        omega = limit
+    elif omega < -limit:
+        omega = -limit
+    return VelocityCommand(0.0, omega, "align")
+
+
 def is_visual_follow(command: VelocityCommand) -> bool:
     """固定预瞄和近距离预瞄都属于视觉闭环循迹。"""
     return command.reason in ("follow", "follow_near")
@@ -48,7 +136,7 @@ def follow_config_from_mapping(cfg: dict) -> FollowConfig:
         lookahead_m=float(f.get("lookahead_m", 0.45)),
         turn_abs_x_m=float(f.get("turn_abs_x_m", 0.08)),
         min_points=int(f.get("min_points", 8)),
-        min_road_pixels=int(f.get("min_road_pixels", 400)),
+        min_road_pixels=int(f.get("min_road_pixels", 200)),
         max_abs_omega=float(f.get("max_abs_omega", 1.0)),
         steering_gain=float(f.get("steering_gain", 1.0)),
         x_bias_m=float(f.get("x_bias_m", 0.0)),

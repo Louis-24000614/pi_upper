@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
+
+from road_follow.segment_buffers import SegmentBuffers
 
 
 def letterbox(bgr: np.ndarray, size: int = 640, color: int = 114) -> tuple[np.ndarray, float, int, int]:
@@ -72,8 +75,12 @@ def decode_road_mask(
     conf_thres: float = 0.45,
     iou_thres: float = 0.5,
     input_size: int = 640,
+    correct_nms: bool = True,
+    buffers: SegmentBuffers | None = None,
+    timings: dict | None = None,
 ) -> np.ndarray:
     """把分割头变成原图大小的 0/255 道路 mask。没有够置信度的框时返回全 0。"""
+    began = time.perf_counter() if timings is not None else 0.0
     pred = np.squeeze(pred)
     proto = np.squeeze(proto)
     if pred.ndim != 2 or proto.ndim != 3:
@@ -104,21 +111,33 @@ def decode_road_mask(
     xyxy[:, 2] = boxes_xywh[:, 0] + boxes_xywh[:, 2] * 0.5
     xyxy[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] * 0.5
 
+    # OpenCV Rect 需要左上角+宽高；原实现误传右下角，单独作为 A0→A1
+    # 现已默认修正。它与单纯性能优化不同，会改变少量重叠框的保留结果；
+    # correct_nms=False 仅为历史 A0 正确性对照保留，不能混淆两种基线。
+    nms_boxes = xyxy.copy() if correct_nms else xyxy
+    if correct_nms:
+        nms_boxes[:, 2:4] -= nms_boxes[:, 0:2]
     indices = _as_nms_indices(
-        cv2.dnn.NMSBoxes(xyxy.tolist(), conf.tolist(), conf_thres, iou_thres)
+        cv2.dnn.NMSBoxes(nms_boxes.tolist(), conf.tolist(), conf_thres, iou_thres)
     )
     if indices.size == 0:
         return blank
 
     xyxy = xyxy[indices]
     coeffs = coeffs[indices]
+    matrix_began = time.perf_counter() if timings is not None else 0.0
     channels, mask_h, mask_w = proto.shape
     flat = proto.reshape(channels, -1).astype(np.float32)
     masks = _sigmoid(coeffs @ flat).reshape(-1, mask_h, mask_w)
+    merge_began = time.perf_counter() if timings is not None else 0.0
 
-    merged = np.zeros((input_size, input_size), dtype=bool)
+    merged = np.zeros((input_size, input_size), dtype=bool) if buffers is None else buffers.merged
+    if buffers is not None:
+        merged.fill(False)
     for mask, box in zip(masks, xyxy):
-        up = cv2.resize(mask, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
+        up = cv2.resize(mask, (input_size, input_size),
+                        dst=None if buffers is None else buffers.up,
+                        interpolation=cv2.INTER_LINEAR)
         x1 = max(0, int(np.floor(box[0])))
         y1 = max(0, int(np.floor(box[1])))
         x2 = min(input_size, int(np.ceil(box[2])))
@@ -129,6 +148,7 @@ def decode_road_mask(
         merged[y1:y2, x1:x2] |= patch
 
     resized_h = int(round(height * ratio))
+    restore_began = time.perf_counter() if timings is not None else 0.0
     resized_w = int(round(width * ratio))
     cropped = merged[top : top + resized_h, left : left + resized_w]
     if cropped.size == 0:
@@ -138,6 +158,13 @@ def decode_road_mask(
         (width, height),
         interpolation=cv2.INTER_NEAREST,
     )
+    if timings is not None:
+        # 子项嵌套于 post_ms，不可再与 post_ms 相加；无有效框时字典为空。
+        ended = time.perf_counter()
+        timings.update(post_filter_ms=(matrix_began-began)*1000,
+                       post_matrix_sigmoid_ms=(merge_began-matrix_began)*1000,
+                       post_resize_merge_ms=(restore_began-merge_began)*1000,
+                       post_restore_ms=(ended-restore_began)*1000)
     return restored
 
 
@@ -148,18 +175,35 @@ class RoadSegmenter:
     model_path: Path
     conf_thres: float = 0.45
     _session: object = None
+    correct_nms: bool = True
+    # 单个模型实例由所属 worker 独占；默认复用可写工作区，最终 mask 仍有独立所有权。
+    reuse_buffers: bool = True
+    core_mask: int | None = None
+    measure: bool = False
+    _buffers: SegmentBuffers | None = None
+    last_timings: dict | None = None
+    backend: str = "lite"
 
     def _load(self):
         if self._session is not None:
             return self._session
         if self.model_path.suffix == ".rknn":
+            if self.backend != "lite":
+                from road_follow.native_backend import NativeRknnSession
+                if self.backend not in ("c-standard", "c-input-zero"):
+                    raise ValueError(f"未知推理后端: {self.backend}")
+                self._session = NativeRknnSession(self.model_path, self.core_mask or 1,
+                                                 self.backend == "c-input-zero")
+                return self._session
             RKNNLite = _import_rknn_lite()
             runtime = RKNNLite(verbose=False)
             if runtime.load_rknn(str(self.model_path)) != 0:
-                raise RuntimeError(f"load_rknn 失败: {self.model_path}")
-            if runtime.init_runtime(core_mask=RKNNLite.NPU_CORE_0) != 0:
                 runtime.release()
-                raise RuntimeError("init_runtime 失败，NPU 0 号核没有起来")
+                raise RuntimeError(f"load_rknn 失败: {self.model_path}")
+            selected_core = RKNNLite.NPU_CORE_0 if self.core_mask is None else self.core_mask
+            if runtime.init_runtime(core_mask=selected_core) != 0:
+                runtime.release()
+                raise RuntimeError(f"init_runtime 失败，core_mask={selected_core}")
             self._session = runtime
             return runtime
         import onnxruntime as ort
@@ -172,7 +216,14 @@ class RoadSegmenter:
 
     def mask(self, bgr: np.ndarray) -> np.ndarray:
         session = self._load()
-        canvas, ratio, left, top = letterbox(bgr, size=640)
+        t0 = time.perf_counter() if self.measure else 0.0
+        if self.reuse_buffers and self._buffers is None:
+            self._buffers = SegmentBuffers()
+        canvas, ratio, left, top = (
+            self._buffers.letterbox(bgr) if self._buffers is not None
+            else letterbox(bgr, size=640)
+        )
+        t1 = time.perf_counter() if self.measure else 0.0
         if self.model_path.suffix == ".rknn":
             tensor = np.ascontiguousarray(canvas)[None, ...]
             outputs = session.inference(inputs=[tensor], data_format=["nhwc"])
@@ -184,7 +235,9 @@ class RoadSegmenter:
             input_name = session.get_inputs()[0].name
             pred, proto = session.run(None, {input_name: blob})
             pred, proto = _orient_heads(pred, proto)
-        return decode_road_mask(
+        t2 = time.perf_counter() if self.measure else 0.0
+        post_timings = {} if self.measure else None
+        result = decode_road_mask(
             pred,
             proto,
             ratio,
@@ -192,4 +245,18 @@ class RoadSegmenter:
             top,
             bgr.shape[:2],
             conf_thres=self.conf_thres,
+            correct_nms=self.correct_nms,
+            buffers=self._buffers,
+            timings=post_timings,
         )
+        if self.measure:
+            t3 = time.perf_counter()
+            self.last_timings = {"pre_ms": (t1-t0)*1000, "rknn_ms": (t2-t1)*1000,
+                                 "post_ms": (t3-t2)*1000, **post_timings}
+        return result
+
+    def close(self) -> None:
+        """实验轮次结束及时释放 context，避免跨轮资源残留影响 A/B。"""
+        if self._session is not None and self.model_path.suffix == ".rknn":
+            self._session.release()
+        self._session = None

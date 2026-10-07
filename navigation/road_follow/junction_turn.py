@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import math
 import queue
 import time
 from dataclasses import dataclass, field
 
-from road_follow.control import VelocityCommand, is_visual_follow
+from road_follow.control import (
+    VelocityCommand,
+    align_ready_to_creep,
+    align_settle_command,
+    alignment_command,
+    heading_hold_command,
+    heading_needs_align,
+    is_visual_follow,
+)
 
 
 @dataclass(frozen=True)
@@ -17,7 +26,7 @@ class JunctionTurnConfig:
     camera_ahead_of_turn_center_m: float = 0.0
     stop_before_center_m: float = 0.0
     forward_speed_mmps: int = 50
-    turn_forward_m: float = 0.15
+    turn_forward_m: float = 0.20
     stop_settle_s: float = 2.0
     min_forward_mm: int = 50
     max_forward_mm: int = 650
@@ -30,7 +39,7 @@ class JunctionTurnConfig:
     road_end_band_max_ratio: float = 0.10
     road_end_missing_frames: int = 3
     # 角看不见之后，IMU 定距再走这段到路口中心。
-    blind_forward_m: float = 0.15
+    blind_forward_m: float = 0.20
     road_end_max_abs_lane_x_m: float = 0.08
     road_end_min_lane_width_m: float = 0.14
     road_end_max_lane_width_m: float = 0.32
@@ -40,6 +49,12 @@ class JunctionTurnConfig:
     branch_vote_window: int = 8
     branch_vote_min: int = 2
     odom_stop_margin_m: float = 0.05
+    align_max_abs_x_m: float = 0.02
+    align_max_abs_heading_rad: float = 0.05
+    align_stable_frames: int = 5
+    align_timeout_s: float = 1.5
+    align_gain: float = 4.0
+    align_max_abs_omega: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -54,9 +69,10 @@ class JunctionCue:
 
 @dataclass
 class JunctionTurn:
-    """follow → approach → forward → arrived → stopping/stopped → departure。
+    """follow → approach → align → heading_hold → arrived → stopping/stopped → departure。
 
-    ``arrived`` 只表示定距走完。左转、右转、直行或倒车要等调用方另行提交。
+    ``heading_hold`` 锁住摆正结束时的里程计航向，用沿边里程走完最后一段。
+    ``arrived`` 只表示这段走完。左转、右转、直行或倒车要等调用方另行提交。
     """
 
     phase: str = "follow"
@@ -71,6 +87,10 @@ class JunctionTurn:
     stop_started_s: float = 0.0
     stop_settle_s: float = 2.0
     branch_votes: list[bool] = field(default_factory=list)
+    align_started_s: float = 0.0
+    align_stable: int = 0
+    hold_start_m: float | None = None
+    hold_yaw_rad: float | None = None
 
 
 def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
@@ -84,7 +104,7 @@ def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
         ),
         stop_before_center_m=float(raw.get("stop_before_center_m", 0.0)),
         forward_speed_mmps=max(1, int(raw.get("forward_speed_mmps", 50))),
-        turn_forward_m=max(0.001, float(raw.get("turn_forward_m", 0.15))),
+        turn_forward_m=max(0.001, float(raw.get("turn_forward_m", 0.20))),
         stop_settle_s=max(
             0.0, float(raw.get("stop_settle_ms", 2000)) / 1000.0
         ),
@@ -103,7 +123,7 @@ def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
         road_end_missing_frames=max(
             1, int(raw.get("road_end_missing_frames", 3))
         ),
-        blind_forward_m=float(raw.get("blind_forward_m", 0.15)),
+        blind_forward_m=float(raw.get("blind_forward_m", 0.20)),
         road_end_max_abs_lane_x_m=float(
             raw.get("road_end_max_abs_lane_x_m", 0.08)
         ),
@@ -195,6 +215,62 @@ def odom_handoff_turn_cue(
     return JunctionCue(True, side, handoff_distance_m, "odom_handoff")
 
 
+def _measured_progress(progress_m: float | None, odom_valid: bool) -> float | None:
+    if not odom_valid or progress_m is None:
+        return None
+    value = float(progress_m)
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _remember_hold_yaw(state: JunctionTurn, yaw_rad: float | None) -> None:
+    if state.hold_yaw_rad is not None or yaw_rad is None or not math.isfinite(yaw_rad):
+        return
+    state.hold_yaw_rad = float(yaw_rad)
+
+
+def _step_heading_hold(
+    state: JunctionTurn,
+    progress_m: float | None,
+    odom_valid: bool,
+    cfg: JunctionTurnConfig,
+    yaw_rad: float | None = None,
+) -> tuple[JunctionTurn, VelocityCommand]:
+    """锁存摆正后的航向，只按里程结束；里程失效时停车且不重记起点和航向。"""
+    measured = _measured_progress(progress_m, odom_valid)
+    if measured is None:
+        return state, VelocityCommand(0.0, 0.0, "stop_odom_stale")
+    if state.hold_start_m is None:
+        state.hold_start_m = measured
+    _remember_hold_yaw(state, yaw_rad)
+    if measured + 1e-6 >= state.hold_start_m + cfg.turn_forward_m:
+        state.phase = "arrived"
+        state.departure = "none"
+        return state, VelocityCommand(0.0, 0.0, "arrived")
+    return state, heading_hold_command(
+        cfg.forward_speed_mmps / 1000.0,
+        yaw_rad,
+        state.hold_yaw_rad,
+        cfg.align_gain,
+        cfg.align_max_abs_omega,
+    )
+
+
+def _begin_heading_hold(
+    state: JunctionTurn,
+    progress_m: float | None,
+    odom_valid: bool,
+    cfg: JunctionTurnConfig,
+    yaw_rad: float | None = None,
+) -> tuple[JunctionTurn, VelocityCommand]:
+    """道路方向对齐后，记下当时航向，走完最后一段。"""
+    state.phase = "heading_hold"
+    state.hold_start_m = None
+    state.hold_yaw_rad = None
+    return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+
 def step_junction_turn(
     state: JunctionTurn,
     cue: JunctionCue,
@@ -203,6 +279,11 @@ def step_junction_turn(
     send,
     cfg: JunctionTurnConfig,
     now_s: float | None = None,
+    near_x_m: float | None = None,
+    progress_m: float | None = None,
+    odom_valid: bool = True,
+    lane_heading_rad: float | None = None,
+    yaw_rad: float | None = None,
 ) -> tuple[JunctionTurn, VelocityCommand]:
     """在视觉仍可靠时交接；有限动作期间不再发送 ``CMD_VEL``。"""
     current_s = time.monotonic() if now_s is None else now_s
@@ -305,10 +386,36 @@ def step_junction_turn(
         state.side = cue.side
         state.forward_mm = forward_mm
         state.arm = 0
-        if send(f"forward {forward_mm} {cfg.forward_speed_mmps}"):
-            state.phase = "forward"
-            return state, VelocityCommand(0.0, 0.0, "blind_forward")
-        return state, VelocityCommand(0.0, 0.0, "forward_wait")
+        if heading_needs_align(lane_heading_rad, cfg.align_max_abs_heading_rad):
+            state.phase = "align"
+            state.align_started_s = current_s
+            state.align_stable = 0
+            return state, alignment_command(
+                float(lane_heading_rad), cfg.align_gain, cfg.align_max_abs_omega
+            )
+        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+    if state.phase == "align":
+        ready, state.align_stable = align_ready_to_creep(
+            lane_heading_rad,
+            state.align_started_s,
+            state.align_stable,
+            current_s,
+            max_abs_x_m=cfg.align_max_abs_heading_rad,
+            required_frames=cfg.align_stable_frames,
+            timeout_s=cfg.align_timeout_s,
+        )
+        if not ready:
+            return state, align_settle_command(
+                lane_heading_rad,
+                cfg.align_gain,
+                cfg.align_max_abs_omega,
+                cfg.align_max_abs_heading_rad,
+            )
+        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+    if state.phase == "heading_hold":
+        return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
     if state.phase in ("forward", "stopping", "turning"):
         return state, VelocityCommand(0.0, 0.0, state.phase)

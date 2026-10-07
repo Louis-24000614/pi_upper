@@ -20,9 +20,9 @@ class BackupConfig:
     max_abs_omega: float = 0.4
     near_y_min_m: float = 0.20
     near_y_max_m: float = 0.35
-    done_progress_m: float = 0.15
-    max_distance_m: float = 0.70
-    max_duration_s: float = 12.0
+    done_progress_m: float = 0.0
+    max_distance_m: float = 1.10
+    max_duration_s: float = 16.0
     max_missing_frames: int = 3
 
 
@@ -31,12 +31,14 @@ class EdgeProgress:
     """离开上一个路口之后的沿边进度。清零的是这个标量，不是下位机里程计。"""
 
     s_m: float = 0.0
+    yaw_rad: float | None = None
     _x: float | None = None
     _y: float | None = None
     last_sample_s: float | None = None
 
     def reset(self) -> None:
         self.s_m = 0.0
+        self.yaw_rad = None
         self._x = None
         self._y = None
         self.last_sample_s = None
@@ -47,6 +49,7 @@ class EdgeProgress:
             self.last_sample_s = None
             return self.s_m
         self.last_sample_s = time.monotonic() if received_s is None else received_s
+        self.yaw_rad = float(yaw_rad)
         if self._x is not None and self._y is not None:
             ds = (x_m - self._x) * math.cos(yaw_rad) + (y_m - self._y) * math.sin(yaw_rad)
             self.s_m = max(0.0, self.s_m + ds)
@@ -81,6 +84,24 @@ def near_lane_x(
     return sum(band) / len(band)
 
 
+def near_lane_heading(
+    points: list[Point2D] | tuple[Point2D, ...],
+    y_min_m: float = 0.20,
+    y_max_m: float = 0.35,
+) -> float | None:
+    """近处中心线相对车头的方向。向右偏为正，平行偏移仍是 0。"""
+    band = [(float(x), float(y)) for x, y in points if y_min_m <= float(y) <= y_max_m]
+    if len(band) < 2:
+        return None
+    y_mean = sum(y for _, y in band) / len(band)
+    x_mean = sum(x for x, _ in band) / len(band)
+    var_y = sum((y - y_mean) ** 2 for _, y in band)
+    if var_y < 1e-6:
+        return None
+    cov = sum((y - y_mean) * (x - x_mean) for x, y in band)
+    return math.atan2(cov, var_y)
+
+
 def reverse_omega(near_x_m: float, cfg: BackupConfig) -> float:
     """负线速度下的 Pure Pursuit 修正；符号与正向循迹相反。"""
     y = max(1e-3, abs(cfg.lookahead_y_m))
@@ -104,7 +125,7 @@ def step_backup(
     now_s: float,
     cfg: BackupConfig | None = None,
 ) -> tuple[Backup, VelocityCommand]:
-    """硬堵塞后以负 `CMD_VEL` 视觉倒车，里程回到入口阈值才算完成。"""
+    """硬堵塞后以负 `CMD_VEL` 视觉倒车，沿边进度回到 0 才算回到路口中心。"""
     cfg = cfg or BackupConfig()
 
     if state.phase == "fault":

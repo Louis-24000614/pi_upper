@@ -39,19 +39,41 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "follow")
         state, command = step_junction_turn(
-            state, cue, self.follow, self.notes, self.send, self.cfg
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "forward")
-        self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 150 50"])
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(state.hold_start_m, 0.80)
+        self.assertEqual(self.sent, [])
 
-        self.notes.put("FORWARD_DONE")
+        steered = VelocityCommand(0.10, 0.4, "follow")
         state, command = step_junction_turn(
-            state, cue, self.follow, self.notes, self.send, self.cfg
+            state, cue, steered, self.notes, self.send, self.cfg,
+            progress_m=0.90, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertEqual(state.hold_start_m, 0.80)
+
+        state, command = step_junction_turn(
+            state, cue, steered, self.notes, self.send, self.cfg,
+            progress_m=0.90, odom_valid=False,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "stop_odom_stale")
+        self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+        self.assertEqual(state.hold_start_m, 0.80)
+
+        state, command = step_junction_turn(
+            state, cue, steered, self.notes, self.send, self.cfg,
+            progress_m=1.00, odom_valid=True,
         )
         self.assertEqual(state.phase, "arrived")
         self.assertEqual(command.reason, "arrived")
-        self.assertEqual(self.sent, ["forward 150 50"])
+        self.assertEqual(self.sent, [])
 
         state = apply_departure(state, "right", self.send)
         self.assertEqual(state.phase, "stopping")
@@ -149,11 +171,181 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "approach")
         state, command = step_junction_turn(
-            state, road_end, self.follow, self.notes, self.send, cfg
+            state, road_end, self.follow, self.notes, self.send, cfg,
+            progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "forward")
-        self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 150 50"])
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
+
+    def test_parallel_offset_locks_yaw_and_corrects_drift(self) -> None:
+        state = JunctionTurn()
+        cue = JunctionCue(True, "left", 0.32)
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            near_x_m=0.08, lane_heading_rad=0.0, yaw_rad=0.30,
+            progress_m=0.80, odom_valid=True,
+        )
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            near_x_m=0.08, lane_heading_rad=0.0, yaw_rad=0.30,
+            progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(state.hold_yaw_rad, 0.30)
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
+
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            yaw_rad=0.10, progress_m=0.90, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(state.hold_yaw_rad, 0.30)
+        self.assertGreater(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            yaw_rad=1.0, progress_m=0.90, odom_valid=False,
+        )
+        self.assertEqual(command.reason, "stop_odom_stale")
+        self.assertEqual(state.hold_yaw_rad, 0.30)
+        self.assertEqual(state.hold_start_m, 0.80)
+
+    def test_lane_heading_error_aligns_before_locking_yaw(self) -> None:
+        state = JunctionTurn()
+        cue = JunctionCue(True, "left", 0.32)
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.0, lane_heading_rad=0.20, near_x_m=0.0, yaw_rad=1.0,
+            progress_m=0.80, odom_valid=True,
+        )
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.0, lane_heading_rad=0.20, near_x_m=0.0, yaw_rad=1.0,
+            progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "align")
+        self.assertEqual(command.reason, "align")
+        self.assertEqual(command.v_mps, 0.0)
+        self.assertLess(command.omega_radps, 0.0)
+        self.assertEqual(self.sent, [])
+
+        for step_s in (10.1, 10.2, 10.3, 10.4):
+            state, command = step_junction_turn(
+                state, cue, self.follow, self.notes, self.send, self.cfg,
+                now_s=step_s, lane_heading_rad=0.0, yaw_rad=0.80,
+                progress_m=0.80, odom_valid=True,
+            )
+            self.assertEqual(state.phase, "align")
+            self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.5, lane_heading_rad=None, yaw_rad=0.80,
+            progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "align")
+        self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.6, lane_heading_rad=0.0, yaw_rad=0.80,
+            progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "align")
+        for step_s in (10.7, 10.8, 10.9):
+            state, _ = step_junction_turn(
+                state, cue, self.follow, self.notes, self.send, self.cfg,
+                now_s=step_s, lane_heading_rad=0.0, yaw_rad=0.80,
+                progress_m=0.80, odom_valid=True,
+            )
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=11.0, lane_heading_rad=0.0, yaw_rad=0.80,
+            progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(state.hold_yaw_rad, 0.80)
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+
+    def test_offset_near_centerline_aligns_before_forward(self) -> None:
+        state = JunctionTurn()
+        cue = JunctionCue(True, "left", 0.32)
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            lane_heading_rad=0.20,
+        )
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.0, lane_heading_rad=0.20, near_x_m=0.08,
+        )
+        self.assertEqual(state.phase, "align")
+        self.assertEqual(command.reason, "align")
+        self.assertEqual(command.v_mps, 0.0)
+        self.assertLess(command.omega_radps, 0.0)
+        self.assertEqual(self.sent, [])
+
+        for step_s in (10.1, 10.2, 10.3, 10.4):
+            state, command = step_junction_turn(
+                state, cue, self.follow, self.notes, self.send, self.cfg,
+                now_s=step_s, lane_heading_rad=0.0, near_x_m=0.08,
+            )
+            self.assertEqual(state.phase, "align")
+            self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+            self.assertEqual(self.sent, [])
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.5, lane_heading_rad=0.0, near_x_m=0.08,
+            progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
+
+    def test_missing_near_centerline_skips_align(self) -> None:
+        state = JunctionTurn()
+        cue = JunctionCue(True, "left", 0.32)
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg, near_x_m=None
+        )
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            near_x_m=None, progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
+
+    def test_align_timeout_still_sends_forward(self) -> None:
+        state = JunctionTurn()
+        cue = JunctionCue(True, "left", 0.32)
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.0, lane_heading_rad=0.20,
+        )
+        state, _ = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=10.0, lane_heading_rad=0.20,
+        )
+        self.assertEqual(state.phase, "align")
+        state, command = step_junction_turn(
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            now_s=11.6, lane_heading_rad=0.20, progress_m=0.80, odom_valid=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
 
     def test_finite_action_failure_latches_stop(self) -> None:
         state = JunctionTurn(phase="forward", side="right", forward_mm=200)
@@ -183,7 +375,7 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertTrue(cue.detected)
         self.assertEqual(cue.source, "road_end")
-        self.assertAlmostEqual(cue.distance_m or 0.0, 0.15)
+        self.assertAlmostEqual(cue.distance_m or 0.0, 0.20)
 
     def test_road_end_cue_requires_safe_follow_window(self) -> None:
         cases = (
@@ -227,11 +419,14 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "follow")
         state, command = step_junction_turn(
-            state, cue, self.follow, self.notes, self.send, self.cfg
+            state, cue, self.follow, self.notes, self.send, self.cfg,
+            progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "forward")
-        self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 150 50"])
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
 
     def test_far_branch_is_latched_until_hidden_road_end(self) -> None:
         state = JunctionTurn()
@@ -274,11 +469,14 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "approach")
         state, command = step_junction_turn(
-            state, road_end, self.follow, self.notes, self.send, self.cfg
+            state, road_end, self.follow, self.notes, self.send, self.cfg,
+            progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "forward")
-        self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 150 50"])
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
 
     def test_latched_branch_handoffs_after_lookahead_stops(self) -> None:
         state = JunctionTurn()
@@ -318,11 +516,14 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "approach")
         state, command = step_junction_turn(
-            state, cue, stopped, self.notes, self.send, self.cfg
+            state, cue, stopped, self.notes, self.send, self.cfg,
+            progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "forward")
-        self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 150 50"])
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
 
     def test_lookahead_stop_without_branch_latch_does_not_blind_move(self) -> None:
         stopped = VelocityCommand(0.0, 0.0, "stop_lookahead")
@@ -423,11 +624,14 @@ class JunctionTurnTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "approach")
         state, command = step_junction_turn(
-            state, cue, self.follow, self.notes, self.send, cfg
+            state, cue, self.follow, self.notes, self.send, cfg,
+            progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "forward")
-        self.assertEqual(command.reason, "blind_forward")
-        self.assertEqual(self.sent, ["forward 200 50"])
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(command.omega_radps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(self.sent, [])
 
     def test_odom_handoff_requires_a_latched_junction_and_safe_follow(self) -> None:
         cfg = JunctionTurnConfig(turn_forward_m=0.20)
