@@ -1,14 +1,23 @@
 {
   "version": 1,
-  "camera": {"device": null, "width": 1280, "height": 720},
+  "camera": {
+    "device": null,
+    "width": 1280,
+    "height": 720
+  },
   "recognition": {
     "face_threshold": 0.5,
     "knife_threshold": 0.5,
     "confirm_frames": 3,
-    "side_timeout_s": 45.0,
+    "side_timeout_s": 45,
     "sample_interval_s": 1.2,
     "request_timeout_s": 3.0,
-    "roi": [0.0, 0.0, 1.0, 1.0]
+    "roi": [
+      0,
+      0,
+      1,
+      0.8
+    ]
   },
   "services": {
     "face": "http://127.0.0.1:20004/api/v1/recognize",
@@ -17,12 +26,19 @@
   "servo": {
     "binary": "build/servo/servo_cli",
     "config": "config/servo.yaml",
-    "angles": {"A": 0.0, "B": 180.0},
+    "angles": {
+      "A": 0.0,
+      "B": 180.0
+    },
     "initial_side": "A",
     "hardware_verified": false,
     "pwm_route": "PWM14_M0",
     "settle_s": 3.0,
     "ack_timeout_s": 2.0
   },
-  "web": {"host": "0.0.0.0", "port": 8081, "preview_fps": 10.0}
+  "web": {
+    "host": "0.0.0.0",
+    "port": 8081,
+    "preview_fps": 10.0
+  }
 }
