@@ -6,6 +6,9 @@
 
 #include <string>
 #include <vector>
+#include <sstream>
+#include "servo.h"
+#include "pwm/sysfs.h"
 
 #include "check.h"
 #include "fake_chip.h"
@@ -43,10 +46,35 @@ void TestCliSetsThenDisables() {
   CHECK(servo::test::ReadTrim(chip + "/pwm0/enable") == "0");
 }
 
+void TestPersistentTwoEndpointsAndClose() {
+  const std::string chip = servo::test::MakeFakeChip();
+  servo::SysfsPwm pwm(chip, 0);
+  servo::Servo servo(&pwm);
+  std::istringstream input("angle first 0\nangle second 180\nclose\n");
+  std::ostringstream output;
+  CHECK(servo::RunPersistent(&servo, input, output) == 0);
+  CHECK(output.str() == "SERVO_APPLIED first\nSERVO_APPLIED second\nSERVO_CLOSED\n");
+  CHECK(servo::test::ReadTrim(chip + "/pwm0/duty_cycle") == "2500000");
+  CHECK(servo::test::ReadTrim(chip + "/pwm0/enable") == "0");
+}
+
+void TestPersistentInvalidAngleAndEofClose() {
+  const std::string chip = servo::test::MakeFakeChip();
+  servo::SysfsPwm pwm(chip, 0);
+  servo::Servo servo(&pwm);
+  std::istringstream input("angle good 90\nangle bad 181\n");
+  std::ostringstream output;
+  CHECK(servo::RunPersistent(&servo, input, output) == 0);
+  CHECK(output.str().find("SERVO_FAIL bad pwm_write_failed") != std::string::npos);
+  CHECK(servo::test::ReadTrim(chip + "/pwm0/enable") == "0");
+}
+
 }  // namespace
 
 int main() {
   TestLoadConfig();
   TestCliSetsThenDisables();
+  TestPersistentTwoEndpointsAndClose();
+  TestPersistentInvalidAngleAndEofClose();
   return servo::test::Finish("app");
 }

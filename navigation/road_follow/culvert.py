@@ -168,7 +168,7 @@ class CulvertController:
         self.event("culvert_phase", phase=phase, before=before, now_s=now, **details)
 
     def begin(self, target, now, current_s, near_speed):
-        if self.owns or self.records.done(target.edge_id):
+        if self.owns or getattr(self.records, "handled", self.records.done)(target.edge_id):
             return False
         if not math.isfinite(near_speed) or near_speed <= 0:
             raise ValueError("涵洞进入速度必须大于零")
@@ -186,11 +186,15 @@ class CulvertController:
             # STOP is allowed regardless of the former control mode.
             self.send("stop")
             self.fault_reason = reason
+            if hasattr(self.executor, "cancel"):
+                self.executor.cancel(reason)
             if self.target:
                 self.records.fail(self.target.edge_id, reason)
             self._transition("fault", now, reason=reason)
 
     def cancel_for_obstacle(self, now):
+        if hasattr(self.executor, "cancel"):
+            self.executor.cancel("hard_obstacle")
         if self.target:
             self.records.fail(self.target.edge_id, "hard_obstacle")
         self.target = None
@@ -243,8 +247,13 @@ class CulvertController:
                     self.fault("stop_position_error", now)
                 else:
                     self.task_pose = self.history.samples[-1][2:5]
-                    self.executor.start(now, target)
-                    self._transition("task", now)
+                    try:
+                        self.executor.start(now, target)
+                    except Exception as exc:
+                        self.fault("task_start_failed", now)
+                        self.event("culvert_task_error", error=str(exc))
+                    else:
+                        self._transition("task", now)
             elif now - self.stop_ack_s >= cfg.settle_timeout_s:
                 self.fault("settle_timeout", now)
         elif self.phase == "task":
@@ -254,14 +263,22 @@ class CulvertController:
             if math.hypot(x - ox, y - oy) > cfg.stable_position_m or abs(yaw_delta) > cfg.stable_yaw_rad:
                 self.fault("moved_during_task", now)
             else:
-                result = self.executor.step(now)
+                try:
+                    result = self.executor.step(now)
+                except Exception as exc:
+                    self.event("culvert_task_error", error=str(exc))
+                    result = "failed"
                 if result == "failed":
                     self.fault("task_failed", now)
                 elif result == "done":
                     if abs(current_s - target.target_s_m) > cfg.stop_error_m:
                         self.fault("stop_position_error", now)
                     else:
-                        self.records.complete(target.edge_id, current_s - target.target_s_m)
+                        inspection = getattr(self.executor, "result", None)
+                        if inspection is not None:
+                            self.records.complete_inspection(target.edge_id, current_s-target.target_s_m, inspection)
+                        else:
+                            self.records.complete(target.edge_id, current_s-target.target_s_m)
                         self.deadline_s = now + cfg.reacquire_timeout_s
                         self.last_reacquire_s = frame_s
                         self._transition("reacquire", now)

@@ -67,7 +67,8 @@ def drain_notes(notes):
 
 
 class CulvertRuntime:
-    def __init__(self, mapping, config, calibration, *, nav_config, agent, send, event, root, prefix=None):
+    def __init__(self, mapping, config, calibration, *, nav_config, agent, send, event, root, prefix=None,
+                 inspection_settings=None, inspection_web=False):
         self.mapping, self.config, self.calibration = mapping, config, calibration
         self.nav_config, self.agent, self.console_event = nav_config, agent, event
         self.history = OdomHistory(config)
@@ -78,14 +79,31 @@ class CulvertRuntime:
         prefix = Path(prefix) if prefix else Path(root)/"data"/"road"/("culvert_"+datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         self.records = CulvertRecords(agent.graph, prefix)
         self.log = Path(str(prefix)+".culvert.jsonl").open("x", encoding="utf-8")
-        self.controller = CulvertController(config, self.history, send=send, event=self.event, records=self.records)
+        executor = None
+        try:
+            if inspection_settings is not None:
+                from road_follow.inspection import create_inspection
+                executor = create_inspection(inspection_settings, root, web_enabled=inspection_web, event=self.event)
+                if executor.web is not None:
+                    executor.web.map_status = self.records.snapshot
+            self.controller = CulvertController(config, self.history, send=send, event=self.event,
+                                                records=self.records, executor=executor)
+        except BaseException:
+            if executor is not None:
+                executor.close()
+            self.log.close()
+            raise
         self.last_key = None
         self.first_capture_s = None
         self.paused_s = None
         self.event("culvert_projection", **calibration.metadata)
 
     def close(self):
-        self.log.close()
+        try:
+            if hasattr(self.controller.executor, "close"):
+                self.controller.executor.close()
+        finally:
+            self.log.close()
 
     def edge_key(self):
         state = self.agent.state
@@ -135,7 +153,7 @@ class CulvertRuntime:
             edge = self.agent.graph.edges[key[0]]
             observation = self.perception.observe(culverts, image_shape=frame.shape, captured_s=captured_s,
                 now=now, frame_signature=zlib.crc32(frame), edge=edge, from_node=key[1], to_node=key[2],
-                points=points, history=self.history, already_done=self.records.done(edge.id))
+                points=points, history=self.history, already_done=self.records.handled(edge.id))
             if self.first_capture_s is None:
                 self.first_capture_s = captured_s
             self.event("culvert_observation", captured_s=captured_s, sequence=sequence, source=source,

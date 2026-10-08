@@ -2,6 +2,8 @@
 from dataclasses import asdict
 import json
 from pathlib import Path
+from copy import deepcopy
+import threading
 import xml.etree.ElementTree as ET
 
 
@@ -10,6 +12,7 @@ class CulvertRecords:
         self.graph = graph
         self.prefix = Path(prefix) if prefix is not None else None
         self.entries = {}
+        self.lock = threading.RLock()
         if self.prefix:
             self.prefix.parent.mkdir(parents=True, exist_ok=True)
             for suffix in (".culverts.json", ".culverts.svg"):
@@ -21,20 +24,38 @@ class CulvertRecords:
     def done(self, edge_id):
         return self.entries.get(edge_id, {}).get("status") == "done"
 
-    def discover(self, target):
-        self.entries[target.edge_id] = {**asdict(target), "status":"discovered", "stop_error_m":None}
-        self._save()
+    def handled(self, edge_id):
+        return self.entries.get(edge_id, {}).get("status") in ("done", "partial")
 
-    def fail(self, edge_id, reason):
-        if edge_id in self.entries:
-            self.entries[edge_id]["failure_reason"] = reason
-            if not self.done(edge_id):
-                self.entries[edge_id]["status"] = "failed"
+    def snapshot(self):
+        with self.lock:
+            return deepcopy(self.entries)
+
+    def discover(self, target):
+        with self.lock:
+            self.entries[target.edge_id] = {**asdict(target), "status":"discovered", "stop_error_m":None}
             self._save()
 
+    def fail(self, edge_id, reason):
+        with self.lock:
+            if edge_id in self.entries:
+                self.entries[edge_id]["failure_reason"] = reason
+                if not self.handled(edge_id):
+                    self.entries[edge_id]["status"] = "failed"
+                self._save()
+
     def complete(self, edge_id, error):
-        self.entries[edge_id].update(status="done", stop_error_m=error)
-        self._save()
+        with self.lock:
+            self.entries[edge_id].update(status="done", stop_error_m=error)
+            self._save()
+
+    def complete_inspection(self, edge_id, error, result):
+        if result.get("status") not in ("done", "partial") or len(result.get("sides", [])) != 2:
+            raise ValueError("两侧检查结果不完整")
+        with self.lock:
+            self.entries[edge_id].update(status=result["status"], stop_error_m=error,
+                                         inspection=deepcopy(result))
+            self._save()
 
     def _save(self):
         if self.prefix is None:
@@ -62,14 +83,17 @@ class CulvertRecords:
             if entry:
                 ratio = entry["canonical_offset_m"] / edge.length_m
                 x,y = x1+(x2-x1)*ratio, y1+(y2-y1)*ratio
-                color = {"discovered":"#d99b17","done":"#16834a","failed":"#c43838"}[entry["status"]]
+                color = {"discovered":"#d99b17","done":"#16834a","partial":"#8753a5","failed":"#c43838"}[entry["status"]]
                 ET.SubElement(root,"circle",cx=str(x),cy=str(y),r="9",fill=color)
-                ET.SubElement(root,"text",x=str(x+12),y=str(y-10),**{"font-size":"12"}).text=entry["status"]
+                label = entry["status"]
+                if "inspection" in entry:
+                    label += " " + " / ".join(s["direction"]+":"+(s.get("identity") or "unconfirmed") for s in entry["inspection"]["sides"])
+                ET.SubElement(root,"text",x=str(x+12),y=str(y-10),**{"font-size":"12"}).text=label
         for key,node in nodes.items():
             x,y = point(node)
             ET.SubElement(root,"circle",cx=str(x),cy=str(y),r="4",fill="#253b50")
             ET.SubElement(root,"text",x=str(x+7),y=str(y+16),**{"font-size":"12"}).text=key
-        ET.SubElement(root,"text",x="20",y="620",**{"font-size":"14"}).text="Culvert: yellow=discovered  green=done  red=failed (current task only)"
+        ET.SubElement(root,"text",x="20",y="620",**{"font-size":"14"}).text="Culvert: yellow=discovered green=done purple=partial red=failed (current task only)"
         svg = Path(str(self.prefix)+".culverts.svg")
         temp_svg = svg.with_suffix(".svg.tmp")
         ET.ElementTree(root).write(temp_svg, encoding="utf-8", xml_declaration=True)

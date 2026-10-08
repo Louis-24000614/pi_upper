@@ -203,6 +203,18 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 
 拓扑节点和边长位于 [`config/nav_topology.yaml`](config/nav_topology.yaml)，相关约定见[拓扑定位、纯视觉到点与可选 RFID 测试](docs/reference/navigation/topology-rfid-navigation.md)。
 
+## 涵洞两侧识别与调试
+
+在现有涵洞停车命令上显式启用 `--culvert-inspect`，停稳后使用测试1的人脸/刀具服务
+检查两侧；每侧连续 3 张不同帧、相似度 0.5，45 秒未确认则记录后继续。
+每个涵洞仅翻转一次，下次反向，不自动归位。`--inspection-web` 提供整次导航期间的
+局域网侧视预览、外层 ROI 框选与 JSON 持久化调参；默认端口 8081。
+
+当前舵机接线为 **PWM14_M0**。必须先明确配置侧视设备、核实实际 PWM 路由及安全端点；
+默认配置拒绝未确认硬件启动。本轮不发送语音命令，接口与音频编号边界见
+[涵洞两侧识别说明](docs/reference/perception/culvert-inspection.md)。
+代码、离线测试通过不代表实体识别、混合 NPU 负载或实车动作已经验收。
+
 ## 日志排查
 
 运行日志采用中文关键事件和限频状态摘要：状态发生变化时立即输出；状态不变时每 2 秒输出一次，避免停车、定距动作或 RFID 搜索期间逐帧刷屏。常用内容：

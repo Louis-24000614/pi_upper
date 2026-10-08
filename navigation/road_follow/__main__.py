@@ -417,6 +417,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--culvert-estimated-camera", action="store_true",
                         help="涵洞试运行：使用 --config 中原相机高度、倾角及内参估算距离，精度尚未实测验证")
     parser.add_argument("--culvert-config", type=Path, default=ROOT / "config" / "culvert.yaml")
+    parser.add_argument("--culvert-inspect", action="store_true", help="显式启用涵洞两侧识别和 PWM；替换 5 秒占位任务")
+    parser.add_argument("--inspection-config", type=Path, default=ROOT / "config" / "culvert_inspection.json")
+    parser.add_argument("--inspection-web", action="store_true", help="导航期间推流侧视相机并允许网页持久化调参")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
     parser.add_argument("--preview", type=Path, default=None, help="把第一帧 mask 叠加图写到这里")
@@ -451,6 +454,11 @@ def main(argv: list[str] | None = None) -> int:
         help="障碍物连续出现后，用负速度和视觉纠偏倒回上一个路口",
     )
     args = parser.parse_args(argv)
+    args.inspection_settings = None
+    if args.inspection_web and not args.culvert_inspect:
+        parser.error("--inspection-web 必须与 --culvert-inspect 一起使用")
+    if args.culvert_inspect and not args.culvert_stop:
+        parser.error("--culvert-inspect 必须与 --culvert-stop 一起使用")
     if args.npu_contexts is None:
         # 两个分割实例分别处理不同帧，核 0 留给目标检测；保留桌面与显式单核覆盖。
         args.npu_contexts = 2 if args.model.suffix == '.rknn' and args.npu_core_mask is None else 1
@@ -477,6 +485,14 @@ def main(argv: list[str] | None = None) -> int:
                 estimated_camera=args.culvert_estimated_camera, nav_config=nav_cfg)
             if args.culvert_estimated_camera:
                 print(f"涵洞估算试运行：{args.culvert_setup[2].metadata['camera']}；中央停车精度待实测确认", file=sys.stderr)
+        except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+            parser.error(str(exc))
+    if args.culvert_inspect:
+        from road_follow.inspection_config import Settings, preflight
+        try:
+            args.inspection_settings = Settings(args.inspection_config)
+            capture_cfg = _load_config(args.config).get("capture", {}) or {}
+            preflight(args.inspection_settings, ROOT, capture_cfg.get("device", "/dev/video0"))
         except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
             parser.error(str(exc))
     if needs_frequency_guard(args.model):
@@ -660,11 +676,14 @@ def _run(args, parser) -> int:
         from road_follow.culvert_runtime import CulvertRuntime, culvert_eligible
         try:
             culvert_runtime = CulvertRuntime(*args.culvert_setup, nav_config=cfg, agent=route_agent,
-                send=lambda line: write_velocity(bridge, line), event=_event, root=ROOT)
-        except (OSError, ValueError) as exc:
+                send=lambda line: write_velocity(bridge, line), event=_event, root=ROOT,
+                inspection_settings=args.inspection_settings, inspection_web=args.inspection_web)
+        except BaseException as exc:
             _event("错误", f"涵洞初始化失败：{exc}")
             _stop_bridge(bridge)
             _finish_resources(None, time.monotonic(), detector, None, segment_stream, segmenter, False)
+            if not isinstance(exc, (OSError, ValueError)):
+                raise
             return 1
 
     stopping = False
