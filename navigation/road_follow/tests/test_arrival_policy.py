@@ -29,7 +29,7 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.command = VelocityCommand(0.08, 0, "follow")
         self.reading = JunctionRead(KIND_CROSS, True, True, True, 0, 0.20, 0.50, 1.0, 0.85)
 
-    def policy(self, source="1_2", target="2_2", length=1.0):
+    def policy(self, source="1_2", target="2_2", length=0.97):
         return resolve_arrival_policy(self.graph, source, target, length, self.cfg, self.patrol_cfg)
 
     def send(self, line):
@@ -52,21 +52,31 @@ class ArrivalPolicyTest(unittest.TestCase):
         incoming = self.policy()
         self.assertEqual(incoming.mode, "visual_odom")
         self.assertEqual(incoming.handoff_progress_m, 0.80)
-        self.assertEqual(incoming.guard_progress_m, 0.95)
+        self.assertAlmostEqual(incoming.final_forward_m, 0.17)
+        self.assertEqual(incoming.guard_progress_m, 0.92)
+        self.assertEqual(incoming.align_timeout_s, 3.0)
+        self.assertEqual(incoming.align_stable_frames, 8)
         self.assertEqual(incoming.expected_openings, ("forward", "left", "right"))
-        reverse = self.policy("2_2", "1_2", 1.0)
+        reverse = self.policy("2_2", "1_2", 0.97)
         self.assertEqual(reverse.mode, "visual_end")
-        self.assertAlmostEqual(reverse.guard_progress_m, 0.95)
+        self.assertAlmostEqual(reverse.final_forward_m, 0.17)
+        self.assertAlmostEqual(reverse.guard_progress_m, 0.92)
+        self.assertEqual(reverse.align_timeout_s, 3.0)
         self.assertEqual(reverse.expected_openings, ("right",))
         left_corner = self.policy("0_J", "1_2", 0.4)
         self.assertEqual(left_corner.expected_openings, ("left",))
+        self.assertAlmostEqual(left_corner.final_forward_m, 0.20)
+        self.assertEqual(left_corner.align_timeout_s, 1.5)
+        self.assertEqual(left_corner.align_stable_frames, 5)
 
     def test_through_patrol_uses_edge_length_and_dead_end_still_watches_the_wall(self):
-        through = self.policy("2_1", "3_1", 1.0)
+        through = self.policy("2_1", "3_1", 0.97)
         self.assertEqual(through.mode, "visual_odom")
         self.assertEqual(through.expected_openings, ("forward", "left"))
         self.assertAlmostEqual(through.handoff_progress_m, 0.80)
-        self.assertAlmostEqual(through.guard_progress_m, 0.95)
+        self.assertAlmostEqual(through.final_forward_m, 0.17)
+        self.assertAlmostEqual(through.guard_progress_m, 0.92)
+        self.assertEqual(through.align_stable_frames, 8)
         dead_end = self.policy("3_2", "3_1", 1.0)
         self.assertEqual(dead_end.mode, "visual_end")
         self.assertNotIn("forward", dead_end.expected_openings)
@@ -75,7 +85,7 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy("2_1", "3_1", 1.0).mode, "visual_end")
 
     def test_through_patrol_hands_off_at_edge_length_while_the_band_stays_high(self):
-        policy = self.policy("2_1", "3_1", 1.0)
+        policy = self.policy("2_1", "3_1", 0.97)
         for _ in range(2):
             self.step(policy, 0.40, patrol=True)
         self.assertTrue(self.patrol_state.edge_latched)
@@ -90,7 +100,7 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertEqual(self.patrol_state.phase, "heading_hold")
 
     def test_through_patrol_guard_stops_when_the_edge_length_is_passed(self):
-        policy = self.policy("2_1", "3_1", 1.0)
+        policy = self.policy("2_1", "3_1", 0.97)
         for _ in range(2):
             self.step(policy, 0.40, patrol=True)
         cmd, trigger = self.step(policy, 0.95, patrol=True)
@@ -115,7 +125,7 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertEqual(cmd.v_mps, 0.0)
         self.assertEqual(self.sent, [])
         self.assertEqual(trigger, "")
-        for _ in range(4):
+        for _ in range(7):
             self.step(policy, 0.81, near_x_m=0.08, lane_heading_rad=0.0)
         cmd, trigger = self.step(policy, 0.81, near_x_m=0.08, lane_heading_rad=0.0)
         self.assertEqual(self.sent, [])

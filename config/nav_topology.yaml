@@ -81,8 +81,8 @@ arrival_overrides:
   - from_node: "1_2"
     to_node: "2_2"
     handoff_progress_m: 0.80
-    final_forward_m: 0.20
-    guard_progress_m: 0.95
+    final_forward_m: 0.17
+    guard_progress_m: 0.92
 
 edges:
   # --- 出发区：先直行 15 cm 到顶端丁字口，再原地转向左右巡逻点 ---
@@ -104,152 +104,152 @@ edges:
     length_m: 0.40
     bidirectional: true
 
-  # --- 格网边长 1.00 m。出发区三段不在此列：0_0—0_J 0.15 m，0_J—1_2 / 0_J—1_3 0.40 m ---
+  # --- 格网边长 0.97 m。出发区三段不在此列：0_0—0_J 0.15 m，0_J—1_2 / 0_J—1_3 0.40 m ---
   # --- 各行横边：左点 — 左十字 — 右十字 — 右点 ---
   # 第 1 行只有 0_J—1_2 和 0_J—1_3；0_0 只连接 0_J。
 
   - id: "2_1__2_2"
     u: "2_1"
     v: "2_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "2_2__2_3"
     u: "2_2"
     v: "2_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
     tunnel: true
   - id: "2_3__2_4"
     u: "2_3"
     v: "2_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   - id: "3_1__3_2"
     u: "3_1"
     v: "3_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "3_2__3_3"
     u: "3_2"
     v: "3_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
     tunnel: true
   - id: "3_3__3_4"
     u: "3_3"
     v: "3_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   - id: "4_1__4_2"
     u: "4_1"
     v: "4_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "4_2__4_3"
     u: "4_2"
     v: "4_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
     tunnel: true
   - id: "4_3__4_4"
     u: "4_3"
     v: "4_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   - id: "5_1__5_2"
     u: "5_1"
     v: "5_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "5_2__5_3"
     u: "5_2"
     v: "5_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
     tunnel: true
   - id: "5_3__5_4"
     u: "5_3"
     v: "5_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   # --- 左列竖边（从第 2 行开始，上面是顶棚而不是 1_1）---
   - id: "2_1__3_1"
     u: "2_1"
     v: "3_1"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "3_1__4_1"
     u: "3_1"
     v: "4_1"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "4_1__5_1"
     u: "4_1"
     v: "5_1"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   # --- 中间左十字列竖边 ---
   - id: "1_2__2_2"
     u: "1_2"
     v: "2_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "2_2__3_2"
     u: "2_2"
     v: "3_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "3_2__4_2"
     u: "3_2"
     v: "4_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "4_2__5_2"
     u: "4_2"
     v: "5_2"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   # --- 中间右十字列竖边 ---
   - id: "1_3__2_3"
     u: "1_3"
     v: "2_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "2_3__3_3"
     u: "2_3"
     v: "3_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "3_3__4_3"
     u: "3_3"
     v: "4_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "4_3__5_3"
     u: "4_3"
     v: "5_3"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
 
   # --- 右列竖边（从第 2 行开始）---
   - id: "2_4__3_4"
     u: "2_4"
     v: "3_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "3_4__4_4"
     u: "3_4"
     v: "4_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true
   - id: "4_4__5_4"
     u: "4_4"
     v: "5_4"
-    length_m: 1.00
+    length_m: 0.97
     bidirectional: true

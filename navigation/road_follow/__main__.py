@@ -25,7 +25,7 @@ from ipm_proto.junction import (
 from ipm_proto.temporal import temporal_from_mapping
 from road_follow.arrival_policy import resolve_arrival_policy, step_route_arrival
 from road_follow.backup import Backup, BackupConfig, EdgeProgress, step_backup
-from road_follow.control import VelocityCommand
+from road_follow.control import VelocityCommand, follow_config_from_mapping
 from road_follow.departure import handoff_arrival, handoff_entrance
 from road_follow.entrance import (
     EntranceDeparture,
@@ -91,6 +91,7 @@ COMMAND_NAMES = {
     "stop_road": "停车：未识别到道路",
     "stop_centerline": "停车：中心线点不足",
     "stop_lookahead": "停车：预瞄距离不足",
+    "stop_forward_strip": "停车：正前方窄带没有路",
     "stop_slow": "停车：视觉推理过慢",
     "stop_camera": "停车：相机读取失败",
     "stop_entrance_fail": "停车：出发动作失败",
@@ -201,7 +202,6 @@ def _event(category: str, message: str) -> None:
 
 def _status_signature(
     command: VelocityCommand,
-    opening: str,
     entrance: EntranceDeparture,
     junction_turn: JunctionTurn,
     rfid_turn: RfidTurn,
@@ -209,10 +209,9 @@ def _status_signature(
     backup: Backup,
     recovery_phase: str = "idle",
 ) -> tuple[object, ...]:
-    """只有这些关键状态改变时才立即打印，连续数值变化不触发刷屏。"""
+    """只有这些关键状态改变时才立即打印。路口分类抖动不算变化。"""
     return (
         command.reason,
-        opening,
         entrance.phase,
         junction_turn.phase,
         junction_turn.branch_latched,
@@ -282,7 +281,7 @@ def _watch_uart_notes(
     odom_samples: queue.Queue[tuple[float, float, float, float]] | None = None,
     rfid_enabled: bool = False,
 ) -> None:
-    """分发有限动作、里程计；仅 RFID 独立测试接收读卡事件。"""
+    """分发有限动作、里程计。读卡始终记日志；只有 RFID 独立测试才把卡号送进转弯状态机。"""
     stdout = proc.stdout
     if stdout is None:
         return
@@ -300,8 +299,6 @@ def _watch_uart_notes(
             except ValueError:
                 continue
         elif text.startswith("RFID_EVENT "):
-            if not rfid_enabled:
-                continue
             fields = text.split()
             if len(fields) != 3:
                 continue
@@ -310,8 +307,9 @@ def _watch_uart_notes(
                 generation = int(fields[2])
             except ValueError:
                 continue
-            _event("RFID", f"读到 {card_number} 号标签（第 {generation} 次）")
-            rfid_events.put((card_number, generation))
+            _event("RFID", f"{card_number} 号")
+            if rfid_enabled:
+                rfid_events.put((card_number, generation))
         elif text.startswith("RFID_REMOVED"):
             if rfid_enabled:
                 _event("RFID", "标签已移开")
@@ -401,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--npu-core-mask", type=int, choices=(1,2,4,3,7), default=None,
                         help="实验：单 context 的 NPU 核心位掩码；默认保持 0 号核")
     parser.add_argument("--npu-contexts", type=int, choices=(1,2,3), default=None,
-                        help="RKNN 默认三核各一 context、有序消费；ONNX 或指定单核时自动单 context")
+                        help="RKNN 默认两个独立 context，绑定核 1、2；核 0 留给目标检测；ONNX 或指定单核时自动单 context")
     parser.add_argument("--latest-frame", action="store_true",
                         help="实验：独立读取线程只保留一帧，空闲 context 取最新画面")
     parser.add_argument("--latest-result-order", choices=("completion", "capture"),
@@ -415,6 +413,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heap-trim-interval", type=float, default=60 if sys.platform == 'linux' else 0,
                         help="Linux 默认每 60 秒 GC 并归还空闲堆页；0 关闭")
     parser.add_argument("--drive", action="store_true", help="打开串口并使能，按寻线速度行驶")
+    parser.add_argument("--culvert-stop", action="store_true", help="启用已标定的涵洞中央停车与本次任务去重")
+    parser.add_argument("--culvert-estimated-camera", action="store_true",
+                        help="涵洞试运行：使用 --config 中原相机高度、倾角及内参估算距离，精度尚未实测验证")
+    parser.add_argument("--culvert-config", type=Path, default=ROOT / "config" / "culvert.yaml")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
     parser.add_argument("--preview", type=Path, default=None, help="把第一帧 mask 叠加图写到这里")
@@ -450,13 +452,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if args.npu_contexts is None:
-        # 保留桌面 ONNX 和旧单核覆盖用法，不让默认三路破坏已有调试入口。
-        args.npu_contexts = 3 if args.model.suffix == '.rknn' and args.npu_core_mask is None else 1
+        # 两个分割实例分别处理不同帧，核 0 留给目标检测；保留桌面与显式单核覆盖。
+        args.npu_contexts = 2 if args.model.suffix == '.rknn' and args.npu_core_mask is None else 1
     if args.async_record_video is None:
         args.async_record_video = args.record_video is not None
     for value in (args.opencv_threads, args.blas_threads):
         if value is not None and value < 1:
             parser.error("CPU 线程数必须大于零")
+    if args.culvert_estimated_camera and not args.culvert_stop:
+        parser.error("--culvert-estimated-camera 必须与 --culvert-stop 同时使用")
+    if args.culvert_stop:
+        # 在频率保护、模型初始化、相机或串口打开之前拒绝不完整配置。
+        if not args.drive or not (args.left_at_junction or args.turn_at_junction):
+            parser.error("--culvert-stop 需要 --drive 和拓扑任务；离线观察请用 road_follow.culvert_replay")
+        if args.turn_at_rfid or args.backup_on_obstacle:
+            parser.error("涵洞停车只用于拓扑任务，不能组合独立RFID/倒车测试")
+        from road_follow.culvert_runtime import validate_culvert_config
+        try:
+            nav_cfg = _load_config(args.config)
+            camera = nav_cfg.get("capture", {}) or {}
+            args.culvert_setup = validate_culvert_config(args.culvert_config, ROOT, drive=True,
+                image_size=(int(camera.get("width",1280)),int(camera.get("height",720))),
+                near_speed=float((nav_cfg.get("follow") or {}).get("near_mps",.05)),
+                estimated_camera=args.culvert_estimated_camera, nav_config=nav_cfg)
+            if args.culvert_estimated_camera:
+                print(f"涵洞估算试运行：{args.culvert_setup[2].metadata['camera']}；中央停车精度待实测确认", file=sys.stderr)
+        except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+            parser.error(str(exc))
     if needs_frequency_guard(args.model):
         # 父保护进程先保存频率，再以当前普通用户重启同一入口；退出/中断负责恢复。
         # 不把密码写入程序，也不要求额外优化参数。sudo 按现有系统策略认证。
@@ -513,7 +535,8 @@ def _run(args, parser) -> int:
     if args.npu_contexts > 1 or args.latest_frame:
         stream_type = LatestSegmentStream if args.latest_frame else OrderedSegmentStream
         stream_options = {"result_order": args.latest_result_order} if args.latest_frame else {}
-        segment_stream = stream_type(args.model, cores=(1,2,4)[:args.npu_contexts],
+        cores = (2,4) if args.npu_contexts == 2 else (1,2,4)[:args.npu_contexts]
+        segment_stream = stream_type(args.model, cores=cores,
             correct_nms=args.correct_nms, reuse_buffers=args.fps_opt, backend=args.rknn_backend,
             factory=RoadSegmenter,
             **stream_options)
@@ -593,7 +616,7 @@ def _run(args, parser) -> int:
         from vision.obstacle.detect import ObstacleDetector
 
         try:
-            detector = ObstacleDetector(ROOT / "config" / "obstacle.yaml", root=ROOT)
+            detector = ObstacleDetector(args.culvert_config if args.culvert_stop else ROOT / "config" / "obstacle.yaml", root=ROOT)
             obstacle_judge = HardBlockageJudge(
                 hard_block_config_from_mapping(detector.config)
             )
@@ -632,6 +655,18 @@ def _run(args, parser) -> int:
                 segmenter.close()
             return 1
 
+    culvert_runtime = None
+    if args.culvert_stop:
+        from road_follow.culvert_runtime import CulvertRuntime, culvert_eligible
+        try:
+            culvert_runtime = CulvertRuntime(*args.culvert_setup, nav_config=cfg, agent=route_agent,
+                send=lambda line: write_velocity(bridge, line), event=_event, root=ROOT)
+        except (OSError, ValueError) as exc:
+            _event("错误", f"涵洞初始化失败：{exc}")
+            _stop_bridge(bridge)
+            _finish_resources(None, time.monotonic(), detector, None, segment_stream, segmenter, False)
+            return 1
+
     stopping = False
     last_status_signature: tuple[object, ...] | None = None
     last_status_s = 0.0
@@ -640,8 +675,18 @@ def _run(args, parser) -> int:
     last_expired_warning_s = 0.0
     recording_started = False
 
+    def _reset_progress():
+        if culvert_runtime is not None and culvert_runtime.controller.owns:
+            culvert_runtime.controller.fault("progress_reset_during_culvert", time.monotonic())
+            return
+        progress.reset()
+        if culvert_runtime is not None:
+            culvert_runtime.reset_progress_origin()
+
     def _record_frame(frame, captured_s):
         nonlocal recording_started
+        if culvert_runtime is not None and culvert_runtime.first_capture_s is None:
+            culvert_runtime.first_capture_s = captured_s
         if recorder is not None:
             recorder.write(frame, captured_s)
             if not recording_started:
@@ -665,6 +710,15 @@ def _run(args, parser) -> int:
                         else VideoRecorder(record_path))
         capture = _open_camera(device, width, height)
         while not stopping:
+            culvert_outcome = None
+            if culvert_runtime is not None:
+                while True:
+                    try:
+                        sample = odom_samples.get_nowait()
+                    except queue.Empty:
+                        break
+                    progress.update(*sample)
+                    culvert_runtime.record_odom(sample, progress)
             if segment_stream is not None:
                 try:
                     result = segment_stream.read(capture, _record_frame)
@@ -674,22 +728,28 @@ def _run(args, parser) -> int:
                     ok, frame = False, None
             else:
                 ok, frame = capture.read()
+                captured_s = time.monotonic()
             if not ok:
+                if culvert_runtime is not None:
+                    culvert_runtime.unsafe_frame(time.monotonic(), "camera_failed")
                 now_s = time.monotonic()
                 if now_s - last_camera_warning_s >= STATUS_LOG_INTERVAL_S:
                     _event("警告", "相机读取失败，已发送停车指令")
                     last_camera_warning_s = now_s
-                if bridge is not None and not write_velocity(bridge, "0.000 0.000"):
+                if bridge is not None and not (culvert_runtime is not None and culvert_runtime.controller.owns) and not write_velocity(bridge, "0.000 0.000"):
                     break
                 time.sleep(0.05)
                 continue
 
             if segment_stream is not None:
                 mask, infer_s = result.mask, result.inference_s
+                captured_s = result.captured_s
                 if time.monotonic()-result.captured_s > SLOW_S:
+                    if culvert_runtime is not None:
+                        culvert_runtime.unsafe_frame(time.monotonic(), "stale_frame")
                     # 超时帧不能更新 EMA/路口证据。普通循迹发零速度；有限动作保持
                     # 原互斥规则，由下位机完成既定动作，不重复发送动作或中途覆盖。
-                    if bridge is not None and not _finite_action_active(
+                    if bridge is not None and not (culvert_runtime is not None and culvert_runtime.controller.owns) and not _finite_action_active(
                             entrance, junction_turn, rfid_turn, rfid_arrival, backup,
                             obstacle_recovery):
                         if not write_velocity(bridge, "0.000 0.000"):
@@ -703,7 +763,7 @@ def _run(args, parser) -> int:
                         break
                     continue
             else:
-                _record_frame(frame, time.monotonic())
+                _record_frame(frame, captured_s)
                 t0 = time.monotonic()
                 mask = segmenter.mask(frame)
                 infer_s = time.monotonic() - t0
@@ -724,6 +784,8 @@ def _run(args, parser) -> int:
                     except queue.Empty:
                         break
                     progress.update(*sample)
+                    if culvert_runtime is not None:
+                        culvert_runtime.record_odom(sample, progress)
             if turn_side is not None and bridge is not None and entrance.phase != "done":
                 entrance_before = entrance.phase
                 entrance, command = step_entrance_departure(
@@ -765,9 +827,11 @@ def _run(args, parser) -> int:
                         f"转向={DIRECTION_NAMES.get(entrance.turn_side, '未确定')}",
                     )
                     if entrance.phase == "done":
-                        progress.reset()
+                        _reset_progress()
             elif turn_side is not None and bridge is not None:
                 recovery_owns = False
+                detections = []
+                culvert_frame_stale = False
                 if obstacle_recovery is not None and route_agent is not None:
                     armed = detection_armed(
                         entrance_done=True,
@@ -775,11 +839,23 @@ def _run(args, parser) -> int:
                         junction_phase=junction_turn.phase,
                         recovery_phase=obstacle_recovery.phase,
                     )
+                    if culvert_runtime is not None:
+                        armed = armed or culvert_runtime.controller.owns or culvert_eligible(
+                            entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival)
                     confirmed = False
                     if armed and detector is not None and obstacle_judge is not None:
                         detections, _elapsed_ms = detector.detect(frame)
-                        observation = obstacle_judge.update(detections, frame.shape)
-                        confirmed = observation.just_confirmed
+                        if culvert_runtime is not None:
+                            culvert_frame_stale = time.monotonic()-captured_s > SLOW_S
+                            if culvert_frame_stale:
+                                culvert_runtime.unsafe_frame(time.monotonic(), "stale_after_yolo")
+                                command = VelocityCommand(0,0,"stop_slow")
+                            hard_detections, _, _ = culvert_runtime.split(detections)
+                        else:
+                            hard_detections = detections
+                        if not culvert_frame_stale:
+                            observation = obstacle_judge.update(hard_detections, frame.shape)
+                            confirmed = observation.just_confirmed
                         if confirmed:
                             _event(
                                 "障碍物",
@@ -788,6 +864,8 @@ def _run(args, parser) -> int:
                                 f"路段进度={progress.s_m:.2f} m",
                             )
                     if obstacle_recovery.phase != "idle" or confirmed:
+                        if confirmed and culvert_runtime is not None:
+                            culvert_runtime.cancel_for_obstacle(time.monotonic(), action_notes)
                         recovery_owns = True
                         recovery_before = obstacle_recovery.phase
                         obstacle_recovery, backup, outcome = step_obstacle_route(
@@ -813,7 +891,7 @@ def _run(args, parser) -> int:
                             if segment_stream is not None:
                                 segment_stream.invalidate()
                         if outcome.reset_progress:
-                            progress.reset()
+                            _reset_progress()
                             if obstacle_judge is not None:
                                 obstacle_judge.reset()
                             junction_turn.phase = "follow"
@@ -844,6 +922,28 @@ def _run(args, parser) -> int:
                                 f"{_phase_name(obstacle_recovery.phase)}；"
                                 f"路段进度={progress.s_m:.2f} m{turn}",
                             )
+                if not recovery_owns and culvert_runtime is not None:
+                    # 补入YOLO期间到达的ODOM，再按采集时刻插值，不拿处理结束的里程加旧距离。
+                    while True:
+                        try:
+                            sample = odom_samples.get_nowait()
+                        except queue.Empty:
+                            break
+                        progress.update(*sample)
+                        culvert_runtime.record_odom(sample, progress)
+                    culvert_outcome = culvert_runtime.update(detections=detections, frame=frame, mask=mask,
+                        captured_s=captured_s, sequence=result.sequence if segment_stream is not None else frames,
+                        source=result.source if segment_stream is not None else 0,
+                        now=time.monotonic(), progress=progress, command=command,
+                        eligible=culvert_eligible(entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival),
+                        notes=action_notes)
+                    command = culvert_outcome.command
+                    recovery_owns = culvert_outcome.owns or culvert_frame_stale or time.monotonic()-captured_s > SLOW_S
+                    if not culvert_outcome.owns and recovery_owns:
+                        command = VelocityCommand(0,0,"stop_slow")
+                    if culvert_outcome.resumed:
+                        culvert_runtime.resume(junction_turn, rfid_arrival, junctions, smoother, segment_stream)
+                        junctions = JunctionTracker()
                 if not recovery_owns:
                     previous_phase = junction_turn.phase
                     visual_command = command
@@ -901,6 +1001,9 @@ def _run(args, parser) -> int:
                             near_x_m=follow_diag.near_x_m,
                             lane_heading_rad=follow_diag.lane_heading_rad,
                             yaw_rad=progress.yaw_rad,
+                            centerline_points=follow_diag.centerline_points,
+                            road_pixels=follow_diag.bev_road_pixels,
+                            follow=follow_config_from_mapping(cfg),
                         )
                         if trigger and (
                             trigger not in ("guard", "odom_stale")
@@ -965,7 +1068,7 @@ def _run(args, parser) -> int:
                                     if route_agent is not None and finished_at
                                     else None
                                 )
-                                progress.reset()
+                                _reset_progress()
                                 backup = Backup()
                                 if type(finished).__name__ == "Stop":
                                     junction_turn.phase = "fault"
@@ -982,7 +1085,7 @@ def _run(args, parser) -> int:
                                 )
                     if previous_phase != "follow" and junction_turn.phase == "follow":
                         # 贯通点和尽头点确认到达后都清沿边里程，下一条从 0 计。
-                        progress.reset()
+                        _reset_progress()
                     if junction_turn.phase != previous_phase:
                         _event(
                             "路口",
@@ -1022,7 +1125,7 @@ def _run(args, parser) -> int:
                     except queue.Empty:
                         pass
                     else:
-                        progress.reset()
+                        _reset_progress()
                 while True:
                     try:
                         sample = odom_samples.get_nowait()
@@ -1064,23 +1167,8 @@ def _run(args, parser) -> int:
                 junctions = JunctionTracker()
                 command = VelocityCommand(0.0, 0.0, "reacquire")
             line = f"{command.v_mps:.3f} {command.omega_radps:.3f}"
-            y_range = (
-                "不可见"
-                if follow_diag.y_min_m is None or follow_diag.y_max_m is None
-                else f"{follow_diag.y_min_m:.2f}～{follow_diag.y_max_m:.2f} m"
-            )
-            directions = "、".join(
-                name
-                for enabled, name in (
-                    (junction.forward, "前"),
-                    (junction.left, "左"),
-                    (junction.right, "右"),
-                )
-                if enabled
-            ) or "无"
             status_signature = _status_signature(
                 command,
-                opening,
                 entrance,
                 junction_turn,
                 rfid_turn,
@@ -1096,39 +1184,22 @@ def _run(args, parser) -> int:
                 details = [
                     COMMAND_NAMES.get(command.reason, command.reason),
                     f"速度={command.v_mps:.3f} m/s",
-                    f"角速度={command.omega_radps:.3f} rad/s",
-                    f"道路={follow_diag.bev_road_pixels} px",
-                    f"中心线={follow_diag.output_points} 点",
-                    f"可见距离={y_range}",
+                    f"路段进度={progress.s_m:.2f} m",
                     f"路口={JUNCTION_NAMES.get(opening, opening)}",
-                    f"开口={directions}",
                 ]
-                if turn_side is not None:
-                    details.extend(
-                        (
-                            f"检测带={junction.forward_band_ratio:.2f}",
-                            f"支路={'已锁存' if junction_turn.branch_latched else '未锁存'}",
-                            f"路段进度={progress.s_m:.2f} m",
-                        )
-                    )
-                if obstacle_recovery is not None and obstacle_recovery.phase != "idle":
-                    details.append(f"障碍回退={_phase_name(obstacle_recovery.phase)}")
-                if rfid_arrival.edge_latched or rfid_arrival.phase != "follow":
-                    details.extend(
-                        (
-                            f"巡检点={_phase_name(rfid_arrival.phase)}",
-                            f"巡检侧边={_rfid_edge_name(rfid_arrival)}",
-                        )
-                    )
-                details.append(f"推理={infer_s * 1000:.0f} ms")
                 _event("状态", "；".join(details))
                 last_status_signature = status_signature
                 last_status_s = now_s
-            if _finite_action_active(entrance, junction_turn, rfid_turn, rfid_arrival, backup, obstacle_recovery):
+            if (culvert_outcome is not None and not culvert_outcome.send_velocity) or _finite_action_active(entrance, junction_turn, rfid_turn, rfid_arrival, backup, obstacle_recovery):
                 frames += 1
                 if args.frames and frames >= args.frames:
                     break
                 continue
+            if culvert_runtime is not None and time.monotonic()-captured_s > SLOW_S:
+                culvert_runtime.unsafe_frame(time.monotonic(), "stale_before_velocity")
+                if culvert_runtime.controller.owns:
+                    continue
+                line = "0.000 0.000"
             if bridge is not None and not write_velocity(bridge, line):
                 if not stopping:
                     _event("错误", "串口进程已退出，速度指令没有发出去")
@@ -1149,6 +1220,8 @@ def _run(args, parser) -> int:
     finally:
         recording_stopped_s = time.monotonic()
         _stop_bridge(bridge)
+        if culvert_runtime is not None:
+            culvert_runtime.close()
         try:
             # latest 的录像回调运行在读取线程；先结束生产者再关闭编码器。
             if args.latest_frame and segment_stream is not None:

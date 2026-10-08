@@ -1,0 +1,70 @@
+# 仅 --culvert-stop 使用。类别由最近录像离线推理 + 目视核对，不影响旧模型。
+model:
+  id: trainV2_train-6_yolo11_3
+  path: models/obstacle/trainV2_train-6_yolo11_3.rknn
+  sha256: 0db021de9ea4fa3905be21f810f5f37d04ca26de7bf913c11fad9bfb4ccaf0b5
+  verify_sha256: true
+  task: detect
+  core_mask: "0"  # 此处填核编号；加载器转成位掩码 1，SEG 使用核 1、2。
+  input: {name: images, size: 640, layout: nhwc, dtype: uint8, color: rgb}
+  classes:
+    count: 4
+    # 以下为录像观察名称，不声称是原始训练 data.yaml 的名称。
+    names: [禁入标牌, 施工警示牌, 栅栏, 涵洞]
+  outputs:
+    strides: [8, 16, 32]
+    reg_max: 16
+    order: [box, cls, score_sum]
+    heads:
+      - {box: [1, 64, 80, 80], cls: [1, 4, 80, 80], score_sum: [1, 1, 80, 80]}
+      - {box: [1, 64, 40, 40], cls: [1, 4, 40, 40], score_sum: [1, 1, 40, 40]}
+      - {box: [1, 64, 20, 20], cls: [1, 4, 20, 20], score_sum: [1, 1, 20, 20]}
+detect: {camera_role: navigation_camera, conf_thres: 0.45, iou_thres: 0.5, class_aware_nms: true}
+hard_block:
+  confirm_frames: 3
+  min_score: 0.45
+  min_box_area_ratio: 0.002
+  min_bottom_ratio: 0.35
+  corridor_left_ratio: 0.20
+  corridor_right_ratio: 0.80
+  min_corridor_overlap: 0.30
+  min_track_iou: 0.20
+class_mapping:
+  verified: true
+  model_sha256: 0db021de9ea4fa3905be21f810f5f37d04ca26de7bf913c11fad9bfb4ccaf0b5
+  culvert_class_id: 3
+  hard_block_class_ids: [0, 1, 2]
+  evidence_video: drive_20261007_152745_625318.avi
+  evidence_seconds: {"0": [115, 270, 275], "1": [75], "2": [115, 120], "3": [45, 100, 190]}
+culvert:
+  length_m: 0.27
+  # 临时试验值：入口、中央、出口沿行驶方向统一提前 10 cm；尚未实车验收。
+  entry_distance_bias_m: -0.10
+  min_distance_m: 0.20
+  max_distance_m: 0.60
+  max_lateral_m: 0.10
+  max_heading_rad: 0.10
+  confirm_frames: 3
+  position_spread_m: 0.05
+  max_frame_age_s: 0.20
+  odom_timeout_s: 0.50
+  stop_margin_m: 0.01
+  stop_error_m: 0.05
+  stop_ack_timeout_s: 2.0
+  settle_s: 2.0
+  settle_timeout_s: 5.0
+  stable_position_m: 0.01
+  stable_yaw_rad: 0.03
+  task_s: 5.0
+  enter_extra_s: 2.0
+  reacquire_frames: 3
+  reacquire_timeout_s: 5.0
+calibration:
+  # 未提供现场四点数据；默认拒绝自动停车。
+  # 仅显式传 --culvert-estimated-camera 时，用 --config 的原相机参数试运行；不修改 verified。
+  verified: false
+  ground_contact_verified: false
+  origin: navigation_camera_ground_projection
+  image_size: [1280, 720]
+  image_points: []
+  ground_points_m: []

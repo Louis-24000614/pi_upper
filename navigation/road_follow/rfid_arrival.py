@@ -7,11 +7,15 @@ import queue
 import time
 from dataclasses import dataclass
 
+from road_follow.backup import near_lane_heading
 from road_follow.control import (
+    FollowConfig,
     VelocityCommand,
     align_ready_to_creep,
     align_settle_command,
     alignment_command,
+    command_from_forward_strip,
+    forward_strip_points,
     heading_hold_command,
     heading_needs_align,
 )
@@ -30,6 +34,7 @@ class RfidArrivalConfig:
     align_timeout_s: float = 1.5
     align_gain: float = 4.0
     align_max_abs_omega: float = 0.5
+    forward_strip_abs_x_m: float = 0.12
 
 
 @dataclass
@@ -95,6 +100,9 @@ def step_rfid_arrival(
     now_s: float | None = None,
     progress_m: float | None = None,
     odom_valid: bool = True,
+    centerline_points=None,
+    road_pixels: int = 800,
+    follow: FollowConfig | None = None,
 ) -> tuple[RfidArrival, VelocityCommand]:
     """侧边端头只负责锁存；正前方检测带稳定无 road mask 后才直走一次。"""
     received = _drain_notes(notes)
@@ -129,14 +137,11 @@ def step_rfid_arrival(
         return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
     if state.phase == "align":
-        if (
-            arrival_mode == "visual_end"
-            and forward_band_ratio > cfg.road_end_band_max_ratio
-        ):
-            state.phase = "follow"
-            state.road_end_missing_frames = 0
-            state.align_stable = 0
-            return state, visual
+        # 摆正开始后做完。检测带回升只说明车头转进了旁边的路，不能退回循迹。
+        _, lane_heading_rad = _forward_strip_view(
+            state, cfg, visual, lane_heading_rad, arrival_mode,
+            centerline_points, road_pixels, follow,
+        )
         ready, state.align_stable = align_ready_to_creep(
             lane_heading_rad,
             state.align_started_s,
@@ -149,7 +154,7 @@ def step_rfid_arrival(
         if not ready:
             return state, align_settle_command(
                 lane_heading_rad,
-                cfg.align_gain,
+                _visual_end_align_gain(cfg, follow, arrival_mode),
                 cfg.align_max_abs_omega,
                 cfg.align_max_abs_heading_rad,
             )
@@ -168,6 +173,10 @@ def step_rfid_arrival(
             state.edge_left_seen = False
             state.edge_right_seen = False
 
+    visual, lane_heading_rad = _forward_strip_view(
+        state, cfg, visual, lane_heading_rad, arrival_mode,
+        centerline_points, road_pixels, follow,
+    )
     if state.edge_latched and arrival_mode == "visual_end":
         if forward_band_ratio <= cfg.road_end_band_max_ratio:
             state.road_end_missing_frames += 1
@@ -192,9 +201,55 @@ def step_rfid_arrival(
         state.align_started_s = current_s
         state.align_stable = 0
         return state, alignment_command(
-            float(lane_heading_rad), cfg.align_gain, cfg.align_max_abs_omega
+            float(lane_heading_rad),
+            _visual_end_align_gain(cfg, follow, arrival_mode),
+            cfg.align_max_abs_omega,
         )
     return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+
+def _visual_end_align_gain(
+    cfg: RfidArrivalConfig,
+    follow: FollowConfig | None,
+    arrival_mode: str,
+) -> float:
+    """尽头点摆正用循迹增益的四分之一；其它交接仍用原来的摆正增益。"""
+    if (
+        arrival_mode == "visual_end"
+        and follow is not None
+        and math.isfinite(follow.steering_gain)
+    ):
+        return max(0.0, float(follow.steering_gain)) / 4.0
+    return cfg.align_gain
+
+
+def _forward_strip_view(
+    state: RfidArrival,
+    cfg: RfidArrivalConfig,
+    visual: VelocityCommand,
+    lane_heading_rad: float | None,
+    arrival_mode: str,
+    centerline_points,
+    road_pixels: int,
+    follow: FollowConfig | None,
+) -> tuple[VelocityCommand, float | None]:
+    """尽头点锁住侧边后，方向和循迹都只看车头正前方窄带。"""
+    if (
+        arrival_mode != "visual_end"
+        or not state.edge_latched
+        or centerline_points is None
+    ):
+        return visual, lane_heading_rad
+    follow_cfg = follow or FollowConfig()
+    strip_command = command_from_forward_strip(
+        centerline_points, road_pixels, follow_cfg, cfg.forward_strip_abs_x_m
+    )
+    heading = near_lane_heading(
+        forward_strip_points(centerline_points, cfg.forward_strip_abs_x_m)
+    )
+    if state.phase != "follow":
+        return visual, heading
+    return strip_command, heading
 
 
 def _measured_progress(progress_m: float | None, odom_valid: bool) -> float | None:

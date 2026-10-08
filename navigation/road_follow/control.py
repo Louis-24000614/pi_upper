@@ -112,6 +112,33 @@ def align_settle_command(
     return alignment_command(error, gain, max_abs_omega)
 
 
+def forward_strip_points(
+    points: Sequence[Point2D],
+    max_abs_x_m: float,
+) -> list[Point2D]:
+    """只保留车头正前方窄带内的中心线，侧面开口里的点不算。"""
+    kept: list[Point2D] = []
+    limit = abs(float(max_abs_x_m))
+    for x, y in points:
+        xf, yf = float(x), float(y)
+        if math.isfinite(xf) and math.isfinite(yf) and abs(xf) <= limit:
+            kept.append((xf, yf))
+    return kept
+
+
+def command_from_forward_strip(
+    points: Sequence[Point2D],
+    road_pixels: int,
+    cfg: FollowConfig,
+    max_abs_x_m: float,
+) -> VelocityCommand:
+    """窄带里没有足够的点就停车，不再朝侧面开口转向。"""
+    kept = forward_strip_points(points, max_abs_x_m)
+    if len(kept) < cfg.min_points:
+        return VelocityCommand(0.0, 0.0, "stop_forward_strip")
+    return command_from_centerline(kept, road_pixels, cfg)
+
+
 def alignment_command(near_x_m: float, gain: float, max_abs_omega: float) -> VelocityCommand:
     """原地摆正：线速度为 0，近处中心线在右侧时角速度为负。"""
     omega = -float(gain) * float(near_x_m)

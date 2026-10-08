@@ -27,7 +27,9 @@ bev:
   m_per_px: 0.01
 
 capture:
-  device: /dev/video0
+  # udev 规则 config/udev/99-nav-camera.rules 把 DHZJ 导航相机固定到这个名字。
+  # 不要写 /dev/videoN：再插入识别相机后，编号会换。
+  device: /dev/nav_camera
   width: 1280
   height: 720
 

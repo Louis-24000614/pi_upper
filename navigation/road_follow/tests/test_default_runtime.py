@@ -70,9 +70,51 @@ class DefaultRuntimeTest(unittest.TestCase):
         self.assertTrue(all(s.options['correct_nms'] and s.options['reuse_buffers'] for s in segments))
         return segments
 
-    def test_plain_rknn_start_uses_three_private_ordered_workers(self):
+    def test_plain_rknn_start_reserves_core_zero_for_detection(self):
         segments = self.run_default()
-        self.assertEqual([s.options['core_mask'] for s in segments],[1,2,4])
+        self.assertEqual([s.options['core_mask'] for s in segments],[2,4])
+
+    def assert_detector_core_zero(self, config_name):
+        import hashlib
+        from road_follow import segment
+        from vision.obstacle import detect
+        class Runtime:
+            NPU_CORE_0, NPU_CORE_1, NPU_CORE_2, NPU_CORE_0_1_2 = 1, 2, 4, 7
+            def __init__(self, **kwargs):
+                self.selected = None
+            def load_rknn(self, path):
+                return 0
+            def init_runtime(self, *, core_mask):
+                self.selected = core_mask
+                return 0
+            def release(self):
+                pass
+        with tempfile.TemporaryDirectory() as folder:
+            model = Path(folder)/'fake.rknn'
+            model.write_bytes(b'fake model for loader test')
+            detector = detect.ObstacleDetector(entry.ROOT/'config'/config_name, root=entry.ROOT)
+            detector.model_path = model
+            detector.config['model']['sha256'] = hashlib.sha256(model.read_bytes()).hexdigest()
+            segs = [segment.RoadSegmenter(model, core_mask=mask) for mask in (2,4)]
+            try:
+                with patch.object(segment,'_import_rknn_lite',return_value=Runtime), \
+                        patch.object(detect,'_import_rknn_lite',return_value=Runtime):
+                    seg_masks = [s._load().selected for s in segs]
+                    detection_mask = detector._load().selected
+                self.assertEqual(seg_masks,[Runtime.NPU_CORE_1,Runtime.NPU_CORE_2])
+                self.assertEqual(detection_mask,Runtime.NPU_CORE_0)
+                self.assertTrue(all(detection_mask & mask == 0 for mask in seg_masks))
+            finally:
+                detector.close()
+                for seg in segs:
+                    seg.close()
+
+    def test_obstacle_config_effective_core_is_zero(self):
+        self.assert_detector_core_zero('obstacle.yaml')
+
+    @unittest.skipUnless((entry.ROOT/'config/culvert.yaml').is_file(),'涵洞配置仅在板端集成目录提供')
+    def test_culvert_config_effective_core_is_zero(self):
+        self.assert_detector_core_zero('culvert.yaml')
 
     def test_record_request_automatically_uses_async_encoder(self):
         self.run_default(extra=('record',))

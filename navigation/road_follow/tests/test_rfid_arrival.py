@@ -5,7 +5,7 @@ from __future__ import annotations
 import queue
 import unittest
 
-from road_follow.control import VelocityCommand
+from road_follow.control import FollowConfig, VelocityCommand
 from road_follow.rfid_arrival import RfidArrival, RfidArrivalConfig, step_rfid_arrival
 
 
@@ -43,6 +43,9 @@ class RfidArrivalTest(unittest.TestCase):
         now_s=None,
         progress_m=0.80,
         odom_valid=True,
+        centerline_points=None,
+        road_pixels=800,
+        follow=None,
     ):
         return step_rfid_arrival(
             state,
@@ -62,6 +65,9 @@ class RfidArrivalTest(unittest.TestCase):
             now_s=now_s,
             progress_m=progress_m,
             odom_valid=odom_valid,
+            centerline_points=centerline_points,
+            road_pixels=road_pixels,
+            follow=follow,
         )
 
     def test_saves_left_right_and_both_edge_directions(self) -> None:
@@ -238,19 +244,95 @@ class RfidArrivalTest(unittest.TestCase):
         self.assertAlmostEqual(command.v_mps, 0.05)
         self.assertEqual(self.sent, [])
 
-    def test_visual_end_align_returns_to_follow_when_the_band_recovers(self) -> None:
+    def test_visual_end_align_uses_quarter_the_follow_gain(self) -> None:
+        follow = FollowConfig(steering_gain=2.0)
+        state, command = self.step(
+            RfidArrival(edge_latched=True, road_end_missing_frames=2),
+            forward_band_ratio=0.0,
+            lane_heading_rad=0.20,
+            now_s=5.0,
+            follow=follow,
+        )
+        self.assertEqual(state.phase, "align")
+        self.assertAlmostEqual(command.omega_radps, -0.10)
+        state, command = self.step(
+            state,
+            forward_band_ratio=0.0,
+            lane_heading_rad=0.20,
+            now_s=5.1,
+            follow=follow,
+        )
+        self.assertEqual(state.phase, "align")
+        self.assertEqual(command.reason, "align")
+        self.assertAlmostEqual(command.omega_radps, -0.10)
+
+    def test_visual_end_align_finishes_when_the_band_returns(self) -> None:
         state = RfidArrival(edge_latched=True, road_end_missing_frames=2)
-        state, _ = self.step(
+        state, command = self.step(
             state, forward_band_ratio=0.06, lane_heading_rad=0.20, now_s=5.0
         )
         self.assertEqual(state.phase, "align")
+        self.assertLess(command.omega_radps, 0.0)
         state, command = self.step(
             state, forward_band_ratio=0.29, lane_heading_rad=0.20, now_s=5.1
         )
-        self.assertEqual(state.phase, "follow")
-        self.assertEqual(command.reason, "follow")
-        self.assertEqual(state.road_end_missing_frames, 0)
+        self.assertEqual(state.phase, "align")
+        self.assertEqual(command.reason, "align")
+        self.assertLess(command.omega_radps, 0.0)
+        state, command = self.step(
+            state, forward_band_ratio=0.29, lane_heading_rad=0.20, now_s=6.6
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
         self.assertEqual(self.sent, [])
+
+    def test_latched_visual_end_follows_the_forward_strip_not_the_opening(self) -> None:
+        ahead = [(0.0, 0.20 + i * 0.01) for i in range(8)]
+        opening = [(-0.35, 0.30 + i * 0.02) for i in range(6)]
+        chasing = VelocityCommand(0.08, 0.30, "follow")
+        follow = FollowConfig(
+            lookahead_m=0.30, min_lookahead_m=0.24, near_mps=0.05, min_points=8,
+        )
+        state, command = self.step(
+            RfidArrival(edge_latched=True),
+            visual=chasing,
+            forward_band_ratio=0.80,
+            centerline_points=ahead + opening,
+            follow=follow,
+        )
+        self.assertEqual(state.phase, "follow")
+        self.assertEqual(command.reason, "follow_near")
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertAlmostEqual(command.omega_radps, 0.0)
+        self.assertNotEqual(command.omega_radps, chasing.omega_radps)
+
+    def test_latched_visual_end_stops_when_only_the_opening_is_visible(self) -> None:
+        opening = [(-0.35, 0.20 + i * 0.03) for i in range(10)]
+        chasing = VelocityCommand(0.08, 0.30, "follow")
+        state, command = self.step(
+            RfidArrival(edge_latched=True),
+            visual=chasing,
+            forward_band_ratio=0.80,
+            centerline_points=opening,
+        )
+        self.assertEqual(state.phase, "follow")
+        self.assertEqual(command.reason, "stop_forward_strip")
+        self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+
+    def test_latched_visual_end_does_not_align_into_the_opening(self) -> None:
+        ahead = [(0.0, 0.20 + i * 0.02) for i in range(8)]
+        opening = [(-0.40, 0.40 + i * 0.02) for i in range(4)]
+        state, command = self.step(
+            RfidArrival(edge_latched=True, road_end_missing_frames=2),
+            visual=VelocityCommand(0.08, 0.50, "follow"),
+            forward_band_ratio=0.0,
+            lane_heading_rad=-0.50,
+            centerline_points=ahead + opening,
+            now_s=5.0,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertNotEqual(command.omega_radps, 0.50)
 
     def test_visual_end_align_still_creeps_when_the_band_stays_low(self) -> None:
         state = RfidArrival(edge_latched=True, road_end_missing_frames=2)

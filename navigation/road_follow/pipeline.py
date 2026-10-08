@@ -31,6 +31,7 @@ class FollowDiagnostics:
     lookahead_covered: bool
     near_x_m: float | None
     lane_heading_rad: float | None = None
+    centerline_points: tuple = ()
 
 
 def make_ipm(cfg: dict, image_shape: tuple[int, ...]) -> Ipm:
@@ -120,6 +121,7 @@ def command_from_mask_with_diagnostics(
         lookahead_covered=lookahead_covered,
         near_x_m=near_lane_x(points),
         lane_heading_rad=near_lane_heading(points),
+        centerline_points=tuple(points),
     )
     return command, diagnostics
 

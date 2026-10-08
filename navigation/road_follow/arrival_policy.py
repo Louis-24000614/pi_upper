@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from road_follow.rfid_arrival import RfidArrivalConfig
 
 
+# 格网边视觉仍交接到 0.80 m，摆正更久后再走剩余 0.17 m。短边不使用这组数。
+_GRID_LENGTH_M = 0.97
+_GRID_HANDOFF_M = 0.80
+_GRID_FINAL_M = 0.17
+_GRID_ALIGN_TIMEOUT_S = 3.0
+_GRID_ALIGN_STABLE_FRAMES = 8
+
+
 @dataclass(frozen=True)
 class ArrivalPolicy:
     from_node: str
@@ -28,6 +36,8 @@ class ArrivalPolicy:
     final_forward_m: float
     guard_progress_m: float
     expected_openings: tuple[str, ...]
+    align_timeout_s: float
+    align_stable_frames: int
 
 
 def _exit_directions(graph, from_node: str, to_node: str) -> set[str]:
@@ -77,13 +87,23 @@ def resolve_arrival_policy(
         else "visual_end"
     )
     mode = setting("mode", default_mode)
+    grid = math.isfinite(edge_length_m) and math.isclose(
+        edge_length_m, _GRID_LENGTH_M, abs_tol=1e-4
+    )
     final = setting(
         "final_forward_m",
-        patrol_cfg.step_distance_mm / 1000.0
-        if target.role == "patrol_slot" else junction_cfg.turn_forward_m,
+        _GRID_FINAL_M if grid else (
+            patrol_cfg.step_distance_mm / 1000.0
+            if target.role == "patrol_slot" else junction_cfg.turn_forward_m
+        ),
     )
-    handoff = setting("handoff_progress_m", max(0.0, edge_length_m - final))
+    handoff = setting(
+        "handoff_progress_m",
+        _GRID_HANDOFF_M if grid else max(0.0, edge_length_m - final),
+    )
     guard = setting("guard_progress_m", max(0.0, edge_length_m - junction_cfg.odom_stop_margin_m))
+    align_timeout_s = _GRID_ALIGN_TIMEOUT_S if grid else junction_cfg.align_timeout_s
+    align_stable_frames = _GRID_ALIGN_STABLE_FRAMES if grid else junction_cfg.align_stable_frames
     if (
         not math.isfinite(edge_length_m) or edge_length_m <= 0
         or not all(math.isfinite(v) for v in (handoff, final, guard))
@@ -95,6 +115,7 @@ def resolve_arrival_policy(
     return ArrivalPolicy(
         from_node, to_node, mode, handoff, final, guard,
         tuple(side for side in ("forward", "left", "right") if side in directions),
+        align_timeout_s, align_stable_frames,
     )
 
 
@@ -116,6 +137,9 @@ def step_route_arrival(
     near_x_m=None,
     lane_heading_rad=None,
     yaw_rad=None,
+    centerline_points=None,
+    road_pixels=800,
+    follow=None,
 ):
     """共享地图选择和 ODOM 新鲜度检查。贯通点按边长保护，尽头巡检点仍等墙。"""
     approaching = state.phase in ("follow", "approach") and (
@@ -156,7 +180,11 @@ def step_route_arrival(
         )
         patrol_state, command = step_rfid_arrival(
             patrol_state, None, command, notes, send,
-            replace(patrol_cfg, step_distance_mm=final_mm),
+            replace(
+                patrol_cfg, step_distance_mm=final_mm,
+                align_timeout_s=policy.align_timeout_s,
+                align_stable_frames=policy.align_stable_frames,
+            ),
             edge_left_visible=side_valid and "left" in policy.expected_openings and reading.left,
             edge_right_visible=side_valid and "right" in policy.expected_openings and reading.right,
             forward_band_ratio=reading.forward_band_ratio,
@@ -169,11 +197,18 @@ def step_route_arrival(
             yaw_rad=yaw_rad,
             progress_m=progress_m,
             odom_valid=odom_valid,
+            centerline_points=centerline_points,
+            road_pixels=road_pixels,
+            follow=follow,
         )
         source = policy.mode if before in ("follow", "align") and patrol_state.phase == "heading_hold" else ""
         return state, patrol_state, command, source
 
-    cfg = replace(junction_cfg, turn_forward_m=policy.final_forward_m)
+    cfg = replace(
+        junction_cfg, turn_forward_m=policy.final_forward_m,
+        align_timeout_s=policy.align_timeout_s,
+        align_stable_frames=policy.align_stable_frames,
+    )
     cue = side_cue
     if policy.mode == "visual_odom":
         if (
