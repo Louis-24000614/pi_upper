@@ -29,6 +29,12 @@ target_link_libraries(uart_vel PRIVATE uart_link)
 add_executable(uart_turn app/turn_main.cpp)
 target_link_libraries(uart_turn PRIVATE uart_link)
 
+add_executable(uart_speak app/speak_main.cpp)
+target_link_libraries(uart_speak PRIVATE uart_link)
+
+add_executable(uart_rfid_speak app/rfid_speak_main.cpp)
+target_link_libraries(uart_rfid_speak PRIVATE uart_link)
+
 if(BUILD_TESTS)
   add_subdirectory(tests)
 endif()

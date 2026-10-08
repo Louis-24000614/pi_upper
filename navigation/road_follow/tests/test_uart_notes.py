@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import queue
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stderr
 from types import SimpleNamespace
 
@@ -15,11 +16,12 @@ class UartNoteDispatchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.actions: queue.Queue[str] = queue.Queue()
         self.rfid: queue.Queue[tuple[int, int]] = queue.Queue()
-        self.odom: queue.Queue[tuple[float, float, float]] = queue.Queue()
+        self.odom: queue.Queue[tuple[float, float, float, float]] = queue.Queue()
 
-    def run_notes(self, lines: list[str], *, rfid_enabled: bool) -> None:
+    def run_notes(self, lines: list[str], *, rfid_enabled: bool) -> str:
         proc = SimpleNamespace(stdout=iter(lines))
-        with redirect_stderr(io.StringIO()):
+        err = io.StringIO()
+        with redirect_stderr(err), patch("road_follow.__main__.time.monotonic", return_value=10.0):
             _watch_uart_notes(
                 proc,
                 self.actions,
@@ -27,9 +29,10 @@ class UartNoteDispatchTest(unittest.TestCase):
                 self.odom,
                 rfid_enabled,
             )
+        return err.getvalue()
 
-    def test_topology_mode_discards_rfid_but_keeps_motion_and_odom(self) -> None:
-        self.run_notes(
+    def test_topology_mode_logs_rfid_without_dispatching_it(self) -> None:
+        log = self.run_notes(
             [
                 "RFID_EVENT 7 3\n",
                 "RFID_REMOVED\n",
@@ -39,9 +42,10 @@ class UartNoteDispatchTest(unittest.TestCase):
             rfid_enabled=False,
         )
 
+        self.assertIn("[RFID] 7 号", log)
         self.assertTrue(self.rfid.empty())
         self.assertEqual(self.actions.get_nowait(), "FORWARD_DONE")
-        self.assertEqual(self.odom.get_nowait(), (1.0, 2.0, -0.5))
+        self.assertEqual(self.odom.get_nowait(), (1.0, 2.0, -0.5, 10.0))
 
     def test_explicit_rfid_mode_dispatches_card_event(self) -> None:
         self.run_notes(["RFID_EVENT 7 3\n"], rfid_enabled=True)

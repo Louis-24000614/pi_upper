@@ -1,0 +1,2 @@
+# DHZJ / ZSKJ 导航相机（1bcf:28c4）。index 0 是采集节点，index 1 是无画面的附属节点。
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="1bcf", ATTRS{idProduct}=="28c4", ATTR{index}=="0", SYMLINK+="nav_camera", TAG+="uaccess"

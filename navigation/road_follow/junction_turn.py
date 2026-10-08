@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import math
 import queue
 import time
 from dataclasses import dataclass, field
 
-from road_follow.control import VelocityCommand, is_visual_follow
+from road_follow.control import (
+    VelocityCommand,
+    align_ready_to_creep,
+    align_settle_command,
+    alignment_command,
+    heading_hold_command,
+    heading_needs_align,
+    is_visual_follow,
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,12 @@ class JunctionTurnConfig:
     branch_vote_window: int = 8
     branch_vote_min: int = 2
     odom_stop_margin_m: float = 0.05
+    align_max_abs_x_m: float = 0.02
+    align_max_abs_heading_rad: float = 0.05
+    align_stable_frames: int = 5
+    align_timeout_s: float = 1.5
+    align_gain: float = 4.0
+    align_max_abs_omega: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -54,9 +69,10 @@ class JunctionCue:
 
 @dataclass
 class JunctionTurn:
-    """follow → approach → forward → arrived → stopping/stopped → departure。
+    """follow → approach → align → heading_hold → arrived → stopping/stopped → departure。
 
-    ``arrived`` 只表示定距走完。左转、右转、直行或倒车要等调用方另行提交。
+    ``heading_hold`` 锁住摆正结束时的里程计航向，用沿边里程走完最后一段。
+    ``arrived`` 只表示这段走完。左转、右转、直行或倒车要等调用方另行提交。
     """
 
     phase: str = "follow"
@@ -71,6 +87,10 @@ class JunctionTurn:
     stop_started_s: float = 0.0
     stop_settle_s: float = 2.0
     branch_votes: list[bool] = field(default_factory=list)
+    align_started_s: float = 0.0
+    align_stable: int = 0
+    hold_start_m: float | None = None
+    hold_yaw_rad: float | None = None
 
 
 def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
@@ -143,7 +163,7 @@ def road_end_turn_cue(
     approach_latched: bool = False,
     forward_band_ratio: float = 0.0,
 ) -> JunctionCue:
-    """支路已锁存且正前方检测带的 road mask 消失时，才允许最后 20 cm。"""
+    """支路已锁存且正前方检测带的 road mask 消失时，才允许最后一次定距。"""
     stopped_after_latch = approach_latched and command.reason == "stop_lookahead"
     max_end_y = (
         cfg.road_end_stopped_max_y_m
@@ -168,6 +188,89 @@ def road_end_turn_cue(
     return JunctionCue(True, side, cfg.blind_forward_m, "road_end")
 
 
+def odom_handoff_turn_cue(
+    *,
+    side: str,
+    progress_m: float,
+    edge_length_m: float,
+    target_role: str,
+    state: JunctionTurn,
+    command: VelocityCommand,
+    cfg: JunctionTurnConfig,
+) -> JunctionCue:
+    """十字路口前方道路不会消失，用边末端 ODOM 触发最后定距交接。"""
+    handoff_distance_m = cfg.turn_forward_m
+    trigger_m = max(0.0, edge_length_m - handoff_distance_m)
+    detected = (
+        target_role == "junction"
+        and state.phase in ("follow", "approach")
+        and state.branch_latched
+        and side in ("left", "right")
+        and is_visual_follow(command)
+        and progress_m + 1e-6 >= trigger_m
+        and progress_m < edge_length_m
+    )
+    if not detected:
+        return JunctionCue(False)
+    return JunctionCue(True, side, handoff_distance_m, "odom_handoff")
+
+
+def _measured_progress(progress_m: float | None, odom_valid: bool) -> float | None:
+    if not odom_valid or progress_m is None:
+        return None
+    value = float(progress_m)
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _remember_hold_yaw(state: JunctionTurn, yaw_rad: float | None) -> None:
+    if state.hold_yaw_rad is not None or yaw_rad is None or not math.isfinite(yaw_rad):
+        return
+    state.hold_yaw_rad = float(yaw_rad)
+
+
+def _step_heading_hold(
+    state: JunctionTurn,
+    progress_m: float | None,
+    odom_valid: bool,
+    cfg: JunctionTurnConfig,
+    yaw_rad: float | None = None,
+) -> tuple[JunctionTurn, VelocityCommand]:
+    """锁存摆正后的航向，只按里程结束；里程失效时停车且不重记起点和航向。"""
+    measured = _measured_progress(progress_m, odom_valid)
+    if measured is None:
+        return state, VelocityCommand(0.0, 0.0, "stop_odom_stale")
+    if state.hold_start_m is None:
+        state.hold_start_m = measured
+    _remember_hold_yaw(state, yaw_rad)
+    if measured + 1e-6 >= state.hold_start_m + cfg.turn_forward_m:
+        state.phase = "arrived"
+        state.departure = "none"
+        return state, VelocityCommand(0.0, 0.0, "arrived")
+    return state, heading_hold_command(
+        cfg.forward_speed_mmps / 1000.0,
+        yaw_rad,
+        state.hold_yaw_rad,
+        cfg.align_gain,
+        cfg.align_max_abs_omega,
+    )
+
+
+def _begin_heading_hold(
+    state: JunctionTurn,
+    progress_m: float | None,
+    odom_valid: bool,
+    cfg: JunctionTurnConfig,
+    yaw_rad: float | None = None,
+) -> tuple[JunctionTurn, VelocityCommand]:
+    """道路方向对齐后，记下当时航向，走完最后一段。"""
+    state.phase = "heading_hold"
+    state.hold_start_m = None
+    state.hold_yaw_rad = None
+    return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+
 def step_junction_turn(
     state: JunctionTurn,
     cue: JunctionCue,
@@ -176,6 +279,11 @@ def step_junction_turn(
     send,
     cfg: JunctionTurnConfig,
     now_s: float | None = None,
+    near_x_m: float | None = None,
+    progress_m: float | None = None,
+    odom_valid: bool = True,
+    lane_heading_rad: float | None = None,
+    yaw_rad: float | None = None,
 ) -> tuple[JunctionTurn, VelocityCommand]:
     """在视觉仍可靠时交接；有限动作期间不再发送 ``CMD_VEL``。"""
     current_s = time.monotonic() if now_s is None else now_s
@@ -235,10 +343,10 @@ def step_junction_turn(
             # 一旦确认过支路就保持到本节点动作结束；墙体遮挡不能清掉锁存。
             state.approach_age += 1
 
-        if cue.source == "road_end":
+        if cue.source in ("road_end", "odom_handoff"):
             distance_ok = cue.distance_m is not None and cue.distance_m > 0.0
         elif cue.source == "side_branch":
-            # 侧边角只用来确认「这是路口」，不再直接触发最后 20 cm。
+            # 侧边角只用来确认「这是路口」，不再直接触发最后一次定距。
             distance_ok = False
         else:
             distance_ok = (
@@ -269,7 +377,7 @@ def step_junction_turn(
         if state.arm < required_frames:
             return state, command
 
-        # 路口交接后统一只前进 20 cm，避免视觉距离抖动改变转弯起点。
+        # 路口交接后统一只前进配置的定距，避免视觉距离抖动改变转弯起点。
         forward_mm = int(round(cfg.turn_forward_m * 1000.0))
         if not (cfg.min_forward_mm <= forward_mm <= cfg.max_forward_mm):
             state.arm = 0
@@ -278,10 +386,36 @@ def step_junction_turn(
         state.side = cue.side
         state.forward_mm = forward_mm
         state.arm = 0
-        if send(f"forward {forward_mm} {cfg.forward_speed_mmps}"):
-            state.phase = "forward"
-            return state, VelocityCommand(0.0, 0.0, "blind_forward")
-        return state, VelocityCommand(0.0, 0.0, "forward_wait")
+        if heading_needs_align(lane_heading_rad, cfg.align_max_abs_heading_rad):
+            state.phase = "align"
+            state.align_started_s = current_s
+            state.align_stable = 0
+            return state, alignment_command(
+                float(lane_heading_rad), cfg.align_gain, cfg.align_max_abs_omega
+            )
+        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+    if state.phase == "align":
+        ready, state.align_stable = align_ready_to_creep(
+            lane_heading_rad,
+            state.align_started_s,
+            state.align_stable,
+            current_s,
+            max_abs_x_m=cfg.align_max_abs_heading_rad,
+            required_frames=cfg.align_stable_frames,
+            timeout_s=cfg.align_timeout_s,
+        )
+        if not ready:
+            return state, align_settle_command(
+                lane_heading_rad,
+                cfg.align_gain,
+                cfg.align_max_abs_omega,
+                cfg.align_max_abs_heading_rad,
+            )
+        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+
+    if state.phase == "heading_hold":
+        return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
     if state.phase in ("forward", "stopping", "turning"):
         return state, VelocityCommand(0.0, 0.0, state.phase)
@@ -366,8 +500,6 @@ def should_stop_at_expected_junction(
 ) -> bool:
     """视觉全程没确认路口时，ODOM 到拓扑节点只停车，不允许盲转。"""
     if target_role != "junction" or state.phase not in ("follow", "approach"):
-        return False
-    if state.branch_latched:
         return False
     threshold = max(0.0, edge_length_m - cfg.odom_stop_margin_m)
     return progress_m >= threshold

@@ -12,7 +12,7 @@ from ipm_proto.ipm import BevConfig, CameraExtrinsics, Ipm
 from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from_mapping
 from ipm_proto.temporal import CenterlineSmoother
 
-from road_follow.backup import near_lane_x
+from road_follow.backup import near_lane_heading, near_lane_x
 from road_follow.control import FollowConfig, VelocityCommand, command_from_centerline, follow_config_from_mapping
 
 
@@ -30,6 +30,8 @@ class FollowDiagnostics:
     y_max_m: float | None
     lookahead_covered: bool
     near_x_m: float | None
+    lane_heading_rad: float | None = None
+    centerline_points: tuple = ()
 
 
 def make_ipm(cfg: dict, image_shape: tuple[int, ...]) -> Ipm:
@@ -118,6 +120,8 @@ def command_from_mask_with_diagnostics(
         y_max_m=max(ys) if ys else None,
         lookahead_covered=lookahead_covered,
         near_x_m=near_lane_x(points),
+        lane_heading_rad=near_lane_heading(points),
+        centerline_points=tuple(points),
     )
     return command, diagnostics
 

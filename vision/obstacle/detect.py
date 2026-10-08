@@ -70,6 +70,8 @@ class ObstacleDetector:
         self.names = [str(name) for name in names if str(name)]
         self.conf_thres = float(self.config["detect"]["conf_thres"])
         self.iou_thres = float(self.config["detect"]["iou_thres"])
+        self.class_aware_nms = bool(self.config["detect"].get("class_aware_nms", False))
+        self.verify_sha256 = bool(model.get("verify_sha256", False))
         self._core_mask = str(model.get("core_mask", "1"))
         self._rknn = None
 
@@ -91,6 +93,11 @@ class ObstacleDetector:
             return self._rknn
         if not self.model_path.is_file():
             raise FileNotFoundError(f"找不到障碍物权重: {self.model_path}")
+        if self.verify_sha256:
+            import hashlib
+            actual = hashlib.sha256(self.model_path.read_bytes()).hexdigest()
+            if actual != str(self.config["model"].get("sha256", "")).lower():
+                raise ValueError("检测模型 SHA256 与已核实配置不一致")
         RKNNLite = _import_rknn_lite()
         masks = {
             "0": RKNNLite.NPU_CORE_0,
@@ -126,7 +133,7 @@ class ObstacleDetector:
         detections = []
         if len(scores) == 0:
             return detections, elapsed_ms
-        keep = cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), self.conf_thres, self.iou_thres)
+        keep = self._nms(boxes, scores, classes)
         if keep is None or len(keep) == 0:
             return detections, elapsed_ms
         for index in np.array(keep).reshape(-1):
@@ -145,7 +152,24 @@ class ObstacleDetector:
             )
         return detections, elapsed_ms
 
+    def _nms(self, boxes, scores, classes):
+        if not self.class_aware_nms:
+            # 保留旧配置的行为；涵洞模式明确启用正确的按类 NMS。
+            return cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), self.conf_thres, self.iou_thres)
+        xywh = boxes.copy()
+        xywh[:, 2:] -= xywh[:, :2]
+        keep = []
+        for class_id in np.unique(classes):
+            indices = np.flatnonzero(classes == class_id)
+            selected = cv2.dnn.NMSBoxes(xywh[indices].tolist(), scores[indices].tolist(),
+                                       self.conf_thres, self.iou_thres)
+            if selected is not None:
+                keep.extend(indices[np.asarray(selected, dtype=int).reshape(-1)].tolist())
+        return np.asarray(sorted(keep, key=lambda i: -scores[i]), dtype=int)
+
     def _decode(self, outputs):
+        if self.class_aware_nms and len(outputs) != 9:
+            raise ValueError("涵洞模型必须返回三个尺度的9个检测头")
         boxes, scores, classes = [], [], []
         for scale in range(3):
             raw_box = np.squeeze(outputs[scale * 3]).astype(np.float32)
@@ -154,6 +178,8 @@ class ObstacleDetector:
                 raw_box = np.transpose(raw_box, (2, 0, 1))
             if raw_cls.shape[0] != self.class_count and raw_cls.shape[-1] == self.class_count:
                 raw_cls = np.transpose(raw_cls, (2, 0, 1))
+            if self.class_aware_nms and (raw_box.shape[0] != 64 or raw_cls.shape[0] != self.class_count):
+                raise ValueError("模型类别/DFL通道与配置不一致")
             class_id = raw_cls.argmax(axis=0)
             class_score = raw_cls.max(axis=0)
             xyxy = _dfl_boxes(raw_box, self.input_size)

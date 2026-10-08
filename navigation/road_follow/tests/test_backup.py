@@ -8,6 +8,7 @@ from road_follow.backup import (
     Backup,
     BackupConfig,
     EdgeProgress,
+    near_lane_heading,
     near_lane_x,
     reverse_omega,
     step_backup,
@@ -73,16 +74,21 @@ class BackupTest(unittest.TestCase):
     def test_odometry_progress_completes_backup(self) -> None:
         state, _ = self.step(Backup(), triggered=True, progress_s_m=0.55)
         state, command = self.step(
-            state, near_x_m=-0.02, progress_s_m=0.14, now_s=3.0
+            state, near_x_m=-0.02, progress_s_m=0.0, now_s=3.0
         )
         self.assertEqual(state.phase, "done")
         self.assertEqual(command.reason, "backup_done")
         self.assertEqual(command.v_mps, 0.0)
 
     def test_trigger_at_entry_needs_no_reverse(self) -> None:
-        state, command = self.step(Backup(), triggered=True, progress_s_m=0.10)
+        state, command = self.step(Backup(), triggered=True, progress_s_m=0.0)
         self.assertEqual(state.phase, "done")
         self.assertEqual(command.reason, "backup_done_at_entry")
+
+    def test_short_of_the_junction_still_reverses(self) -> None:
+        state, command = self.step(Backup(), triggered=True, progress_s_m=0.10)
+        self.assertEqual(state.phase, "backing")
+        self.assertEqual(command.reason, "stop_backup")
 
     def test_missing_vision_stops_then_faults(self) -> None:
         state, _ = self.step(Backup(), triggered=True)
@@ -97,8 +103,8 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(command.reason, "stop_backup_road_lost")
 
     def test_timeout_and_distance_limit_do_not_fake_arrival(self) -> None:
-        state, _ = self.step(Backup(), triggered=True, progress_s_m=0.90)
-        state, command = self.step(state, progress_s_m=0.19, now_s=2.0)
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=1.30)
+        state, command = self.step(state, progress_s_m=0.10, now_s=2.0)
         self.assertEqual(state.phase, "fault")
         self.assertEqual(command.reason, "stop_backup_distance_limit")
 
@@ -106,6 +112,13 @@ class BackupTest(unittest.TestCase):
         state, command = self.step(state, progress_s_m=0.40, now_s=6.0)
         self.assertEqual(state.phase, "fault")
         self.assertEqual(command.reason, "stop_backup_timeout")
+
+    def test_near_lane_heading_uses_direction_not_offset(self) -> None:
+        parallel = [(0.06, 0.22), (0.06, 0.28), (0.06, 0.34)]
+        self.assertAlmostEqual(near_lane_heading(parallel), 0.0)
+        slanted = [(0.00, 0.22), (0.04, 0.28), (0.08, 0.34)]
+        self.assertGreater(near_lane_heading(slanted), 0.2)
+        self.assertIsNone(near_lane_heading([(0.02, 0.22)]))
 
     def test_idle_preserves_forward_command(self) -> None:
         state, command = self.step(Backup(), triggered=False)

@@ -2,7 +2,8 @@
 /// 速度环桥：从标准输入读 ``v w``，经会话层发 CMD_VEL。
 ///
 /// 寻线进程把每一帧的速度写进来。本进程负责 HELLO / ARM、50 Hz 节拍，
-/// 以及退出时发零速并 DISARM。标准输入关闭或收到 SIGINT/SIGTERM 时停车。
+/// 以及退出时发零速并 DISARM。读到 1～12 号新标签时播报同编号语音。
+/// 标准输入关闭或收到 SIGINT/SIGTERM 时停车。
 
 #include <fcntl.h>
 #include <signal.h>
@@ -28,6 +29,26 @@ namespace {
 std::atomic<bool> g_stop{false};
 
 void OnSignal(int) { g_stop.store(true); }
+
+const char* AckName(uart::AckResult result) {
+  switch (result) {
+    case uart::AckResult::kOk:
+      return "ACK_OK";
+    case uart::AckResult::kDeniedState:
+      return "DENIED_STATE";
+    case uart::AckResult::kDeniedConfig:
+      return "DENIED_CONFIG";
+    case uart::AckResult::kBadPayload:
+      return "BAD_PAYLOAD";
+    case uart::AckResult::kUnsupported:
+      return "UNSUPPORTED";
+    case uart::AckResult::kBusy:
+      return "BUSY";
+    case uart::AckResult::kVersionMismatch:
+      return "VERSION_MISMATCH";
+  }
+  return "UNKNOWN";
+}
 
 enum class FiniteAction { kNone, kForward, kBackward, kTurn, kStopping };
 
@@ -80,6 +101,7 @@ int main(int argc, char** argv) {
   bool announced = false;
   uint64_t last_status_ms = 0;
   uint64_t last_odom_ms = 0;
+  uint64_t seen_odom_us = 0;
   FiniteAction finite_action = FiniteAction::kNone;
   uint64_t action_ms = 0;
   uint64_t action_timeout_ms = 20000;
@@ -89,6 +111,11 @@ int main(int argc, char** argv) {
   uint8_t last_rfid_present = 0;
   uint8_t last_rfid_number = 0;
   uint8_t last_rfid_generation = 0;
+  uint8_t queued_speech = 0;
+  bool speak_inflight = false;
+  uint8_t speaking_id = 0;
+  uint32_t speak_timeouts_before = 0;
+  std::string deferred_motion;
 
   while (!g_stop.load()) {
     session.Poll();
@@ -109,6 +136,7 @@ int main(int argc, char** argv) {
       if (valid && (!have_rfid_state || rfid.generation != last_rfid_generation)) {
         std::cout << "RFID_EVENT " << static_cast<unsigned>(rfid.card_number) << " "
                   << static_cast<unsigned>(rfid.generation) << "\n" << std::flush;
+        queued_speech = rfid.card_number;
       } else if (have_rfid_state && last_rfid_present != 0 && rfid.present == 0) {
         std::cout << "RFID_REMOVED " << static_cast<unsigned>(last_rfid_generation) << "\n"
                   << std::flush;
@@ -121,6 +149,121 @@ int main(int argc, char** argv) {
       last_rfid_present = rfid.present;
       last_rfid_number = rfid.card_number;
       last_rfid_generation = rfid.generation;
+    }
+
+    if (speak_inflight && !session.request_pending()) {
+      speak_inflight = false;
+      const uart::Telemetry& spoken = session.telemetry();
+      if (spoken.has_ack &&
+          spoken.last_ack.request_type == static_cast<uint8_t>(uart::MsgType::kSpeakAudio)) {
+        if (spoken.last_ack.result == uart::AckResult::kOk) {
+          std::cerr << "[播报] " << static_cast<unsigned>(speaking_id) << " 号\n";
+        } else {
+          std::cerr << "[播报] " << static_cast<unsigned>(speaking_id)
+                    << " 号失败: " << AckName(spoken.last_ack.result) << "\n";
+        }
+      } else if (session.diagnostics().ack_timeouts > speak_timeouts_before) {
+        std::cerr << "[播报] " << static_cast<unsigned>(speaking_id) << " 号等待确认超时\n";
+      } else if (queued_speech == 0) {
+        queued_speech = speaking_id;
+      }
+    }
+
+    auto apply_line = [&](const std::string& line) {
+      if (line == "stop") {
+        const bool was_finite = finite_action != FiniteAction::kNone;
+        have_cmd = false;
+        seen_motion_us = session.telemetry().motion_us;
+        if (!session.RequestMotionAction(static_cast<uint8_t>(uart::MotionActionId::kStop))) {
+          std::cout << "STOP_FAIL\n" << std::flush;
+        } else if (was_finite) {
+          finite_action = FiniteAction::kStopping;
+          action_ms = clock.NowMs();
+          action_timeout_ms = 2000;
+        } else {
+          std::cout << "STOP_DONE\n" << std::flush;
+        }
+        return;
+      }
+      if (line == "turn left" || line == "turn right") {
+        if (finite_action == FiniteAction::kNone) {
+          const auto action = line == "turn left" ? uart::MotionActionId::kTurnLeft
+                                                   : uart::MotionActionId::kTurnRight;
+          have_cmd = false;
+          seen_motion_us = session.telemetry().motion_us;
+          if (!session.RequestMotionAction(static_cast<uint8_t>(action), 1)) {
+            if (speak_inflight) {
+              deferred_motion = line;
+            } else {
+              std::cout << "TURN_FAIL\n" << std::flush;
+            }
+          } else {
+            finite_action = FiniteAction::kTurn;
+            action_ms = clock.NowMs();
+            action_timeout_ms = 20000;
+            std::cerr << (line == "turn left" ? "[动作] 开始原地左转\n"
+                                                : "[动作] 开始原地右转\n");
+          }
+        }
+        return;
+      }
+      if (line.rfind("forward ", 0) == 0 || line.rfind("backward ", 0) == 0) {
+        const bool backward = line.rfind("backward ", 0) == 0;
+        std::istringstream in(line);
+        std::string verb;
+        uint32_t distance_mm = 0;
+        uint32_t speed_mmps = 0;
+        std::string extra;
+        const bool valid = (in >> verb >> distance_mm >> speed_mmps) && !(in >> extra) &&
+                           distance_mm >= 1 && distance_mm <= 1000 &&
+                           speed_mmps >= 20 && speed_mmps <= 400;
+        const char* name = backward ? "BACKWARD" : "FORWARD";
+        if (!valid || finite_action != FiniteAction::kNone) {
+          std::cout << name << "_FAIL\n" << std::flush;
+        } else {
+          have_cmd = false;
+          seen_motion_us = session.telemetry().motion_us;
+          const auto action = backward ? uart::MotionActionId::kBackward
+                                       : uart::MotionActionId::kForward;
+          const bool sent = session.RequestMotionAction(
+              static_cast<uint8_t>(action), 0, static_cast<uint16_t>(speed_mmps), distance_mm);
+          if (!sent) {
+            if (speak_inflight) {
+              deferred_motion = line;
+            } else {
+              std::cout << name << "_FAIL\n" << std::flush;
+            }
+          } else {
+            finite_action = backward ? FiniteAction::kBackward : FiniteAction::kForward;
+            action_ms = clock.NowMs();
+            const uint64_t expected_ms =
+                static_cast<uint64_t>(distance_mm) * 1000ULL / speed_mmps;
+            action_timeout_ms = std::min<uint64_t>(
+                30000, std::max<uint64_t>(5000, expected_ms * 3 + 2000));
+            std::cerr << "[动作] 开始定距" << (backward ? "后退 " : "前进 ")
+                      << distance_mm << " mm，速度 " << speed_mmps << " mm/s\n";
+          }
+        }
+        return;
+      }
+      float next_v = 0.0f;
+      float next_w = 0.0f;
+      std::istringstream in(line);
+      if (!(in >> next_v >> next_w)) {
+        next_v = 0.0f;
+        next_w = 0.0f;
+      }
+      linear = next_v;
+      angular = next_w;
+      have_cmd = true;
+      cmd_ms = clock.NowMs();
+    };
+
+    if (!deferred_motion.empty() && !speak_inflight && !session.request_pending() &&
+        finite_action == FiniteAction::kNone) {
+      const std::string line = deferred_motion;
+      deferred_motion.clear();
+      apply_line(line);
     }
 
     char buf[256];
@@ -138,85 +281,7 @@ int main(int argc, char** argv) {
       while ((pos = pending.find('\n')) != std::string::npos) {
         const std::string line = pending.substr(0, pos);
         pending.erase(0, pos + 1);
-        if (line == "stop") {
-          const bool was_finite = finite_action != FiniteAction::kNone;
-          have_cmd = false;
-          seen_motion_us = session.telemetry().motion_us;
-          if (!session.RequestMotionAction(static_cast<uint8_t>(uart::MotionActionId::kStop))) {
-            std::cout << "STOP_FAIL\n" << std::flush;
-          } else if (was_finite) {
-            finite_action = FiniteAction::kStopping;
-            action_ms = clock.NowMs();
-            action_timeout_ms = 2000;
-          } else {
-            std::cout << "STOP_DONE\n" << std::flush;
-          }
-          continue;
-        }
-        if (line == "turn left" || line == "turn right") {
-          if (finite_action == FiniteAction::kNone) {
-            const auto action = line == "turn left" ? uart::MotionActionId::kTurnLeft
-                                                     : uart::MotionActionId::kTurnRight;
-            have_cmd = false;
-            seen_motion_us = session.telemetry().motion_us;
-            if (!session.RequestMotionAction(static_cast<uint8_t>(action), 1)) {
-              std::cout << "TURN_FAIL\n" << std::flush;
-            } else {
-              finite_action = FiniteAction::kTurn;
-              action_ms = clock.NowMs();
-              action_timeout_ms = 20000;
-              std::cerr << (line == "turn left" ? "[动作] 开始原地左转\n"
-                                                  : "[动作] 开始原地右转\n");
-            }
-          }
-          continue;
-        }
-        if (line.rfind("forward ", 0) == 0 || line.rfind("backward ", 0) == 0) {
-          const bool backward = line.rfind("backward ", 0) == 0;
-          std::istringstream in(line);
-          std::string verb;
-          uint32_t distance_mm = 0;
-          uint32_t speed_mmps = 0;
-          std::string extra;
-          const bool valid = (in >> verb >> distance_mm >> speed_mmps) && !(in >> extra) &&
-                             distance_mm >= 1 && distance_mm <= 1000 &&
-                             speed_mmps >= 20 && speed_mmps <= 400;
-          const char* name = backward ? "BACKWARD" : "FORWARD";
-          if (!valid || finite_action != FiniteAction::kNone) {
-            std::cout << name << "_FAIL\n" << std::flush;
-          } else {
-            have_cmd = false;
-            seen_motion_us = session.telemetry().motion_us;
-            const auto action = backward ? uart::MotionActionId::kBackward
-                                         : uart::MotionActionId::kForward;
-            const bool sent = session.RequestMotionAction(
-                static_cast<uint8_t>(action), 0, static_cast<uint16_t>(speed_mmps), distance_mm);
-            if (!sent) {
-              std::cout << name << "_FAIL\n" << std::flush;
-            } else {
-              finite_action = backward ? FiniteAction::kBackward : FiniteAction::kForward;
-              action_ms = clock.NowMs();
-              const uint64_t expected_ms =
-                  static_cast<uint64_t>(distance_mm) * 1000ULL / speed_mmps;
-              action_timeout_ms = std::min<uint64_t>(
-                  30000, std::max<uint64_t>(5000, expected_ms * 3 + 2000));
-              std::cerr << "[动作] 开始定距" << (backward ? "后退 " : "前进 ")
-                        << distance_mm << " mm，速度 " << speed_mmps << " mm/s\n";
-            }
-          }
-          continue;
-        }
-        float next_v = 0.0f;
-        float next_w = 0.0f;
-        std::istringstream in(line);
-        if (!(in >> next_v >> next_w)) {
-          next_v = 0.0f;
-          next_w = 0.0f;
-        }
-        linear = next_v;
-        angular = next_w;
-        have_cmd = true;
-        cmd_ms = clock.NowMs();
+        apply_line(line);
       }
     }
 
@@ -260,10 +325,22 @@ int main(int argc, char** argv) {
       session.SetVelocity(0.0f, 0.0f);
     }
 
+    if (queued_speech != 0 && !speak_inflight && deferred_motion.empty() &&
+        finite_action == FiniteAction::kNone && !session.request_pending()) {
+      if (session.RequestSpeech(queued_speech)) {
+        speak_inflight = true;
+        speaking_id = queued_speech;
+        queued_speech = 0;
+        speak_timeouts_before = session.diagnostics().ack_timeouts;
+      }
+    }
+
     const uart::Telemetry& odom_tel = session.telemetry();
     if (odom_tel.has_odom && (odom_tel.odom.status_flags & uart::kOdomValid) != 0 &&
+        odom_tel.odom_us != seen_odom_us &&
         now_ms - last_odom_ms >= 50) {
       last_odom_ms = now_ms;
+      seen_odom_us = odom_tel.odom_us;
       const uart::OdomState& odom = odom_tel.odom;
       std::ostringstream line;
       line << std::fixed << std::setprecision(3) << "ODOM " << odom.x_m << " " << odom.y_m << " "

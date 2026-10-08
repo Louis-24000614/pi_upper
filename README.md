@@ -96,9 +96,10 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 
 只有显式添加 `--drive` 才会打开 UART 并驱动车辆。
 
-道路入口已经默认采用验证后的优化组合，无须追加优化参数：RKNN 三核各一个
-私有 context、按输入顺序消费；共享同帧 BEV/IPM 和复用分割工作缓冲；正确 NMS；
-OpenCV 8 线程、BLAS 1 线程；Linux 每 60 秒 GC 并归还空闲堆页。
+道路入口已经默认采用验证后的优化组合，无须追加优化参数：RKNN 两个分割
+context 绑定核 1、2，核 0 留给障碍和涵洞检测，按输入顺序消费；共享同帧
+BEV/IPM 和复用分割工作缓冲；正确 NMS；OpenCV 8 线程、BLAS 1 线程；Linux
+每 60 秒 GC 并归还空闲堆页。显式 `--npu-contexts 3` 仍使用三核各一个 context。
 指定 `--record-video` 时自动使用有界异步编码，未请求录像时不会生成视频。
 ONNX 和显式指定单核的原有调试方式仍使用单 context。
 

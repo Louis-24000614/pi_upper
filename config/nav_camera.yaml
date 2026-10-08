@@ -18,15 +18,18 @@ camera:
   cy: 360.0
 
 bev:
-  # 16 cm / 28° 时 1280×720 大约只看到车前 0.15–1.0 m，再远没有像素。
-  y_min: 0.20
+  # 16 cm / 28° 时画面底边中线大约看到车前 0.11 m，近边取 0.12 m。
+  # 再远大约到 1.0 m，之外没有地面像素。近处左右仍会被 85° 视场裁掉。
+  y_min: 0.12
   y_max: 1.00
   x_min: -0.5
   x_max: 0.5
   m_per_px: 0.01
 
 capture:
-  device: /dev/video0
+  # udev 规则 config/udev/99-nav-camera.rules 把 DHZJ 导航相机固定到这个名字。
+  # 不要写 /dev/videoN：再插入识别相机后，编号会换。
+  device: /dev/nav_camera
   width: 1280
   height: 720
 
@@ -49,17 +52,18 @@ follow:
   # 正常视觉循迹稍微降速，给分割和转向纠偏留出更多反应时间。
   cruise_mps: 0.08
   turn_mps: 0.05
-  lookahead_m: 0.45
+  lookahead_m: 0.30
   turn_abs_x_m: 0.08
   min_points: 8
-  min_road_pixels: 400
+  # 墙角分割常只剩 250～380 px，400 会把还能看到的路判成没路。
+  min_road_pixels: 200
   max_abs_omega: 1.0
   # 实车录像中道路中心已经向左移，但原 +3 cm 偏置抵消了大部分左转纠偏。
   x_bias_m: 0.00
   # 增强视觉纠偏；仍受 max_abs_omega 限制。
-  steering_gain: 2.5
-  # 固定 45 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
-  min_lookahead_m: 0.28
+  steering_gain: 2.0
+  # 固定 30 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
+  min_lookahead_m: 0.24
   near_mps: 0.05
 
 # 同色过分割时的几何兜底（vision/ipm_proto）
@@ -71,7 +75,8 @@ road_prior:
   max_width_m: 0.32
   min_pixels: 3
 
-# 侧向支路先锁存；正前方检测带稳定无路后，交给下位机用编码器定距、IMU 保持航向。
+# 侧向支路按地图锁存；到点检测方式由 nav_topology.yaml 中 arrival 决定。
+# visual_end 看检测带，visual_odom 看支路和里程；最后由下位机执行定距。
 # 自动转弯只有命令行显式指定 --turn-at-junction/--left-at-junction 才启用。
 junction_turn:
   stable_frames: 2
@@ -87,7 +92,7 @@ junction_turn:
   min_forward_mm: 50
   max_forward_mm: 650
   reacquire_frames: 3
-  # 侧向的角只负责锁存路口；之后仍然视觉循迹，由正前方检测带判断交接。
+  # visual_end 策略：侧向的角只锁存路口，正前方检测带判断交接。
   # 检测带稳定无 road mask 后，IMU 锁航向再走 20 cm 到路口中心。
   road_end_enabled: true
   road_end_min_y_m: 0.20
@@ -111,11 +116,11 @@ junction_turn:
   # 最近 8 帧里有 2 帧看到部分支路就锁存，之后被墙遮住也不清除。
   branch_vote_window: 8
   branch_vote_min: 2
-  # 完全没有视觉证据时，ODOM 到预计节点前 5 cm 停车等待，禁止盲转。
+  # 仅普通路口尚未交接时，ODOM 到预计节点前 5 cm 保护停车；巡检点不启用。
   odom_stop_margin_m: 0.05
 
 # 保留原巡检点视觉接近参数；--turn-at-junction 只取消 UID 输入，下面的
-# 侧边锁存、检测带、20 cm 和速度值仍按原样使用。独立 --turn-at-rfid
+# 侧边锁存、检测带、15 cm 和速度值仍按原样使用。独立 --turn-at-rfid
 # 硬件测试也复用本段的停车/重新捕获参数。
 rfid_turn:
   stop_settle_ms: 2000

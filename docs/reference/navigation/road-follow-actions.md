@@ -120,15 +120,15 @@ ODOM <x_m> <y_m> <yaw_rad> 1
 状态流为：
 
 ```text
-follow -> approach -> forward -> turning -> reacquire -> follow
-                    \---------- failure ----------> fault
+follow -> approach -> heading_hold -> arrived -> turn -> reacquire -> follow
+                    \------------- failure ---------------> fault
 ```
 
 1. BEV 分类器判断左右支路和前方道路是否存在。
 2. 远处看见目标支路时先锁存方向，仍由视觉循线靠近。
-3. 路口距离进入交接窗口并稳定若干帧后，计算到旋转中心的前进距离。
-4. 下发 `forward <distance_mm> <speed_mmps>`。
-5. 收到 `FORWARD_DONE` 后下发 `turn left/right`。
+3. 路口距离进入交接窗口并稳定若干帧后，先按近处中心线摆正。
+4. 摆正后进入 `heading_hold`：锁住当时的车体直行，下发 `CMD_VEL(v, 0)`，不再发 `forward`，也不再更新视觉角度。
+5. 沿边里程再走完配置距离（默认 0.20 m）后停车，再按规划下发 `turn left/right`。转弯仍交给 IMU。
 6. 收到 `TURN_DONE` 后等待新方向中心线连续稳定，再恢复视觉速度环。
 
 侧向支路被墙遮挡时，可以用“道路末端进入指定距离窗口”作为备用交接信号。计算结果必须落在 `min_forward_mm` 到 `max_forward_mm` 之间，否则停车，不下发盲行动作。
@@ -220,5 +220,5 @@ ctest --test-dir build --output-on-failure
 - `camera_ahead_of_turn_center_m` 必须实测；错误会直接转化为路口中心停车误差。
 - 道路宽度默认按 200 mm 设置，换场地后必须重新标定 BEV 与宽度范围。
 - 路口、RFID 和倒车目前是三个独立局部测试模式，尚未由全局路线自动选择。
-- RFID 搜索和路口前进属于视觉交接后的盲区动作，依赖下位机编码器定距与 IMU 航向闭环。
+- 路口和巡检点最后一段锁存摆正后的视觉航向，用 `CMD_VEL` 直行，并用沿边里程结束；90° 转弯仍交给 IMU。不要再用前进动作锁 IMU 航向。
 - 遇障倒车完成后不会自动选择另一条边，需要全局规划器接管。
