@@ -4,7 +4,7 @@
 
 显式 `--culvert-inspect` 替换现有 5 秒 PauseTask；未传该选项时仍使用原涵洞停车流程。
 模型复用测试1：ArcFace 本机 20004、刀具本机 20005；测试2仍是 AprilTag 标定。
-不修改模型、导航速度、停车保护、静态地图、UART 协议或系统 overlay。
+不修改模型、导航速度、静态地图、UART 协议或系统 overlay；默认停车保护保持原样。
 
 进入涵洞后，沿用 STOP 完成确认、连续 2 秒停稳及中央位置检查。第一侧识别后转到
 另一绝对端点，等待 3 秒、清空旧帧，再识别第二侧；每个涵洞翻转一次，完成不归位。
@@ -65,6 +65,60 @@ PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
 但 PWM 失败、里程失效、车辆移动和导航画面不安全仍故障停车。
 退出关闭 PWM、不归位，停止网页与侧视采集线程。
 
+### 临时跳过识别期间的导航时效检查
+
+现场调试可在正式命令中追加 `--inspection-ignore-nav-timeout`（必须同时启用
+`--culvert-inspect`）。仅在 STOP 完成、停稳检查通过后的 `task` 阶段，跳过分割耗时、
+分割帧龄、YOLO 后及发速度前的 200 ms 导航时效检查；该阶段持续保持停车。
+道路丢失、相机读取失败、里程失效、车辆移动、STOP_FAIL 和 PWM 失败仍故障停车。
+每侧识别期限和侧视采集帧的有效性检查不变。
+
+识别结束后清空积压分割结果，再按原 200 ms 保护重新取路；行驶、进入涵洞、停车确认、
+停稳及恢复导航阶段均不跳过。该开关只影响本次进程，不写入 JSON，省略即可恢复默认。
+当前板端试验命令为：
+
+```sh
+cd /home/orangepi/pi_upper
+PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
+  --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right \
+  --culvert-stop --culvert-estimated-camera --culvert-inspect --inspection-web \
+  --inspection-config config/culvert_inspection.json \
+  --inspection-ignore-nav-timeout --record-video
+```
+
+此选项用于观察识别流程，不表示导航与识别混合负载已经满足时效要求。
+
+## 当前板端识别服务准备
+
+2026-10-09 的 10.211.30.33 使用两种已有本机服务，均只监听 127.0.0.1。
+ArcFace 继续使用原有 `.venv`、buffalo_sc 模型和 `face_db.npz`；不重新注册或改写人脸库。
+该库身份名为 "1"～"10"，涵洞执行器将这些名字转换为任务编号 suspect_01～suspect_10，
+同时兼容已有 suspect_01～suspect_10。未知身份、低分和多人脸仍不接受，也不回退刀具。
+
+刀具服务使用独立环境 `/home/orangepi/.venvs/pi-upper-culvert-services`，
+继承板端已安装的 RKNN Lite2，并按 `vision/knife/requirements.txt` 补齐服务依赖。
+不升级系统 Python 或 RKNN。缺少 ensurepip 时可用已有 pip 的 --python 选项：
+
+```sh
+python3 -m venv --without-pip --system-site-packages /home/orangepi/.venvs/pi-upper-culvert-services
+env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  PIP_CONFIG_FILE=/dev/null python3 -m pip \
+  --python /home/orangepi/.venvs/pi-upper-culvert-services/bin/python \
+  install -r vision/knife/requirements.txt
+```
+
+从项目根目录分别在两个终端启动；已运行时不要重复启动：
+
+```sh
+vision/arcface-lite/.venv/bin/python -u -B vision/arcface-lite/server.py --host 127.0.0.1 --port 20004
+/home/orangepi/.venvs/pi-upper-culvert-services/bin/python -u -B -m vision.knife.service --config config/knife.json --host 127.0.0.1 --port 20005
+```
+
+检查两个 `/health` 后，再运行已授权的正式导航命令。服务准备本身不连接串口或驱动车辆。
+当前网页由导航的 --inspection-web 启动，地址为 http://10.211.30.33:8081/；模型接口仅供本机访问。
+本次后台启动不安装开机服务，重启后须重新启动模型服务；PWM 临时权限恢复见舵机文档。
+参考图自匹配及离线测试通过不代表实车识别准确率或导航/识别混合负载已验收。
+
 ## 网页与外层 ROI
 
 启用 --inspection-web 后，整次导航持续提供侧视画面，默认
@@ -113,5 +167,6 @@ PYTHONPATH=navigation:vision:. python3 -B -m unittest discover \
 已经保存的运行配置；在网页修改 ROI 或阈值后仍可执行离线测试。提交的正式配置保留
 已保存的 ROI [0,0,1,0.8]、未指定相机及 hardware_verified=false。
 既有涵洞配置测试读取本地模型指纹，不推理。实际实体识别准确率、负样本误判率、
-PWM 机械到位和混合 NPU 负载尚须授权联调；刀具服务用核0/1/2可能与导航争用资源，
-不得通过降低既有时效保护解决。离线通过不代表实车验收。
+PWM 机械到位和混合 NPU 负载尚须授权联调；刀具服务用核0/1/2可能与导航争用资源。
+用户授权的临时调试可使用上述开关；正式负载验收仍须按默认时效保护验证。
+离线通过不代表实车验收。

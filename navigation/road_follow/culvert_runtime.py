@@ -68,7 +68,10 @@ def drain_notes(notes):
 
 class CulvertRuntime:
     def __init__(self, mapping, config, calibration, *, nav_config, agent, send, event, root, prefix=None,
-                 inspection_settings=None, inspection_web=False):
+                 inspection_settings=None, inspection_web=False, inspection_ignore_nav_timeout=False):
+        if inspection_ignore_nav_timeout and inspection_settings is None:
+            raise ValueError("跳过导航时效检查需要启用涵洞识别")
+        self.inspection_ignore_nav_timeout = inspection_ignore_nav_timeout
         self.mapping, self.config, self.calibration = mapping, config, calibration
         self.nav_config, self.agent, self.console_event = nav_config, agent, event
         self.history = OdomHistory(config)
@@ -97,6 +100,13 @@ class CulvertRuntime:
         self.first_capture_s = None
         self.paused_s = None
         self.event("culvert_projection", **calibration.metadata)
+        if inspection_ignore_nav_timeout:
+            self.event("inspection_navigation_timeout_trial", enabled=True, phase="task")
+            self.console_event("调试", "涵洞停稳识别期间跳过 200ms 导航时效检查；行驶与恢复导航仍保留")
+
+    @property
+    def navigation_time_guard_enabled(self):
+        return not (self.inspection_ignore_nav_timeout and self.controller.phase == "task")
 
     def close(self):
         try:
@@ -146,7 +156,10 @@ class CulvertRuntime:
         hard, culverts, unknown = self.split(detections)
         if (eligible or self.controller.owns) and self.unknown_judge.update(unknown, frame.shape).hard_blocked:
             self.controller.fault("unknown_near_target", now)
-        frame_fresh = 0 <= now-captured_s <= self.config.max_frame_age_s
+        time_guard_was_disabled = not self.navigation_time_guard_enabled
+        frame_age_s = now-captured_s
+        frame_fresh = 0 <= frame_age_s and (
+            frame_age_s <= self.config.max_frame_age_s or time_guard_was_disabled)
         road_safe = frame_fresh and command.v_mps > 0 and command.reason in ("follow", "follow_near")
         if eligible and not self.controller.owns:
             points = self.calibration.road_points(mask, self.nav_config) if self.calibration.check_shape(frame.shape) else []
@@ -175,6 +188,9 @@ class CulvertRuntime:
         received = drain_notes(notes)
         outcome = self.controller.step(now=now, current_s=progress.s_m, edge_key=key,
             visual_ok=road_safe, frame_s=captured_s, command=command, near_speed=near_speed, notes=received)
+        if time_guard_was_disabled and self.controller.phase == "reacquire":
+            # 完成识别的这一帧可能已过期，保持停车，下一轮只接收新的导航帧。
+            outcome = CulvertOutcome(outcome.command, outcome.owns, False, outcome.resumed)
         self.event("culvert_control", now_s=now, phase=self.controller.phase,
                    progress_m=progress.s_m, target_s_m=(self.controller.target.target_s_m if self.controller.target else None),
                    notes=received, command=asdict(outcome.command))

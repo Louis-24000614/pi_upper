@@ -24,7 +24,7 @@ class Segment:
 
 
 class CulvertLoopTest(unittest.TestCase):
-    def run_loop(self,hard=False,slow=False):
+    def run_loop(self,hard=False,slow=False,trial=False,stream_age=None,complete=False):
         graph=load_topology(); agent=RouteAgent(graph); first=agent.start()
         initial_index=agent.state.route_index
         xy={key:(node.x,node.y) for key,node in graph.nodes.items()}
@@ -32,8 +32,21 @@ class CulvertLoopTest(unittest.TestCase):
         camera=Mock(); camera.read.return_value=(True,np.zeros((2,2,3),np.uint8))
         runtime=Mock(); runtime.first_capture_s=None
         runtime.controller.owns=True
+        runtime.controller.phase="task"
+        runtime.navigation_time_guard_enabled=not trial
         runtime.update.return_value=CulvertOutcome(VelocityCommand(0,0,"stop_culvert_task"),True,False)
         runtime.split.return_value=([],[],[])
+        if complete:
+            def finish(**kwargs):
+                runtime.controller.phase="reacquire"
+                runtime.navigation_time_guard_enabled=True
+                return CulvertOutcome(VelocityCommand(0,0,"stop_culvert_reacquire"),True,False)
+            runtime.update.side_effect=finish
+        stream=Mock()
+        stream.read.side_effect=lambda *args:NS(image=camera.read.return_value[1],
+            mask=np.zeros((2,2),np.uint8),inference_s=stream_age,
+            captured_s=time.monotonic()-stream_age,sequence=1,source=0)
+        self.stream=stream
         diag=FollowDiagnostics(2000,2000,80,80,80,False,.2,1,True,0)
         reading=JunctionRead(KIND_STRAIGHT,True,False,False,0,.2)
         judge=Mock()
@@ -45,6 +58,7 @@ class CulvertLoopTest(unittest.TestCase):
             def mock(name,**kwargs): return stack.enter_context(patch("road_follow.__main__."+name,**kwargs))
             mock("needs_frequency_guard",return_value=False)
             mock("RoadSegmenter",new=Segment)
+            mock("OrderedSegmentStream",return_value=stream)
             mock("BevProjector.project",return_value=(Mock(),np.zeros((2,2),np.uint8)))
             mock("_open_camera",return_value=camera)
             mock("_load_config",return_value={"capture":{"width":2,"height":2}})
@@ -62,10 +76,16 @@ class CulvertLoopTest(unittest.TestCase):
             stack.enter_context(patch("road_follow.culvert_runtime.CulvertRuntime",return_value=runtime))
             stack.enter_context(patch("vision.obstacle.blockage.HardBlockageJudge",return_value=judge))
             detector=stack.enter_context(patch("vision.obstacle.detect.ObstacleDetector.detect",side_effect=detect))
-            result=entry.main(["--drive","--turn-at-junction","right","--npu-contexts","1",
-                               "--culvert-stop","--frames","2"])
+            stack.enter_context(patch("road_follow.inspection_config.Settings"))
+            stack.enter_context(patch("road_follow.inspection_config.preflight"))
+            frames=1 if complete else 2
+            options=["--drive","--turn-at-junction","right","--npu-contexts","1" if stream_age is None else "2",
+                     "--culvert-stop","--frames",str(frames)]
+            if trial: options.extend(["--culvert-inspect","--inspection-ignore-nav-timeout"])
+            result=entry.main(options)
         self.assertEqual(result,0)
-        self.assertEqual(detector.call_count,2)
+        expected=0 if stream_age is not None and stream_age>.2 and not trial else frames
+        self.assertEqual(detector.call_count,expected)
         self.assertEqual(agent.state.route_index,initial_index)
         camera.release.assert_called_once()
         runtime.close.assert_called_once()
@@ -88,6 +108,40 @@ class CulvertLoopTest(unittest.TestCase):
         runtime,judge,arrival,recovery,writes=self.run_loop(hard=True,slow=True)
         judge.update.assert_not_called(); arrival.assert_not_called(); recovery.assert_not_called()
         self.assertTrue(any(args[1]=="stale_after_yolo" for args,_ in runtime.unsafe_frame.call_args_list))
+        self.assertEqual(writes,["0 0\n"])
+
+    def test_timeout_trial_allows_slow_yolo_but_keeps_zero_velocity(self):
+        runtime,judge,arrival,recovery,writes=self.run_loop(slow=True,trial=True)
+        runtime.unsafe_frame.assert_not_called()
+        self.assertEqual(runtime.update.call_count,2)
+        judge.update.assert_called()
+        arrival.assert_not_called(); recovery.assert_not_called()
+        self.assertEqual(writes,["0 0\n"])
+
+    def test_timeout_trial_still_allows_hard_obstacle_preemption(self):
+        runtime,judge,arrival,recovery,writes=self.run_loop(hard=True,slow=True,trial=True)
+        self.assertEqual(runtime.cancel_for_obstacle.call_count,2)
+        self.assertEqual(recovery.call_count,2)
+        self.assertTrue(all(line.startswith("0") for line in writes))
+
+    def test_timeout_trial_does_not_discard_slow_segmentation_or_hide_road_command(self):
+        runtime,judge,arrival,recovery,writes=self.run_loop(trial=True,stream_age=.4)
+        runtime.unsafe_frame.assert_not_called()
+        self.assertEqual(runtime.update.call_count,2)
+        self.assertEqual(runtime.update.call_args.kwargs["command"].reason,"follow")
+        self.assertEqual(writes,["0 0\n"])
+
+    def test_default_discards_expired_segmentation(self):
+        runtime,judge,arrival,recovery,writes=self.run_loop(stream_age=.4)
+        runtime.update.assert_not_called()
+        self.assertTrue(any(args[1]=="stale_frame" for args,_ in runtime.unsafe_frame.call_args_list))
+        self.assertEqual(writes,["0 0\n"])
+
+    def test_trial_completion_invalidates_stream_without_faulting_on_finishing_frame(self):
+        runtime,judge,arrival,recovery,writes=self.run_loop(trial=True,stream_age=.4,complete=True)
+        self.stream.invalidate.assert_called_once()
+        runtime.unsafe_frame.assert_not_called()
+        self.assertTrue(runtime.navigation_time_guard_enabled)
         self.assertEqual(writes,["0 0\n"])
 
 

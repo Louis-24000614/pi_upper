@@ -23,6 +23,16 @@ bool SysfsPwm::Configure(int64_t period_ns, int64_t duty_ns) {
   if (!EnsureExported()) {
     return false;
   }
+  // 新导出的 RK3588 通道周期可能为 0；此时写 enable/polarity 会返回 EINVAL。
+  // 先建立有效周期，再沿用关闭、极性、周期和脉宽的配置流程。
+  int64_t current_period = 0;
+  std::ifstream period(dir_ + "/period");
+  if (!(period >> current_period)) {
+    return false;
+  }
+  if (current_period == 0 && !Write("period", std::to_string(period_ns) + "\n")) {
+    return false;
+  }
   if (!Write("enable", "0\n")) {
     return false;
   }

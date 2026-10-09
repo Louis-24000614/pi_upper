@@ -33,6 +33,19 @@ PWM2_M1/PWM6_M0；未找到可用的 PWM14_M0 芯片。配置保留的 pwmchip2 
 
 运行用户需要对 sysfs 节点有写权限。驱动配置极性为 `normal`。
 
+2026-10-09 在 10.211.30.33 上已核实：`pwm14-m0` overlay 生效，
+`pwmchip2` 对应 `febf0020.pwm`，live DT 指向 `pwm14m0-pins`，引脚为 `GPIO3_C2`。
+用户已现场确认 500000 ns / 2500000 ns 两端正常且安全；周期为 20000000 ns。
+侧视是 60 fps 的 RYS USB Camera，使用 by-id 的 video-index0 固定链接（当前 `/dev/video0`）；
+导航 `/dev/nav_camera` 指向 DHZJ Camera（当前 `/dev/video2`）。当前板配置使用
+`build-turn/servo/servo_cli`，支持 `--stdin`；仅编译舵机目标，不重建 UART。
+
+新导出通道的 period=0 时，内核拒绝先写 enable=0；驱动现先建立有效周期再配置。
+本次只临时授予 orangepi 当前 pwm0 的 period、duty_cycle、polarity、enable 写权限，
+未安装持久化 udev 规则。重启或重新导出通道后需恢复权限。正式识别启动时会设置初始端点，
+实际机械到位仍由现场观察确认；本次配置准备不启动导航。
+
+
 ## 角度与脉宽
 
 周期 20 ms（50 Hz）。默认线性映射，可在 YAML 里改端点：

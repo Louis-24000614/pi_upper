@@ -64,6 +64,13 @@ ROOT = Path(__file__).resolve().parents[2]
 SLOW_S = 0.20
 STATUS_LOG_INTERVAL_S = 2.0
 
+
+def _navigation_timed_out(elapsed_s, culvert_runtime):
+    return elapsed_s > SLOW_S and (
+        culvert_runtime is None or culvert_runtime.navigation_time_guard_enabled
+    )
+
+
 COMMAND_NAMES = {
     "follow": "视觉循迹",
     "follow_near": "近距离低速循迹",
@@ -420,6 +427,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--culvert-inspect", action="store_true", help="显式启用涵洞两侧识别和 PWM；替换 5 秒占位任务")
     parser.add_argument("--inspection-config", type=Path, default=ROOT / "config" / "culvert_inspection.json")
     parser.add_argument("--inspection-web", action="store_true", help="导航期间推流侧视相机并允许网页持久化调参")
+    parser.add_argument("--inspection-ignore-nav-timeout", action="store_true",
+                        help="调试：仅涵洞停稳识别期间跳过 200ms 导航时效检查，恢复导航时重新启用")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
     parser.add_argument("--preview", type=Path, default=None, help="把第一帧 mask 叠加图写到这里")
@@ -455,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     args.inspection_settings = None
+    if args.inspection_ignore_nav_timeout and not args.culvert_inspect:
+        parser.error("--inspection-ignore-nav-timeout 必须与 --culvert-inspect 一起使用")
     if args.inspection_web and not args.culvert_inspect:
         parser.error("--inspection-web 必须与 --culvert-inspect 一起使用")
     if args.culvert_inspect and not args.culvert_stop:
@@ -677,7 +688,8 @@ def _run(args, parser) -> int:
         try:
             culvert_runtime = CulvertRuntime(*args.culvert_setup, nav_config=cfg, agent=route_agent,
                 send=lambda line: write_velocity(bridge, line), event=_event, root=ROOT,
-                inspection_settings=args.inspection_settings, inspection_web=args.inspection_web)
+                inspection_settings=args.inspection_settings, inspection_web=args.inspection_web,
+                inspection_ignore_nav_timeout=args.inspection_ignore_nav_timeout)
         except BaseException as exc:
             _event("错误", f"涵洞初始化失败：{exc}")
             _stop_bridge(bridge)
@@ -763,7 +775,7 @@ def _run(args, parser) -> int:
             if segment_stream is not None:
                 mask, infer_s = result.mask, result.inference_s
                 captured_s = result.captured_s
-                if time.monotonic()-result.captured_s > SLOW_S:
+                if _navigation_timed_out(time.monotonic()-result.captured_s, culvert_runtime):
                     if culvert_runtime is not None:
                         culvert_runtime.unsafe_frame(time.monotonic(), "stale_frame")
                     # 超时帧不能更新 EMA/路口证据。普通循迹发零速度；有限动作保持
@@ -793,7 +805,7 @@ def _run(args, parser) -> int:
             command, follow_diag = command_from_mask_with_diagnostics(
                 mask, cfg, smoother, projection=projection, lazy_raw=args.lazy_raw_centerline
             )
-            if infer_s > SLOW_S:
+            if _navigation_timed_out(infer_s, culvert_runtime):
                 command = VelocityCommand(0.0, 0.0, "stop_slow")
             opening, junction = _junction_read(mask, cfg, junctions, projection=projection)
             if turn_side is not None:
@@ -865,7 +877,7 @@ def _run(args, parser) -> int:
                     if armed and detector is not None and obstacle_judge is not None:
                         detections, _elapsed_ms = detector.detect(frame)
                         if culvert_runtime is not None:
-                            culvert_frame_stale = time.monotonic()-captured_s > SLOW_S
+                            culvert_frame_stale = _navigation_timed_out(time.monotonic()-captured_s, culvert_runtime)
                             if culvert_frame_stale:
                                 culvert_runtime.unsafe_frame(time.monotonic(), "stale_after_yolo")
                                 command = VelocityCommand(0,0,"stop_slow")
@@ -950,6 +962,7 @@ def _run(args, parser) -> int:
                             break
                         progress.update(*sample)
                         culvert_runtime.record_odom(sample, progress)
+                    time_guard_was_disabled = not culvert_runtime.navigation_time_guard_enabled
                     culvert_outcome = culvert_runtime.update(detections=detections, frame=frame, mask=mask,
                         captured_s=captured_s, sequence=result.sequence if segment_stream is not None else frames,
                         source=result.source if segment_stream is not None else 0,
@@ -957,7 +970,12 @@ def _run(args, parser) -> int:
                         eligible=culvert_eligible(entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival),
                         notes=action_notes)
                     command = culvert_outcome.command
-                    recovery_owns = culvert_outcome.owns or culvert_frame_stale or time.monotonic()-captured_s > SLOW_S
+                    if time_guard_was_disabled and culvert_runtime.controller.phase == "reacquire":
+                        # 识别结束后恢复时效保护，旧分割任务不能进入重新取路阶段。
+                        smoother.reset()
+                        if segment_stream is not None:
+                            segment_stream.invalidate()
+                    recovery_owns = culvert_outcome.owns or culvert_frame_stale or _navigation_timed_out(time.monotonic()-captured_s, culvert_runtime)
                     if not culvert_outcome.owns and recovery_owns:
                         command = VelocityCommand(0,0,"stop_slow")
                     if culvert_outcome.resumed:
@@ -1214,7 +1232,7 @@ def _run(args, parser) -> int:
                 if args.frames and frames >= args.frames:
                     break
                 continue
-            if culvert_runtime is not None and time.monotonic()-captured_s > SLOW_S:
+            if culvert_runtime is not None and _navigation_timed_out(time.monotonic()-captured_s, culvert_runtime):
                 culvert_runtime.unsafe_frame(time.monotonic(), "stale_before_velocity")
                 if culvert_runtime.controller.owns:
                     continue

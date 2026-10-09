@@ -248,6 +248,26 @@ class RecognizerTest(unittest.TestCase):
         self.assertEqual(result["bbox"], [21, 22, 40, 50])
         self.assertEqual(self.request.call_count, 1)
 
+    def test_numeric_registered_ids_match_task_ids_without_changing_response(self):
+        for number in range(1, 11):
+            with self.subTest(number=number):
+                self.request.reset_mock()
+                response = {"results": [{"name": str(number), "score": .5, "bbox": [1, 2, 20, 30]}]}
+                self.request.return_value = response
+                result = self.service.recognize(self.frame, self.rec)
+                self.assertTrue(result["accepted"])
+                self.assertEqual(result["identity"], f"suspect_{number:02d}")
+                self.assertEqual(response["results"][0]["name"], str(number))
+                self.assertEqual(self.request.call_count, 1)
+
+    def test_numeric_aliases_keep_low_and_unknown_faces_rejected(self):
+        for label, score in [("1", .49), ("0", .9), ("11", .9), ("01", .9), (1, .9)]:
+            with self.subTest(label=label):
+                self.request.reset_mock()
+                self.request.return_value = {"results": [{"name": label, "score": score}]}
+                self.assertFalse(self.service.recognize(self.frame, self.rec)["accepted"])
+                self.assertEqual(self.request.call_count, 1)
+
     def test_unknown_or_low_face_never_falls_back_to_knife(self):
         for label, score in [("Unknown", .7), ("suspect_01", .49)]:
             self.request.reset_mock()
