@@ -1,7 +1,7 @@
 # 当前接线使用 PWM14_M0；不是旧文档中的 Pin 7 / PWM14_M2。
-# pwmchip 编号不可由 M0 猜测。下面旧路径需按实际 PWM14_M0 设备映射核实后填写。
+# 开机准备服务按 live DT 核实芯片，并建立固定链接；不依赖 pwmchip 编号。
 pwm_route: PWM14_M0
-pwmchip: /sys/class/pwm/pwmchip2
+pwmchip: /run/pi-upper-pwm14m0
 channel: 0
 period_us: 20000
 min_pulse_us: 500

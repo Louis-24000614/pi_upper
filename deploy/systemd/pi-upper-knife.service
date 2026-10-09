@@ -1,0 +1,21 @@
+[Unit]
+Description=Pi Upper knife recognition HTTP service
+After=local-fs.target network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/pi_upper
+Environment=HOME=/home/orangepi
+ExecStart=/home/orangepi/.venvs/pi-upper-culvert-services/bin/python -u -B -m vision.knife.service --config /home/orangepi/pi_upper/config/knife.json --host 127.0.0.1 --port 20005
+ExecStartPost=/usr/bin/python3 -B /home/orangepi/pi_upper/tools/wait_inspection_health.py --service knife --timeout 90
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=100
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

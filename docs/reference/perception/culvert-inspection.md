@@ -106,7 +106,7 @@ env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u AL
   install -r vision/knife/requirements.txt
 ```
 
-从项目根目录分别在两个终端启动；已运行时不要重复启动：
+仅在 systemd 服务未启用时，从项目根目录分别在两个终端手工启动；已有服务时不要重复启动：
 
 ```sh
 vision/arcface-lite/.venv/bin/python -u -B vision/arcface-lite/server.py --host 127.0.0.1 --port 20004
@@ -115,8 +115,63 @@ vision/arcface-lite/.venv/bin/python -u -B vision/arcface-lite/server.py --host 
 
 检查两个 `/health` 后，再运行已授权的正式导航命令。服务准备本身不连接串口或驱动车辆。
 当前网页由导航的 --inspection-web 启动，地址为 http://10.211.30.33:8081/；模型接口仅供本机访问。
-本次后台启动不安装开机服务，重启后须重新启动模型服务；PWM 临时权限恢复见舵机文档。
+现已安装下述 systemd 开机启动；模型加载完成并通过健康检查后服务才进入 active 状态。
 参考图自匹配及离线测试通过不代表实车识别准确率或导航/识别混合负载已验收。
+
+## 开机自启动
+
+三项 systemd 服务安装在 /etc/systemd/system，并启用 multi-user.target：
+
+| 服务 | 运行用户 | 工作内容 |
+| --- | --- | --- |
+| pi-upper-face.service | orangepi | 人脸服务 127.0.0.1:20004，原虚拟环境和原人脸库 |
+| pi-upper-knife.service | orangepi | 刀具服务 127.0.0.1:20005，原虚拟环境与模型 |
+| pi-upper-pwm-prepare.service | root | 核对 PWM14_M0、必要时导出通道 0、恢复四个节点的写权限 |
+
+模型服务启动后最多等待 90 秒检查 /health；人脸需 db_exists=true，刀具需 ready=true。
+启动失败或进程异常退出会由 systemd 重试。只启用 PWM 通道与权限准备，不设置
+脉宽、周期、极性或 enable，不自动启动导航，不打开摄像头、串口或推流网页。
+识别成功阈值仍由 recognition.face_threshold/knife_threshold 的 0.5 控制；
+人脸服务原身份门限继续保持 0.45，未修改模型或编号库。
+
+在当前板端安装并立即启动模型服务：
+
+```sh
+cd /home/orangepi/pi_upper
+sudo sh tools/install_inspection_services.sh --start-models
+```
+
+不带 --start-models 时只安装并启用下一次开机启动，当前只运行幂等 PWM 权限准备。
+安装器复制 root 所有的 PWM 脚本到 /usr/local/lib/pi-upper，再验证 unit、reload、enable。
+当前 config/servo.yaml 使用 /run/pi-upper-pwm14m0；开机准备服务核对后建立该固定链接。
+其他机器必须具有相同安装路径、用户和虚拟环境；本脚本不安装模型或依赖、不修改 overlay。
+
+运行完整任务前检查，以下命令只检查准备状态：
+
+```sh
+systemctl --no-pager status pi-upper-pwm-prepare pi-upper-face pi-upper-knife
+python3 -B tools/wait_inspection_health.py --service face --timeout 5
+python3 -B tools/wait_inspection_health.py --service knife --timeout 5
+```
+
+查看日志或手动恢复服务：
+
+```sh
+journalctl -u pi-upper-face -u pi-upper-knife -u pi-upper-pwm-prepare -b --no-pager -n 80
+sudo systemctl restart pi-upper-face pi-upper-knife
+sudo systemctl restart pi-upper-pwm-prepare
+```
+
+最后一个命令只重新核对、导出及恢复权限，保持当前 PWM 输出值。若通道被其他工具
+重新 unexport/export，也用它恢复权限。无需在每次导航前重复 echo 导出或配置。
+正式导航仍按上面的完整命令手动启动，它会初始化舵机端点并按任务翻转。
+
+回退本次 Git 提交不会自动撤销已安装的系统服务。需要完整撤销开机启动时，先结束导航，
+再执行以下命令停止并禁用三项服务，之后再 git revert 对应提交；不删除模型或人脸库：
+
+```sh
+sudo systemctl disable --now pi-upper-face pi-upper-knife pi-upper-pwm-prepare
+```
 
 ## 网页与外层 ROI
 
