@@ -439,8 +439,8 @@ class ControllerIntegrationTest(unittest.TestCase):
             saved = json.loads(Path(str(prefix)+".culverts.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["culverts"][KEY[0]]["status"], "partial")
             svg = Path(str(prefix)+".culverts.svg").read_text(encoding="utf-8")
-            self.assertIn("knife_01", svg)
-            self.assertIn("unconfirmed", svg)
+            self.assertIn("刀具1号", svg)
+            self.assertIn("未确认", svg)
             self.assertFalse(records.graph.edges[KEY[0]].tunnel)
 
 

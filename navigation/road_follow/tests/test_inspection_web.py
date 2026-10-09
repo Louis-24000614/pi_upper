@@ -33,8 +33,8 @@ class WebTest(unittest.TestCase):
     def get(self, path):
         return urlopen(self.url+path, timeout=2)
 
-    def post(self, payload):
-        request = Request(self.url+"/settings", data=json.dumps(payload).encode(),
+    def post(self, payload, path="/settings"):
+        request = Request(self.url+path, data=json.dumps(payload).encode(),
                           headers={"Content-Type": "application/json"}, method="POST")
         return urlopen(request, timeout=2)
 
@@ -88,6 +88,28 @@ class WebTest(unittest.TestCase):
             self.get("/crop.jpg")
         self.assertEqual(error.exception.code, 503)
         error.exception.close()
+
+    def test_page_uses_chinese_cards_tables_and_map_instead_of_json_dump(self):
+        with self.get("/") as response:page=response.read().decode()
+        for text in ("当前候选目标","当前使用的识别参数","两侧检查结果","障碍判断调参","本次任务拓扑地图","侧视相机没有新鲜帧"):
+            self.assertIn(text,page)
+        self.assertNotIn("<pre",page)
+        self.assertNotIn("JSON.stringify(s",page)
+        with self.get("/topology.svg") as response:
+            self.assertIn("image/svg+xml",response.headers["Content-Type"])
+            self.assertIn("导航任务",response.read().decode())
+
+    def test_obstacle_settings_save_and_conflict_are_separate_from_recognition(self):
+        with self.post({"revision":0,"values":{"edge_end_margin_m":.12}},"/obstacle-settings") as response:
+            self.assertEqual(json.load(response)["revision"],1)
+        with self.get("/status") as response:state=json.load(response)
+        self.assertEqual(state["obstacle"]["settings"]["edge_end_margin_m"],.12)
+        self.assertEqual(state["revision"],0)
+        with self.assertRaises(HTTPError) as error:
+            self.post({"revision":0,"values":{"edge_end_margin_m":.2}},"/obstacle-settings")
+        self.assertEqual(error.exception.code,409)
+        error.exception.close()
+        self.assertEqual(Settings(self.settings.path).obstacle_snapshot()[0]["edge_end_margin_m"],.12)
 
 
 if __name__ == "__main__":

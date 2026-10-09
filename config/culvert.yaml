@@ -46,7 +46,6 @@ culvert:
   max_heading_rad: 0.10
   confirm_frames: 3
   position_spread_m: 0.05
-  max_frame_age_s: 0.20
   odom_timeout_s: 0.50
   stop_margin_m: 0.01
   stop_error_m: 0.05

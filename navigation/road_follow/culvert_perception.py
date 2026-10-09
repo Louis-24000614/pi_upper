@@ -134,7 +134,7 @@ class CulvertPerception:
             self.key = key
         if already_done:
             return CulvertObservation("already_done")
-        if not 0 <= now - captured_s <= cfg.max_frame_age_s:
+        if not math.isfinite(now-captured_s) or now < captured_s:
             self.positions.clear()
             return CulvertObservation("stale_frame")
         if self.last_frame_s is not None and captured_s <= self.last_frame_s:

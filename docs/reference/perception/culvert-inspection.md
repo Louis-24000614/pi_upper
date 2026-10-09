@@ -4,7 +4,8 @@
 
 显式 `--culvert-inspect` 替换现有 5 秒 PauseTask；未传该选项时仍使用原涵洞停车流程。
 模型复用测试1：ArcFace 本机 20004、刀具本机 20005；测试2仍是 AprilTag 标定。
-不修改模型、导航速度、静态地图、UART 协议或系统 overlay；默认停车保护保持原样。
+不修改模型、导航速度、静态地图、UART 协议或系统 overlay。按现场调试要求，全局取消
+导航 200 ms 时效上限；道路丢失、里程失效、车辆移动及有限动作失败仍停车。
 
 进入涵洞后，沿用 STOP 完成确认、连续 2 秒停稳及中央位置检查。第一侧识别后转到
 另一绝对端点，等待 3 秒、清空旧帧，再识别第二侧；每个涵洞翻转一次，完成不归位。
@@ -31,15 +32,16 @@ PYTHONPATH=navigation:vision:. /home/orangepi/miniconda3/envs/pi_upper/bin/pytho
   --camera /dev/v4l/by-id/usb-RYS_USB_Camera_200901010001-video-index0
 ```
 
-网页为 `http://192.168.92.163:8081/`。每轮按原阈值、连续新帧和 45 秒期限检查当前
+网页为 `http://<板端IP>:8081/`。每轮按原阈值、连续新帧和 45 秒期限检查当前
 相机方向，结果展示 5 秒后重新检测同一方向；页面明确显示 PWM 禁用。ROI 和阈值
 仍保存到独立 JSON，原导航入口的硬件检查保持有效。`--camera` 仅覆盖本次调试来源，
 不写入正式导航相机配置。Ctrl+C 或 SIGTERM 停止网页和相机。
 
-`config/culvert_inspection.json` 保存 camera、recognition、services、servo、web。
-默认 camera.device 为 null，必须填写实际侧视设备，不能与导航相机相同。
-servo.hardware_verified 默认 false；确认 PWM14_M0 接线、live DT 芯片映射、权限及
-0°/180° 安全端点后才能设置 true。真实路由检查参见 [舵机硬件](../hw/servo.md)。
+`config/culvert_inspection.json` 保存 camera、recognition、services、servo、web、obstacle。
+当前板端侧视设备为 `/dev/v4l/by-id/usb-RYS_USB_Camera_200901010001-video-index0`
+（现场确认的 60 fps 摄像头），导航使用另一台 180 fps 摄像头，不能占用同一设备。
+现场已确认 PWM14_M0 的两端正常且安全，当前 hardware_verified=true；其他机器
+应重新核实相机、live DT 芯片映射和权限。0°=500000 ns，180°=2500000 ns。真实路由检查参见 [舵机硬件](../hw/servo.md)。
 不猜测 pwmchip 编号，不自动安装依赖、修改系统或重启。
 
 构建常驻 PWM CLI 与离线 C++ 测试会写入指定 build 目录；部署及构建权限确认后执行：
@@ -55,7 +57,7 @@ ctest --test-dir build -R servo_app --output-on-failure
 
 ```sh
 PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
-  --drive --uart-bin build/uart/uart_vel --turn-at-junction left \
+  --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right \
   --culvert-stop --culvert-estimated-camera --culvert-inspect --inspection-web \
   --inspection-config config/culvert_inspection.json --record-video
 ```
@@ -65,28 +67,25 @@ PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
 但 PWM 失败、里程失效、车辆移动和导航画面不安全仍故障停车。
 退出关闭 PWM、不归位，停止网页与侧视采集线程。
 
-### 临时跳过识别期间的导航时效检查
+### 导航时效设置
 
-现场调试可在正式命令中追加 `--inspection-ignore-nav-timeout`（必须同时启用
-`--culvert-inspect`）。仅在 STOP 完成、停稳检查通过后的 `task` 阶段，跳过分割耗时、
-分割帧龄、YOLO 后及发速度前的 200 ms 导航时效检查；该阶段持续保持停车。
-道路丢失、相机读取失败、里程失效、车辆移动、STOP_FAIL 和 PWM 失败仍故障停车。
-每侧识别期限和侧视采集帧的有效性检查不变。
+导航的分割耗时、分割帧龄、YOLO 后及发速度前均不再使用 0.2 秒上限。
+这对整次导航默认生效，无需任何额外开关。旧配置 max_frame_age_s 仅为读取兼容
+保留，不重新启用控制上限。采集时间必须有效，重复帧及未来时间戳仍拒绝；
+里程时间匹配、道路内容、停车回执和车辆移动检查继续有效。
 
-识别结束后清空积压分割结果，再按原 200 ms 保护重新取路；行驶、进入涵洞、停车确认、
-停稳及恢复导航阶段均不跳过。该开关只影响本次进程，不写入 JSON，省略即可恢复默认。
-当前板端试验命令为：
+识别结束后清空积压分割结果和中心线平滑状态，完成识别的这一帧保持停车，
+随后用不同的新导航帧重新确认道路，再恢复行驶。慢推理可能使运动使用较旧画面，
+取消时效上限并不说明导航与识别混合负载已通过实车验收。
+当前板端命令：
 
 ```sh
 cd /home/orangepi/pi_upper
 PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
   --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right \
   --culvert-stop --culvert-estimated-camera --culvert-inspect --inspection-web \
-  --inspection-config config/culvert_inspection.json \
-  --inspection-ignore-nav-timeout --record-video
+  --inspection-config config/culvert_inspection.json --record-video
 ```
-
-此选项用于观察识别流程，不表示导航与识别混合负载已经满足时效要求。
 
 ## 当前板端识别服务准备
 
@@ -122,11 +121,13 @@ vision/arcface-lite/.venv/bin/python -u -B vision/arcface-lite/server.py --host 
 ## 网页与外层 ROI
 
 启用 --inspection-web 后，整次导航持续提供侧视画面，默认
-`http://192.168.92.163:8081/`；模型服务仍只在本机使用。
-网页显示原图、当前侧、阶段、候选、相似度、刀具分差、连续计数、剩余时间及任务地图结果。
+`http://<板端IP>:8081/`（当前为 `http://10.211.30.33:8081/`）；模型服务仍只在本机使用。
+网页用中文状态卡片、两侧结果卡片及参数表格显示原图、当前侧、阶段、候选、相似度、
+刀具分差、连续计数、剩余时间和失败原因。使用参数保留名称、单位及 ROI 百分比，
+页面不展示原始 JSON；编辑输入框与当前已应用参数分别展示。
 
 在原图拖框排除底部板卡；归一化坐标 [x1,y1,x2,y2] 同时裁剪两种模型输入。
-已保存并提交的 ROI 为 [0,0,1,0.8]，保留原图上方 80%，排除底部 20%；
+当前板端已保存的 ROI 为 [0,0,1,0.75]，保留原图上方 75%，排除底部 25%；
 其他设备可按实际遮挡再次调整。此外层 ROI 不代替刀具服务内部的
 自动单刀取景或前景提取，刀具请求仍传 roi_selected=false；显示框会加回原图偏移。
 
@@ -135,18 +136,58 @@ main 后，启动或重启识别程序即可从同一路径加载；归一化 RO
 已运行的进程不会因外部 Git 更新而自动重读 JSON。局域网浏览器访问本板网页时共用
 本板正在运行的配置；网页后续保存仍需另行提交和推送，才能通过 Git 分享到其他机器。
 
-点击“应用并保存 JSON”原子保存识别参数；下次启动保留。网页仅可改两种分数、连续
-帧数、每侧超时和 ROI，不开放相机、PWM、服务地址或运动控制。人脸阈值最低 0.45。
+点击“应用并保存识别参数”原子保存识别参数；下次启动保留。另设障碍参数保存按钮。
+不开放相机、PWM、服务地址或运动控制。人脸阈值最低 0.45。
 修改后清空当前侧累计并丢弃旧配置请求，当前侧 deadline 不延长，新超时从下一侧生效。
 转向、请求失败、低分或身份变化也重计数。多个页面保存冲突会返回 409，需刷新。
 浏览器断开或慢客户端不影响任务；不接管导航相机。
 
+## 障碍归属与倒车调试
+
+障碍框底部中心投影到地面，并使用采集时刻的 ODOM 沿边进度计算剩余距离。
+仅目标位于当前边且距离不超过“剩余距离减终点保留余量”时，才参与当前边的
+连续确认。框底接地点截断、投影无效、横向超界或没有对应里程时不参与封边。
+例如 5_4→4_4 接近终点时，3_4—4_4 的障碍可以标为前方看见，不封 5_4—4_4。
+跨边定位只沿唯一的直行延续边；分支或转弯不猜测。普通拓扑模式未启用涵洞
+ODOM 历史时使用当前进度估计；现场应使用上面的涵洞命令获得采集时刻匹配。
+
+网页“障碍判断调参”保存到 config/culvert_inspection.json 的 obstacle 区：
+
+| 参数 | 初始值 | 作用 |
+| --- | --- | --- |
+| 路段终点保留余量 | 0.05 米 | 终点附近暂停当前边累计 |
+| 投影距离修正 | 0 米 | 现场修正接地点估算偏差，可为负 |
+| 最大判定距离 | 0.80 米 | 远处目标暂不参与归属判断 |
+| 相对道路中心的横向容差 | 0.18 米 | 排除其他道路上的目标 |
+| 障碍检测置信度下限 | 0.45 | 确认候选最低分 |
+| 框底部最低位置 | 原图高度的 35% | 保留原近距离过滤 |
+| 连续确认帧数 | 3 帧 | 通过条件后连续确认 |
+
+障碍配置独立计数版本；保存后从后续帧生效，清空未确认障碍累计，不影响
+当前侧的人脸/刀具累计。切换有向边或重新计里程也清空障碍累计。
+已封边仍保留本次任务记录，需重启任务才清空。距离依赖地面标定和接地点，
+上述调试值需现场逐步调整，不能视为已验收的障碍定位精度。
+
+原倒车已经使用导航视觉 near_x_m 计算纠偏角速度，并通过负向 CMD_VEL 倒车；
+没有修改其 0.08 m/s、0.28 米预瞄和 0.4 rad/s 上限。新任务日志增加
+obstacle_observation 与 obstacle_backup_control，可核对框归属、剩余距离、
+中心偏差和实际给定 v/w；旧日志未逐帧记录倒车输出，不能还原当时的纠偏效果。
+
 ## 地图与语音
 
-原任务 .culverts.json/.culverts.svg 新增两侧参数、身份、分数、确认帧数、方向端点和
-未确认原因。done 为两侧均确认（绿色），partial 为检查结束但部分未确认（紫色）。
-两种状态本次任务均去重，partial 不等于成功；静态拓扑与道路覆盖状态不改变。
-安全故障仍是 failed（红色），不标记检查完成。
+网页拓扑图显示完整节点/道路、车辆位置、障碍、涵洞和标签。
+每次启动任务创建空动态覆盖层，不读取上轮动态标记；原任务历史文件仍保留，
+不修改静态拓扑 YAML。看见障碍为橙色，确认障碍为红色；只有原重规划流程封边。
+地图位置来自框地面接点、拓扑边长和里程，属于估计位置。
+
+任务 .culverts.json/.culverts.svg 保存两侧参数、身份、分数、确认帧数、方向端点、
+未确认原因、障碍和标签记录。done 为两侧均确认（绿色），partial 为检查结束但
+部分未确认（紫色）。两种状态本次任务均去重；安全故障为 failed（红色）。
+高频障碍位置更新最多每秒保存一次，新发现/确认立即保存，退出补存最终快照。
+
+当前 RFID_EVENT 协议只提供 1～12 的标签号和 generation，没有原始 UID 字节。
+地图标注真实收到的标签号，接收时的拓扑里程位置为估计；不伪造 UID，也不让
+这些地图事件接管视觉路口转向。原始 UID 显示需后续明确修改下位机协议。
 
 本轮只发软件识别结果事件，speech_enabled=false，不发送语音命令。现有
 Session::RequestSpeech / SPEAK_AUDIO (0x14) 仅支持真实音频 1～12，尚无身份编号表；
@@ -165,8 +206,17 @@ PYTHONPATH=navigation:vision:. python3 -B -m unittest discover \
 新测试只使用合成相机、假 HTTP、假 PWM 与系统临时目录；网页测试监听本机随机端口。
 识别测试读取 tests/fixtures/culvert_inspection.json 的固定默认样本，不读取或覆盖现场
 已经保存的运行配置；在网页修改 ROI 或阈值后仍可执行离线测试。提交的正式配置保留
-已保存的 ROI [0,0,1,0.8]、未指定相机及 hardware_verified=false。
+现场 ROI [0,0,1,0.75]、已确认相机及 hardware_verified=true；测试样本独立。
 既有涵洞配置测试读取本地模型指纹，不推理。实际实体识别准确率、负样本误判率、
 PWM 机械到位和混合 NPU 负载尚须授权联调；刀具服务用核0/1/2可能与导航争用资源。
-用户授权的临时调试可使用上述开关；正式负载验收仍须按默认时效保护验证。
+本轮没有实施 NPU 独占交接或修改模型核配置，后续仍需混合负载实测。
 离线通过不代表实车验收。
+
+## 2026-10-09 最近涵洞故障核查
+
+最后一次任务的第二涵洞位于 2_2→2_1。B 侧连续三帧确认嫌疑人6号，
+相似度约 0.7702；翻转后 A 侧识别中出现 vision_unsafe，沿边里程没有变化，
+日志没有 PWM 写入失败或车辆移动故障。该任务已经启用旧临时时效豁免，故障
+不是 200 ms 限制。保存导航视频约 144.6 秒时手指遮挡镜头；离线道路模型回放
+在 144.6/144.8/145.0 秒连续输出零道路像素和 stop_road，与故障时刻吻合。
+保留导航道路内容检查，移开遮挡后再运行；离线回放不代表新版本实车验收。

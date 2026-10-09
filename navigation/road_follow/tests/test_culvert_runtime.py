@@ -122,20 +122,19 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.assertEqual(self.graph.blocked,set())
         self.assertEqual(self.runtime.records.entries,{})
 
-    def test_expired_yolo_result_never_confirms(self):
+    def test_slow_yolo_result_can_confirm_with_aligned_fresh_odom(self):
         self.update(.7); self.update(.8)
         result=self.update(.9,age=.21)
-        self.assertFalse(result.owns)
-        self.assertEqual(len(self.runtime.perception.positions),0)
+        self.assertTrue(result.owns)
+        self.assertIsNone(self.runtime.controller.fault_reason)
 
-    def parked_task(self, trial=False):
+    def parked_task(self):
         for t in (.7,.8,.9): self.update(t)
         control=self.runtime.controller
         target=control.target
         control.phase="task"
         control.task_pose=(target.target_s_m,0,0)
         control.executor=NS(step=lambda now:"running")
-        self.runtime.inspection_ignore_nav_timeout=trial
         self.progress.s_m=target.target_s_m
         self.runtime.history.add(self.runtime.edge_key(),1,target.target_s_m,target.target_s_m,0,0)
 
@@ -147,67 +146,65 @@ class CulvertRuntimeTest(unittest.TestCase):
             captured_s=captured,sequence=99,source=0,now=now,progress=self.progress,
             command=self.command,eligible=True,notes=self.notes)
 
-    def test_default_task_still_faults_on_expired_navigation_frame(self):
+    def test_default_task_accepts_navigation_frames_older_than_200ms(self):
         self.parked_task()
         outcome=self.parked_update()
-        self.assertEqual(self.runtime.controller.fault_reason,"vision_unsafe")
+        self.assertIsNone(self.runtime.controller.fault_reason)
         self.assertEqual(outcome.command.v_mps,0)
 
-    def test_trial_accepts_expired_navigation_frame_only_while_parked_task(self):
-        from road_follow.__main__ import _navigation_timed_out
-        self.parked_task(trial=True)
+    def test_old_config_frame_age_limit_does_not_reenable_navigation_timeout(self):
+        self.parked_task()
+        self.runtime.config=CulvertConfig(max_frame_age_s=.20)
         outcome=self.parked_update()
         self.assertIsNone(self.runtime.controller.fault_reason)
-        self.assertEqual(self.runtime.controller.phase,"task")
         self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
         self.assertFalse(outcome.send_velocity)
-        self.assertFalse(_navigation_timed_out(.5,self.runtime))
-        for phase in ("idle","entering","stopping","settling","reacquire","fault"):
-            self.runtime.controller.phase=phase
-            self.assertTrue(_navigation_timed_out(.5,self.runtime),phase)
-        self.assertTrue(_navigation_timed_out(.5,None))
 
-    def test_trial_does_not_ignore_road_loss(self):
-        self.parked_task(trial=True)
+    def test_default_does_not_ignore_road_loss(self):
+        self.parked_task()
         self.command=VelocityCommand(0,0,"stop_road")
         self.parked_update()
         self.assertEqual(self.runtime.controller.fault_reason,"vision_unsafe")
+        events=[json.loads(line) for line in Path(self.runtime.log.name).read_text(encoding="utf-8").splitlines()]
+        last=next(e for e in reversed(events) if e["event"]=="culvert_control")
+        self.assertEqual(last["input_command"]["reason"],"stop_road")
+        self.assertAlmostEqual(last["frame_age_s"],.3)
 
-    def test_trial_does_not_ignore_odom_timeout(self):
-        self.parked_task(trial=True)
+    def test_default_does_not_ignore_odom_timeout(self):
+        self.parked_task()
         self.parked_update(now=2,odom=False)
         self.assertEqual(self.runtime.controller.fault_reason,"odom_stale")
 
-    def test_trial_does_not_ignore_vehicle_movement(self):
-        self.parked_task(trial=True)
+    def test_default_does_not_ignore_vehicle_movement(self):
+        self.parked_task()
         self.parked_update(moved=.02)
         self.assertEqual(self.runtime.controller.fault_reason,"moved_during_task")
 
-    def test_trial_does_not_ignore_stop_failure(self):
-        self.parked_task(trial=True)
+    def test_default_does_not_ignore_stop_failure(self):
+        self.parked_task()
         self.notes.put("STOP_FAIL")
         self.parked_update()
         self.assertEqual(self.runtime.controller.fault_reason,"stop_failed")
 
-    def test_trial_completion_defers_velocity_and_restores_fresh_frame_guard(self):
-        self.parked_task(trial=True)
+    def test_completion_defers_velocity_and_reacquires_with_distinct_frames(self):
+        self.parked_task()
         self.runtime.controller.executor=NS(step=lambda now:"done")
         outcome=self.parked_update()
         self.assertEqual(self.runtime.controller.phase,"reacquire")
-        self.assertTrue(self.runtime.navigation_time_guard_enabled)
         self.assertFalse(outcome.send_velocity)
         self.assertEqual(outcome.command.v_mps,0)
         # 已完成任务这一帧不计为重新取路；之后新鲜帧连续通过才恢复。
         for t in (1.4,1.5,1.6): outcome=self.parked_update(now=t,captured=t)
         self.assertTrue(outcome.resumed)
         self.assertEqual(self.runtime.controller.phase,"idle")
-        self.assertTrue(self.runtime.navigation_time_guard_enabled)
 
-    def test_trial_reacquire_rejects_expired_frame(self):
-        self.parked_task(trial=True)
+    def test_reacquire_accepts_slow_distinct_frames_but_rejects_future_timestamp(self):
+        self.parked_task()
         self.runtime.controller.executor=NS(step=lambda now:"done")
         self.parked_update()
-        self.parked_update(now=1.4,captured=1)
+        self.parked_update(now=1.4,captured=1.1)
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.parked_update(now=1.5,captured=1.6)
         self.assertEqual(self.runtime.controller.fault_reason,"vision_unsafe")
 
     def test_only_owner_consumes_stop_notes(self):
@@ -241,6 +238,30 @@ class CulvertRuntimeTest(unittest.TestCase):
         entrance=NS(phase="done"); recovery=NS(phase="idle")
         for phase,expected in (("follow",True),("approach",True),("heading_hold",False),("turning",False),("align",False)):
             self.assertEqual(culvert_eligible(entrance,self.agent,NS(phase=phase),recovery,NS(phase="follow")),expected)
+
+    def test_saved_obstacle_settings_reset_both_judges_without_touching_recognition(self):
+        from road_follow.inspection_config import Settings
+        from vision.obstacle.blockage import HardBlockageJudge
+        path=Path(self.folder.name)/"inspection.json"
+        path.write_bytes((ROOT/"navigation/road_follow/tests/fixtures/culvert_inspection.json").read_bytes())
+        settings=Settings(path)
+        self.runtime.inspection_settings=settings
+        judge=HardBlockageJudge()
+        box=Detection(1,"施工警示牌",.9,280,80,360,300)
+        self.runtime.obstacle_settings(judge)
+        judge.update([box],(480,640))
+        self.runtime.unknown_judge.update([box],(480,640))
+        recognition_revision=settings.snapshot()[1]
+        settings.update_obstacle({"confirm_frames":4,"min_score":.7,"edge_end_margin_m":.12})
+        # Unknown checking may read the revision before the main hard-obstacle judge.
+        self.runtime.obstacle_settings()
+        values=self.runtime.obstacle_settings(judge)
+        self.assertEqual(values["edge_end_margin_m"],.12)
+        self.assertEqual(judge.config.confirm_frames,4)
+        self.assertEqual(judge.config.min_score,.7)
+        self.assertEqual(judge.update([box],(480,640)).stable_frames,1)
+        self.assertEqual(self.runtime.unknown_judge.update([box],(480,640)).stable_frames,1)
+        self.assertEqual(settings.snapshot()[1],recognition_revision)
 
     def test_progress_origin_reset_invalidates_same_edge_interpolation(self):
         self.update(.7)
@@ -277,14 +298,15 @@ class CulvertRuntimeTest(unittest.TestCase):
             self.assertEqual(error.exception.code,2)
             camera.assert_not_called(); uart.assert_not_called(); guard.assert_not_called(); segment.assert_not_called()
 
-    def test_timeout_trial_requires_inspection_before_any_device_start(self):
+    def test_help_no_longer_requires_or_advertises_timeout_trial_flag(self):
         from road_follow import __main__ as entry
-        with patch.object(entry,"_open_camera") as camera,patch.object(entry.subprocess,"Popen") as uart, \
-             patch.object(entry,"needs_frequency_guard") as guard,patch.object(entry,"RoadSegmenter") as segment:
-            with self.assertRaises(SystemExit) as error:
-                entry.main(["--inspection-ignore-nav-timeout"])
-            self.assertEqual(error.exception.code,2)
-            camera.assert_not_called(); uart.assert_not_called(); guard.assert_not_called(); segment.assert_not_called()
+        from contextlib import redirect_stdout
+        import io
+        output=io.StringIO()
+        with redirect_stdout(output):
+            with self.assertRaises(SystemExit) as error: entry.main(["--help"])
+        self.assertEqual(error.exception.code,0)
+        self.assertNotIn("inspection-ignore-nav-timeout",output.getvalue())
 
 
 if __name__=="__main__": unittest.main()

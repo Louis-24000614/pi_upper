@@ -1,7 +1,7 @@
 """把涵洞状态机接入现有拓扑主循环，唯一控制方消费动作队列。"""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 import hashlib
 import json
@@ -68,10 +68,11 @@ def drain_notes(notes):
 
 class CulvertRuntime:
     def __init__(self, mapping, config, calibration, *, nav_config, agent, send, event, root, prefix=None,
-                 inspection_settings=None, inspection_web=False, inspection_ignore_nav_timeout=False):
-        if inspection_ignore_nav_timeout and inspection_settings is None:
-            raise ValueError("跳过导航时效检查需要启用涵洞识别")
-        self.inspection_ignore_nav_timeout = inspection_ignore_nav_timeout
+                 inspection_settings=None, inspection_web=False):
+        self.inspection_settings = inspection_settings
+        self.obstacle_revision = None
+        self.obstacle_judge_revisions = {}
+        self.last_obstacle_details = []
         self.mapping, self.config, self.calibration = mapping, config, calibration
         self.nav_config, self.agent, self.console_event = nav_config, agent, event
         self.history = OdomHistory(config)
@@ -88,7 +89,9 @@ class CulvertRuntime:
                 from road_follow.inspection import create_inspection
                 executor = create_inspection(inspection_settings, root, web_enabled=inspection_web, event=self.event)
                 if executor.web is not None:
-                    executor.web.map_status = self.records.snapshot
+                    executor.web.map_status = self.records.topology_snapshot
+                    executor.web.map_svg = self.records.svg
+                    executor.web.obstacle_status = lambda: self.last_obstacle_details
             self.controller = CulvertController(config, self.history, send=send, event=self.event,
                                                 records=self.records, executor=executor)
         except BaseException:
@@ -100,20 +103,16 @@ class CulvertRuntime:
         self.first_capture_s = None
         self.paused_s = None
         self.event("culvert_projection", **calibration.metadata)
-        if inspection_ignore_nav_timeout:
-            self.event("inspection_navigation_timeout_trial", enabled=True, phase="task")
-            self.console_event("调试", "涵洞停稳识别期间跳过 200ms 导航时效检查；行驶与恢复导航仍保留")
-
-    @property
-    def navigation_time_guard_enabled(self):
-        return not (self.inspection_ignore_nav_timeout and self.controller.phase == "task")
 
     def close(self):
         try:
             if hasattr(self.controller.executor, "close"):
                 self.controller.executor.close()
         finally:
-            self.log.close()
+            try:
+                self.records.flush()
+            finally:
+                self.log.close()
 
     def edge_key(self):
         state = self.agent.state
@@ -135,7 +134,29 @@ class CulvertRuntime:
     def split(self, detections):
         return ([d for d in detections if d.class_id in self.hard_ids],
                 [d for d in detections if d.class_id == self.culvert_id],
-                [d for d in detections if d.class_id not in self.hard_ids and d.class_id != self.culvert_id])
+                 [d for d in detections if d.class_id not in self.hard_ids and d.class_id != self.culvert_id])
+
+    def obstacle_settings(self, judge=None):
+        from road_follow.obstacle_edge import OBSTACLE_DEFAULTS
+        values, revision = (self.inspection_settings.obstacle_snapshot() if self.inspection_settings is not None
+                            else (dict(OBSTACLE_DEFAULTS), 0))
+        for target in (judge, self.unknown_judge):
+            if target is not None and self.obstacle_judge_revisions.get(id(target)) != revision:
+                target.config = replace(target.config, **{key: values[key] for key in
+                    ("min_score", "min_bottom_ratio", "confirm_frames")})
+                target.reset()
+                self.obstacle_judge_revisions[id(target)] = revision
+        if revision != self.obstacle_revision:
+            self.obstacle_revision = revision
+            self.event("obstacle_settings", revision=revision, values=values)
+        return values
+
+    def observe_obstacles(self, details, observation):
+        self.last_obstacle_details = details
+        self.records.observe_obstacles(details, observation.bbox if observation.just_confirmed else None)
+        if details:
+            self.event("obstacle_observation", details=details, confirmed=observation.just_confirmed,
+                       stable_frames=observation.stable_frames, reason=observation.reason)
 
     def cancel_for_obstacle(self, now, notes):
         if self.controller.owns:
@@ -145,7 +166,7 @@ class CulvertRuntime:
             self.paused_s = None
 
     def update(self, *, detections, frame, mask, captured_s, sequence, source, now, progress,
-               command, eligible, notes):
+               command, eligible, notes, navigation_diagnostics=None, inference_s=None):
         key = self.edge_key()
         if key != self.last_key:
             self.unknown_judge.reset()
@@ -154,12 +175,17 @@ class CulvertRuntime:
             if self.history.key != key:
                 self.history.reset(key)
         hard, culverts, unknown = self.split(detections)
+        if unknown:
+            from road_follow.obstacle_edge import filter_current_edge
+            unknown, _ = filter_current_edge(unknown, graph=self.agent.graph, edge_key=key,
+                progress_m=self.history.progress_at(captured_s), ipm=self.calibration.ipm,
+                image_shape=frame.shape, settings=self.obstacle_settings(),
+                lane_x_m=getattr(navigation_diagnostics, "near_x_m", 0))
         if (eligible or self.controller.owns) and self.unknown_judge.update(unknown, frame.shape).hard_blocked:
             self.controller.fault("unknown_near_target", now)
-        time_guard_was_disabled = not self.navigation_time_guard_enabled
+        was_inspecting = self.controller.phase == "task"
         frame_age_s = now-captured_s
-        frame_fresh = 0 <= frame_age_s and (
-            frame_age_s <= self.config.max_frame_age_s or time_guard_was_disabled)
+        frame_fresh = math.isfinite(frame_age_s) and frame_age_s >= 0
         road_safe = frame_fresh and command.v_mps > 0 and command.reason in ("follow", "follow_near")
         if eligible and not self.controller.owns:
             points = self.calibration.road_points(mask, self.nav_config) if self.calibration.check_shape(frame.shape) else []
@@ -188,12 +214,14 @@ class CulvertRuntime:
         received = drain_notes(notes)
         outcome = self.controller.step(now=now, current_s=progress.s_m, edge_key=key,
             visual_ok=road_safe, frame_s=captured_s, command=command, near_speed=near_speed, notes=received)
-        if time_guard_was_disabled and self.controller.phase == "reacquire":
-            # 完成识别的这一帧可能已过期，保持停车，下一轮只接收新的导航帧。
+        if was_inspecting and self.controller.phase == "reacquire":
+            # 完成识别的这一帧保持停车，下一轮只接收新的导航帧。
             outcome = CulvertOutcome(outcome.command, outcome.owns, False, outcome.resumed)
         self.event("culvert_control", now_s=now, phase=self.controller.phase,
                    progress_m=progress.s_m, target_s_m=(self.controller.target.target_s_m if self.controller.target else None),
-                   notes=received, command=asdict(outcome.command))
+                   notes=received, command=asdict(outcome.command), input_command=asdict(command),
+                   captured_s=captured_s, frame_age_s=frame_age_s, inference_s=inference_s,
+                   navigation_diagnostics=asdict(navigation_diagnostics) if navigation_diagnostics is not None else None)
         return outcome
 
     def unsafe_frame(self, now, reason):

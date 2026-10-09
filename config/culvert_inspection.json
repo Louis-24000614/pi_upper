@@ -40,5 +40,14 @@
     "host": "0.0.0.0",
     "port": 8081,
     "preview_fps": 10.0
+  },
+  "obstacle": {
+    "edge_end_margin_m": 0.05,
+    "distance_bias_m": 0.0,
+    "max_distance_m": 0.8,
+    "max_lateral_m": 0.18,
+    "min_score": 0.45,
+    "min_bottom_ratio": 0.35,
+    "confirm_frames": 3
   }
 }

@@ -17,7 +17,8 @@ class CulvertConfig:
     max_heading_rad: float = 0.10
     confirm_frames: int = 3
     position_spread_m: float = 0.05
-    max_frame_age_s: float = 0.20
+    # 兼容旧配置字段；导航帧龄上限已取消，不再读取此字段进行控制。
+    max_frame_age_s: float | None = None
     odom_timeout_s: float = 0.50
     stop_margin_m: float = 0.01
     stop_error_m: float = 0.05
@@ -41,6 +42,8 @@ class CulvertConfig:
         config = cls(**mapping)
         for name in allowed:
             value = getattr(config, name)
+            if name == "max_frame_age_s" and value is None:
+                continue
             if name == "entry_distance_bias_m":
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ValueError("涵洞参数 entry_distance_bias_m 必须是有限数")
