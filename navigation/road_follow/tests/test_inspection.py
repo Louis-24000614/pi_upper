@@ -389,7 +389,7 @@ class ControllerIntegrationTest(unittest.TestCase):
                                     event=lambda *a, **k: None, records=records, executor=executor)
         control.begin(TARGET, 0, .5, .05)
         records.discover(TARGET)
-        control.phase, control.task_pose = "task", (.635, 0, 0)
+        control.phase = "task"
         history.add(KEY, 1, .635, .635, 0, 0)
         return control, records, history, sent
 

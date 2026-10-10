@@ -160,7 +160,6 @@ class CulvertController:
         self.clear = 0
         self.last_reacquire_s = None
         self.fault_reason = None
-        self.task_pose = None
 
     @property
     def owns(self):
@@ -249,7 +248,6 @@ class CulvertController:
                 if not target.entrance_s_m < current_s < target.exit_s_m or abs(current_s - target.target_s_m) > cfg.stop_error_m:
                     self.fault("stop_position_error", now)
                 else:
-                    self.task_pose = self.history.samples[-1][2:5]
                     try:
                         self.executor.start(now, target)
                     except Exception as exc:
@@ -260,49 +258,27 @@ class CulvertController:
             elif now - self.stop_ack_s >= cfg.settle_timeout_s:
                 self.fault("settle_timeout", now)
         elif self.phase == "task":
-            pose_sample = self.history.samples[-1]
-            x, y, yaw = pose_sample[2:5]
-            ox, oy, oyaw = self.task_pose
-            delta_x = x - ox
-            delta_y = y - oy
-            position_delta = math.hypot(delta_x, delta_y)
-            yaw_delta = math.atan2(math.sin(yaw - oyaw), math.cos(yaw - oyaw))
-            if position_delta > cfg.stable_position_m or abs(yaw_delta) > cfg.stable_yaw_rad:
-                self.fault(
-                    "moved_during_task",
-                    now,
-                    odom_sample_s=pose_sample[0],
-                    position_delta_x_m=delta_x,
-                    position_delta_y_m=delta_y,
-                    position_delta_m=position_delta,
-                    yaw_delta_rad=yaw_delta,
-                    position_limit_m=cfg.stable_position_m,
-                    yaw_limit_rad=cfg.stable_yaw_rad,
-                    reference_pose={"x_m": ox, "y_m": oy, "yaw_rad": oyaw},
-                    observed_pose={"x_m": x, "y_m": y, "yaw_rad": yaw},
-                )
-            else:
-                try:
-                    result = self.executor.step(now)
-                except Exception as exc:
-                    self.event("culvert_task_error", error=str(exc))
-                    result = "failed"
-                if result == "failed":
-                    self.fault("task_failed", now)
-                elif result == "done":
-                    if abs(current_s - target.target_s_m) > cfg.stop_error_m:
-                        self.fault("stop_position_error", now)
+            try:
+                result = self.executor.step(now)
+            except Exception as exc:
+                self.event("culvert_task_error", error=str(exc))
+                result = "failed"
+            if result == "failed":
+                self.fault("task_failed", now)
+            elif result == "done":
+                if abs(current_s - target.target_s_m) > cfg.stop_error_m:
+                    self.fault("stop_position_error", now)
+                else:
+                    inspection = getattr(self.executor, "result", None)
+                    if inspection is not None:
+                        self.records.complete_inspection(target.edge_id, current_s-target.target_s_m, inspection)
                     else:
-                        inspection = getattr(self.executor, "result", None)
-                        if inspection is not None:
-                            self.records.complete_inspection(target.edge_id, current_s-target.target_s_m, inspection)
-                        else:
-                            self.records.complete(target.edge_id, current_s-target.target_s_m)
-                        self.deadline_s = now + cfg.reacquire_timeout_s
-                        self.last_reacquire_s = frame_s
-                        self._transition("reacquire", now)
-                elif result != "running":
-                    self.fault("invalid_task_result", now)
+                        self.records.complete(target.edge_id, current_s-target.target_s_m)
+                    self.deadline_s = now + cfg.reacquire_timeout_s
+                    self.last_reacquire_s = frame_s
+                    self._transition("reacquire", now)
+            elif result != "running":
+                self.fault("invalid_task_result", now)
         elif self.phase == "reacquire":
             if frame_s is not None and (self.last_reacquire_s is None or frame_s > self.last_reacquire_s):
                 self.last_reacquire_s = frame_s

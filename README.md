@@ -213,6 +213,9 @@ PYTHONPATH=.:navigation:vision python3 -m road_follow \
 每个涵洞仅翻转一次，下次反向，不自动归位。`--inspection-web` 提供整次导航期间的
 局域网侧视预览、外层 ROI 框选与 JSON 持久化调参；默认端口 8081。
 
+涵洞识别期间不再根据位移或航向变化触发停车，默认生效，无需额外参数。
+识别开始前的停稳检查和任务完成时的中央位置检查保留。
+
 当前舵机接线为 **PWM14_M0**。必须先明确配置侧视设备、核实实际 PWM 路由及安全端点；
 默认配置拒绝未确认硬件启动。本轮不发送语音命令，接口与音频编号边界见
 [涵洞两侧识别说明](docs/reference/perception/culvert-inspection.md)。

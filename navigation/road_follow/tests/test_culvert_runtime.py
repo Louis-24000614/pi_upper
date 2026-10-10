@@ -133,7 +133,6 @@ class CulvertRuntimeTest(unittest.TestCase):
         control=self.runtime.controller
         target=control.target
         control.phase="task"
-        control.task_pose=(target.target_s_m,0,0)
         control.executor=NS(step=lambda now:"running")
         self.progress.s_m=target.target_s_m
         self.runtime.history.add(self.runtime.edge_key(),1,target.target_s_m,target.target_s_m,0,0)
@@ -175,10 +174,16 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.parked_update(now=2,odom=False)
         self.assertEqual(self.runtime.controller.fault_reason,"odom_stale")
 
-    def test_default_does_not_ignore_vehicle_movement(self):
+    def test_vehicle_movement_during_task_keeps_recognition_running(self):
         self.parked_task()
-        self.parked_update(moved=.02)
-        self.assertEqual(self.runtime.controller.fault_reason,"moved_during_task")
+        steps=[]
+        self.runtime.controller.executor=NS(step=lambda now:steps.append(now) or "running")
+        outcome=self.parked_update(moved=.02)
+        self.assertEqual(steps,[1.3])
+        self.assertEqual(self.runtime.controller.phase,"task")
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+        self.assertFalse(outcome.send_velocity)
 
     def test_default_does_not_ignore_stop_failure(self):
         self.parked_task()
