@@ -5,11 +5,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from road_follow.control import HeadingAnchorGate, VelocityCommand, step_heading_anchor
+from road_follow.control import (
+    HeadingAnchorGate, VelocityCommand, heading_anchor_enabled_from_mapping, step_heading_anchor,
+)
 from road_follow.__main__ import _watch_uart_notes
 from road_follow.arrival_policy import resolve_arrival_policy, step_route_arrival
-from road_follow.junction_turn import JunctionTurn, JunctionTurnConfig
-from road_follow.rfid_arrival import RfidArrival, RfidArrivalConfig
+from road_follow.junction_turn import JunctionTurn, JunctionTurnConfig, junction_turn_config_from_mapping
+from road_follow.rfid_arrival import RfidArrival, RfidArrivalConfig, rfid_arrival_config_from_mapping
 from ipm_proto.junction import KIND_CROSS, JunctionRead
 from navigation.topo_proto.graph import load_topology
 
@@ -140,7 +142,8 @@ class RouteAnchorTest(unittest.TestCase):
             ("1_2", "2_2", .97, False), ("0_J", "1_2", .4, False),
             ("2_1", "3_1", .97, True), ("0_J", "1_2", .4, True)):
             with self.subTest(source=source, patrol=patrol):
-                jcfg, pcfg = JunctionTurnConfig(), RfidArrivalConfig()
+                jcfg = JunctionTurnConfig(heading_anchor_enabled=True)
+                pcfg = RfidArrivalConfig(heading_anchor_enabled=True)
                 policy = resolve_arrival_policy(load_topology(), source, target, length, jcfg, pcfg)
                 state = JunctionTurn(phase="follow" if patrol else "align")
                 pstate = RfidArrival(phase="align")
@@ -177,6 +180,64 @@ class RouteAnchorTest(unittest.TestCase):
                 self.assertGreater(command.v_mps, 0)
                 step(1.5, 1.49, .8 + policy.final_forward_m)
                 self.assertEqual((pstate if patrol else state).phase, "arrived")
+
+
+class LegacyHeadingCompatibilityTest(unittest.TestCase):
+    def test_missing_config_defaults_to_legacy_and_explicit_enable_is_preserved(self):
+        self.assertFalse(JunctionTurnConfig().heading_anchor_enabled)
+        self.assertFalse(RfidArrivalConfig().heading_anchor_enabled)
+        for cfg in ({}, {"heading_anchor": {}}, {"heading_anchor": None},
+                    {"heading_anchor": {"enabled": False}}):
+            with self.subTest(cfg=cfg):
+                self.assertFalse(heading_anchor_enabled_from_mapping(cfg))
+                self.assertFalse(junction_turn_config_from_mapping(cfg).heading_anchor_enabled)
+                self.assertFalse(rfid_arrival_config_from_mapping(cfg).heading_anchor_enabled)
+        cfg = {"heading_anchor": {"enabled": True}}
+        self.assertTrue(heading_anchor_enabled_from_mapping(cfg))
+        self.assertTrue(junction_turn_config_from_mapping(cfg).heading_anchor_enabled)
+        self.assertTrue(rfid_arrival_config_from_mapping(cfg).heading_anchor_enabled)
+        with self.assertRaises(ValueError):
+            heading_anchor_enabled_from_mapping({"heading_anchor": {"enabled": "false"}})
+
+    def test_legacy_routes_hold_current_yaw_without_calibration_stop_or_request(self):
+        for source, target, length, patrol in (
+            ("1_2", "2_2", .97, False), ("0_J", "1_2", .4, False),
+            ("2_1", "3_1", .97, True), ("0_J", "1_2", .4, True)):
+            with self.subTest(source=source, patrol=patrol):
+                jcfg, pcfg = JunctionTurnConfig(), RfidArrivalConfig()
+                policy = resolve_arrival_policy(load_topology(), source, target, length, jcfg, pcfg)
+                side = next(side for side in ("left", "right") if side in policy.expected_openings)
+                state = JunctionTurn(phase="follow" if patrol else "approach", side=side,
+                                     branch_latched=not patrol)
+                pstate = RfidArrival(edge_latched=True)
+                notes, sent = queue.Queue(), []
+                reading = JunctionRead(KIND_CROSS, True, True, True, 0, .20,
+                                       junction_y_m=.25, corridor_end_y_m=.25, forward_band_ratio=0)
+
+                def step(now, progress=None, yaw=2.3):
+                    nonlocal state, pstate
+                    if progress is None:
+                        progress = policy.handoff_progress_m
+                    state, pstate, command, _ = step_route_arrival(
+                        policy, patrol=patrol, state=state, patrol_state=pstate,
+                        reading=reading, opening=reading.kind, command=VelocityCommand(.08, 0, "follow"),
+                        progress_m=progress, odom_valid=True, notes=notes,
+                        send=lambda line: sent.append(line) or True, junction_cfg=jcfg, patrol_cfg=pcfg,
+                        lane_heading_rad=0, yaw_rad=yaw, visual_safe=True, now_s=now)
+                    return command
+
+                for i in range(3):
+                    self.assertGreater(step(1 + i*.03).v_mps, 0)
+                active = pstate if patrol else state
+                self.assertEqual(active.phase, "heading_hold")
+                self.assertAlmostEqual(active.hold_yaw_rad, 2.3)
+                self.assertAlmostEqual(active.hold_start_m, policy.handoff_progress_m)
+                self.assertLess(step(1.2, yaw=2.4).omega_radps, 0)
+                self.assertEqual(sent, [])
+                command = step(1.3, progress=policy.handoff_progress_m + policy.final_forward_m)
+                self.assertEqual(active.phase, "arrived")
+                self.assertEqual(command.v_mps, 0)
+                self.assertEqual(sent, [])
 
 
 if __name__ == "__main__":

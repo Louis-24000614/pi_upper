@@ -38,7 +38,7 @@ class RfidArrivalConfig:
     align_gain: float = 4.0
     align_max_abs_omega: float = 0.5
     forward_strip_abs_x_m: float = 0.12
-    heading_anchor_enabled: bool = True
+    heading_anchor_enabled: bool = False
 
 
 @dataclass

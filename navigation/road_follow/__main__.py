@@ -572,7 +572,7 @@ def _run(args, parser) -> int:
         return 1
     if turn_side is not None:
         _event("航向校正", "已启用路口参考同步，旧固件将拒绝启动" if anchor_enabled
-               else "已显式关闭中途参考校正，当前模式不更新下位机动作航向参考")
+               else "未启用中途参考校正，沿用原路口流程，不更新下位机动作航向参考")
     if args.culvert_inspect and not speech_config.ready:
         _event("播报", f"识别播报已阻止：缺少已测音轨时长 {','.join(map(str, speech_config.missing_ids))}；UID 原流程保留")
     capture_cfg = cfg.get("capture", {}) or {}

@@ -37,10 +37,10 @@ uart:
   device: /dev/ttyS6
   baud: 921600
 
-# 视觉摆正成功后，等待 MCU 实际停稳并同步动作航向参考；不清原始 yaw/里程计。
-# 需要支持 HEADING_REFERENCE 的固件。关闭时启动日志明确提示，不提供中途参考校正。
+# 当前保留校正接口并沿用原路口流程，不新增停车校准等待。
+# 下位机烧录支持 HEADING_REFERENCE 的固件后，才可启用参考同步。
 heading_anchor:
-  enabled: true
+  enabled: false
 
 # 启用 --turn-at-junction 时：前进 15 cm 到 0_J、停稳、按 Agent 下一条边原地转向。
 entrance:

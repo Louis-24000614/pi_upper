@@ -58,7 +58,7 @@ class JunctionTurnConfig:
     align_timeout_s: float = 1.5
     align_gain: float = 4.0
     align_max_abs_omega: float = 0.5
-    heading_anchor_enabled: bool = True
+    heading_anchor_enabled: bool = False
 
 
 @dataclass(frozen=True)

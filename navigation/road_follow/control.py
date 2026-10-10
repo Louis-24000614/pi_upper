@@ -113,7 +113,7 @@ class HeadingAnchorGate:
 
 
 def heading_anchor_enabled_from_mapping(cfg: dict) -> bool:
-    enabled = (cfg.get("heading_anchor", {}) or {}).get("enabled", True)
+    enabled = (cfg.get("heading_anchor", {}) or {}).get("enabled", False)
     if not isinstance(enabled, bool):
         raise ValueError("heading_anchor.enabled 必须是 true 或 false")
     return enabled

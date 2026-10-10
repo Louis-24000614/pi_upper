@@ -34,10 +34,19 @@ IMU 必须有效且已校准，yaw/Z 轴角速度有限；IMU 和控制反馈均
 
 ## 配置与兼容
 
-`config/nav_camera.yaml` 新增 `heading_anchor.enabled: true`。拓扑导航启用时给
-`uart_vel` 传 `--require-heading-anchor`，旧固件缺少 bit4 时桥在 ARM 前退出。
-若明确设置 false，启动日志提示未启用中途参考校正，继续使用原有交接流程；
-摆正测量缺失或超时仍不能作为稳定成功。
+`config/nav_camera.yaml` 当前为 `heading_anchor.enabled: false`，配置省略该字段时
+也默认关闭。当前沿用原有路口交接流程，不发送 `anchor_heading`，不增加停车
+校准/ACK 等待，不给 `uart_vel` 传 `--require-heading-anchor`；旧固件缺少 bit4
+不会因此拒绝启动。原有转弯前停车与安全保护仍保留。
+
+上位机原有流程在视觉摆正后锁存当前 yaw，用之后的相对 yaw 变化维持最后
+17/20 cm 直行。这只是当前短段的航向参考，不能重估 MCU gyro 零偏，也不能修改
+旧固件内部的离散动作方向档位。仅在上位机对 yaw 加偏移无法校正下位机自主执行
+的转弯和定距动作。
+
+校正接口及验证保留。下位机烧录配套固件后，可显式设为 true；启用时拓扑导航
+给 `uart_vel` 传 `--require-heading-anchor`，缺少 bit4 则在 ARM 前退出，并按上文
+进行停稳确认和参考更新。摆正测量缺失或超时仍不能作为稳定成功。
 
 两端源码必须配套构建。本次已在板端临时目录完成 Linux 构建、UART 伪终端测试
 和实际 uart_vel 的假下位机联调。尚未完成 STM32 完整固件链接/烧录和实车校验；
