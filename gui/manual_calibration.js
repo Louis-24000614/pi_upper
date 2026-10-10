@@ -4,6 +4,34 @@ export function clientToImage(clientX, clientY, rect, logicalSize, view) {
           (clientY - rect.top) * logicalSize[1] / rect.height - view.y].map(v => v / view.scale);
 }
 
+// 仅比较相机地面垂足为原点的米制坐标，不使用区域 H 或 BEV 像素 H。
+export function compareCheckPoint(baseline, imageSize, imagePoint, vehicleGround, measured = null) {
+  let oldGround = null, oldUnavailable = null;
+  if (!baseline || baseline.error || !baseline.H_img_to_vehicle_ground_m) {
+    oldUnavailable = baseline?.error || '原配置地面 H 不可用。';
+  } else if (!Array.isArray(baseline.image_size) || baseline.image_size.length !== 2 || baseline.image_size.some((v, i) => v !== imageSize[i])) {
+    oldUnavailable = '原图与导航配置分辨率不同，不能使用旧 H 比较。';
+  } else {
+    const h = baseline.H_img_to_vehicle_ground_m;
+    if (!Array.isArray(h) || h.length !== 3 || h.some(row => !Array.isArray(row) || row.length !== 3 || row.some(v => !Number.isFinite(v)))) {
+      oldUnavailable = '原配置地面 H 无效。';
+    } else {
+      const projected = h.map(row => row[0]*imagePoint[0] + row[1]*imagePoint[1] + row[2]);
+      const point = projected.slice(0, 2).map(v => v/projected[2]);
+      if (projected.some(v => !Number.isFinite(v)) || Math.abs(projected[2]) < 1e-10 || point.some(v => !Number.isFinite(v))) {
+        oldUnavailable = '旧 H 在此点接近投影地平线，无法测距。';
+      } else oldGround = point;
+    }
+  }
+  const error = point => {
+    if (!point || !measured) return null;
+    const xy = point.map((v, i) => v-measured[i]);
+    return {xy, distance: Math.hypot(...xy)};
+  };
+  return {oldGround, oldUnavailable, newGround: vehicleGround, measured,
+          oldError: error(oldGround), newError: error(vehicleGround)};
+}
+
 function initPage() {
   const $ = id => document.getElementById(id);
   const canvas = $('canvas'), context = canvas.getContext('2d');
@@ -12,6 +40,7 @@ function initPage() {
   let busy = false, saved = false, panMode = false, drag = null, autoTimer = null, invalidateTimer = null;
   let canCapture = false, offline = true, baseline = null;
   let checkMode = false, checkPoint = null, checks = [], hasVehicle = false, active = null, canApply = false, restoreToken = null;
+  let inspectedPoint = null;
   let view = {x: 0, y: 0, scale: 1}, fitScale = 1;
 
   async function post(path, body) {
@@ -57,6 +86,7 @@ function initPage() {
   function clearResult() {
     resultId = null; saved = false;
     checkMode = false; checkPoint = null; checks = []; hasVehicle = false;
+    inspectedPoint = null; $('check-comparison').replaceChildren();
     $('check-mode').setAttribute('aria-pressed','false'); $('checks').replaceChildren();
     $('check-coordinate').textContent='计算后可切换检查模式，检查点不会修改四个角点。';
     for (const id of ['measurement-reviewed','image-source-confirmed','ground-contact']) $(id).checked=false;
@@ -112,7 +142,10 @@ function initPage() {
     if (!frameId || !image || event.button > 0 || busy) return;
     const p = pixel(event), hit = points.findIndex(q => Math.hypot(q[0]-p[0],q[1]-p[1])*view.scale < 18);
     if(checkMode && !panMode){
-      if(p[0]>=0 && p[1]>=0 && p[0]<image.naturalWidth && p[1]<image.naturalHeight){checkPoint=p;draw();inspectPoint(false);}
+      if(p[0]>=0 && p[1]>=0 && p[0]<image.naturalWidth && p[1]<image.naturalHeight){
+        checkPoint=p;inspectedPoint=null;$('check-comparison').replaceChildren();
+        $('check-x').value='';$('check-y').value='';draw();inspectPoint(false);
+      }
       event.preventDefault();return;
     }
     if (hit >= 0) drag = {kind:'point',index:hit};
@@ -166,6 +199,7 @@ function initPage() {
   $('live-again').onclick = () => {if(frameId)post('/invalidate',{frame_id:frameId,revision:revision+1}).catch(()=>{});clearFrame();$('live-wrap').hidden=false;$('status').textContent=offline?'请上传新的原始图片。':'正在显示实时画面，冻结后再选点。';};
   async function compute() {
     if (busy || !frameId || points.length!==4) return;
+    clearResult();draw();
     clearTimeout(autoTimer);const id=frameId,r=revision,params=parameters();busy=true;controls();
     try {
       const data=await post('/compute',{frame_id:id,revision:r,parameters:params});
@@ -191,6 +225,34 @@ function initPage() {
     controls();
   }
   $('check-mode').onclick=()=>{checkMode=!checkMode;$('check-mode').setAttribute('aria-pressed',checkMode);$('check-coordinate').textContent=checkMode?'检查模式：点击原图中的已知地面位置。':'选角模式：可以拖动四角，修改后检查记录会清除。';};
+  function comparisonTable(point, vehicleGround, measured = null) {
+    const comparison = compareCheckPoint(baseline, [image.naturalWidth, image.naturalHeight], point, vehicleGround, measured);
+    const wrapper = document.createElement('div'), scroll = document.createElement('div'), table = document.createElement('table');
+    scroll.className='comparison-scroll';table.className='comparison-table';
+    const caption = table.createCaption();caption.textContent='同一点测距对比 · 相机地面垂足为原点 · 单位 cm';
+    const head = table.createTHead().insertRow();
+    for(const name of ['来源','横向 X','前向 Y','误差 ΔX','误差 ΔY','平面总误差']){
+      const th=document.createElement('th');th.scope='col';th.textContent=name;head.append(th);
+    }
+    const body = table.createTBody(), fmt=v=>(v*100).toFixed(2);
+    for(const [label, coordinates, error] of [
+      ['尺子实测', comparison.measured, null],
+      ['旧 H · 参数估算', comparison.oldGround, comparison.oldError],
+      ['新 H · 车辆候选', comparison.newGround, comparison.newError],
+    ]){
+      const row=body.insertRow();
+      const title=document.createElement('th');title.scope='row';title.textContent=label;row.append(title);
+      for(const value of [coordinates?.[0],coordinates?.[1],error?.xy[0],error?.xy[1],error?.distance]){
+        const cell=row.insertCell();cell.textContent=value==null?'—':fmt(value);
+      }
+    }
+    scroll.append(table);wrapper.append(scroll);
+    const note=document.createElement('p');note.className='hint';
+    note.textContent=[comparison.oldUnavailable, !vehicleGround?'填写区域中心偏移并确认方向后，才能比较新 H 的车辆距离。':null,
+      !measured?'输入实测 X、Y 后点击“记录实测值并显示误差”。':null,
+      measured?'误差 = 计算值 − 实测值；平面总误差为两方向误差的合成，仅代表这个检查点。':null].filter(Boolean).join(' ');
+    wrapper.append(note);return wrapper;
+  }
   async function inspectPoint(recordMeasured){
     if(!resultId||!checkPoint||busy)return;
     const id=resultId,r=revision;busy=true;controls();
@@ -198,14 +260,25 @@ function initPage() {
       const values={...currentValues(),image_point:[...checkPoint]};
       if(recordMeasured)values.measured={unit:$('check-unit').value,x:numeric('check-x'),y:numeric('check-y')};
       const data=await post('/check-point',values);if(id!==resultId||r!==revision)return;
+      inspectedPoint=data;
       const fmt=p=>p.map(v=>(v*100).toFixed(2)).join(', ');
       $('check-coordinate').textContent=`原图 (${data.image_point.map(v=>v.toFixed(2)).join(', ')}) px；区域 (X,Y)=(${fmt(data.region_ground_m)}) cm；`+(data.vehicle_ground_m?`车辆 (X,Y)=(${fmt(data.vehicle_ground_m)}) cm。`:'填写中心偏移后才能得到车辆距离。');
-      checks=data.checks;$('checks').replaceChildren(...checks.map((check,i)=>{const li=document.createElement('li');li.textContent=`${i+1} 实测 (${fmt(check.measured_ground_m)}) cm，计算 (${fmt(check.predicted_ground_m)}) cm，误差 ΔX/ΔY=(${fmt(check.error_xy_m)}) cm，总误差 ${(check.error_m*100).toFixed(2)} cm`;return li;}));
+      checks=data.checks;
+      const currentCheck=recordMeasured?checks.find(check=>check.image_point.every((v,i)=>Math.abs(v-data.image_point[i])<1e-6)):null;
+      $('check-comparison').replaceChildren(comparisonTable(data.image_point,data.vehicle_ground_m,currentCheck?.measured_ground_m));
+      $('checks').replaceChildren(...checks.map((check,i)=>{
+        const li=document.createElement('li');
+        const title=document.createElement('p');title.textContent=`检查记录 ${i+1} · 原图 (${check.image_point.map(v=>v.toFixed(2)).join(', ')}) px`;
+        li.append(title,comparisonTable(check.image_point,check.predicted_ground_m,check.measured_ground_m));return li;
+      }));
       if(recordMeasured)$('measurement-reviewed').checked=false;
       $('error').textContent='';
     }catch(error){$('error').textContent=error.message;}finally{busy=false;controls();}
   }
   $('record-check').onclick=()=>inspectPoint(true);
+  for(const id of ['check-x','check-y','check-unit'])$(id).addEventListener('input',()=>{
+    if(inspectedPoint)$('check-comparison').replaceChildren(comparisonTable(inspectedPoint.image_point,inspectedPoint.vehicle_ground_m));
+  });
   for(const id of ['measurement-reviewed','image-source-confirmed','ground-contact'])$(id).addEventListener('input',controls);
   $('apply').onclick=async()=>{
     busy=true;controls();
