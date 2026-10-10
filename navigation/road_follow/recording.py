@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from pathlib import Path
 
 import cv2
@@ -26,6 +27,8 @@ class VideoRecorder:
         self._first_s: float | None = None
         self._last_frame: np.ndarray | None = None
         self._shape: tuple[int, int, int] | None = None
+        self._closing = threading.Event()
+        self._close_padding_remaining = 1
 
     def write(self, frame: np.ndarray, captured_s: float) -> None:
         if frame.ndim != 3 or frame.shape[2] != 3 or frame.dtype != np.uint8:
@@ -59,14 +62,31 @@ class VideoRecorder:
         if self._writer is None or self._last_frame is None:
             return
         while self.frames_written < target_index:
+            if self._closing.is_set():
+                # 关闭后整个队列最多保留一个间隔补帧，及时结束已经在途的长补帧。
+                if self._close_padding_remaining == 0:
+                    break
+                self._close_padding_remaining -= 1
             self._writer.write(self._last_frame)
             self.frames_written += 1
 
+    def request_close(self) -> None:
+        """仅发送补帧停止信号；编码器仍由原线程完成剩余真实帧和封尾。"""
+        self._closing.set()
+
     def close(self, stopped_s: float | None = None) -> None:
+        self.request_close()
         if self._writer is None:
             return
-        if stopped_s is not None and self._first_s is not None:
-            elapsed_frames = max(0.0, stopped_s - self._first_s) * self.fps
-            self._fill_until(math.ceil(elapsed_frames - 1e-6))
-        self._writer.release()
-        self._writer = None
+        try:
+            if stopped_s is not None and self._first_s is not None:
+                elapsed_frames = max(0.0, stopped_s - self._first_s) * self.fps
+                # 封尾最多再补一帧，不把长时间无画面补到退出时刻。
+                if self.frames_written < math.ceil(elapsed_frames - 1e-6):
+                    self._writer.write(self._last_frame)
+                    self.frames_written += 1
+        finally:
+            try:
+                self._writer.release()
+            finally:
+                self._writer = None

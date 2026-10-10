@@ -71,7 +71,9 @@ class AsyncVideoRecorder:
             self._check_error()
             return
         self._closed = True
-        # 正常退出排空队列，结束时间也交给编码线程，避免并发访问 writer。
+        # 先通知在途补帧结束；调用线程只设置 Event，不访问编码器。
+        self._recorder.request_close()
+        # 保存剩余真实帧，结束时间交给编码线程做有界补帧和封尾。
         while self._thread.is_alive():
             try:
                 self._queue.put((None, stopped_s), timeout=.05)
