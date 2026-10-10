@@ -18,6 +18,9 @@ class BackupConfig:
     reverse_speed_mps: float = 0.08
     lookahead_y_m: float = 0.28
     max_abs_omega: float = 0.4
+    # 死区和帧间变化率限制：压住倒车时近带中心线抖动直接打轮的蛇形。
+    omega_deadband_x_m: float = 0.03
+    max_omega_step_radps: float = 0.15
     near_y_min_m: float = 0.20
     near_y_max_m: float = 0.35
     done_progress_m: float = 0.0
@@ -82,6 +85,7 @@ class Backup:
     no_vision_distance_m: float = 0.0
     clear_frames: int = 0
     last_frame_s: float | None = None
+    last_omega_radps: float | None = None
 
 
 def near_lane_x(
@@ -115,13 +119,28 @@ def near_lane_heading(
 
 
 def reverse_omega(near_x_m: float, cfg: BackupConfig) -> float:
-    """负线速度下的 Pure Pursuit 修正；符号与正向循迹相反。"""
+    """负线速度下的 Pure Pursuit 修正；符号与正向循迹相反。
+
+    横向偏差小于死区时不修正：白底白沿下中心线几厘米的抖动不值得打轮。
+    """
+    if abs(near_x_m) < max(0.0, cfg.omega_deadband_x_m):
+        return 0.0
     y = max(1e-3, abs(cfg.lookahead_y_m))
     denom = near_x_m * near_x_m + y * y
     speed = -abs(cfg.reverse_speed_mps)
     omega = -speed * (2.0 * near_x_m) / denom
     limit = abs(cfg.max_abs_omega)
     return max(-limit, min(limit, omega))
+
+
+def _rate_limited_omega(state: Backup, omega: float, cfg: BackupConfig) -> float:
+    """限制相邻两帧 ω 的跳变幅度，倒车指令只能渐变不能甩。"""
+    step = abs(cfg.max_omega_step_radps)
+    prev = 0.0 if state.last_omega_radps is None else state.last_omega_radps
+    if step > 0.0:
+        omega = max(prev - step, min(prev + step, omega))
+    state.last_omega_radps = omega
+    return omega
 
 
 def _stop(reason: str) -> VelocityCommand:
@@ -168,6 +187,8 @@ def step_backup(
         state.no_vision_segment_m = state.no_vision_distance_m = 0.0
         state.clear_frames = 0
         state.last_frame_s = None
+        # 触发帧发零速，ω 变化率也从 0 起步。
+        state.last_omega_radps = 0.0
         # 触发帧先发零速；下一帧才开始负速度，避免从正向速度直接跳成倒车。
         return state, _stop("stop_backup")
 
@@ -235,18 +256,22 @@ def step_backup(
             hold = heading_hold_command(-abs(cfg.reverse_speed_mps), yaw_rad,
                                         state.hold_yaw_rad, cfg.heading_hold_gain,
                                         cfg.max_abs_omega)
-            return state, VelocityCommand(hold.v_mps, hold.omega_radps, "heading_backup")
+            omega = _rate_limited_omega(state, hold.omega_radps, cfg)
+            return state, VelocityCommand(hold.v_mps, omega, "heading_backup")
 
     if not vision_ok:
         state.missing_frames += 1
         if state.missing_frames > cfg.max_missing_frames:
             state.phase = "fault"
             return state, _stop("stop_backup_road_lost")
+        # 停车帧 ω 实发 0；视觉恢复后从 0 重新渐变。
+        state.last_omega_radps = 0.0
         return state, _stop("stop_backup_no_vision")
 
     state.missing_frames = 0
+    omega = _rate_limited_omega(state, reverse_omega(near_x_m, cfg), cfg)
     return state, VelocityCommand(
         -abs(cfg.reverse_speed_mps),
-        reverse_omega(near_x_m, cfg),
+        omega,
         "visual_backup",
     )

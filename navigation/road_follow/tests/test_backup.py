@@ -33,6 +33,7 @@ class BackupTest(unittest.TestCase):
         yaw_rad: float | None = 0.0,
         odom_valid: bool = True,
         frame_captured_s: float | None = None,
+        cfg: BackupConfig | None = None,
     ) -> tuple[Backup, VelocityCommand]:
         return step_backup(
             state,
@@ -41,7 +42,7 @@ class BackupTest(unittest.TestCase):
             progress_s_m,
             self.follow,
             now_s,
-            self.cfg,
+            cfg or self.cfg,
             yaw_rad=yaw_rad,
             odom_valid=odom_valid,
             frame_captured_s=now_s if frame_captured_s is None else frame_captured_s,
@@ -77,6 +78,45 @@ class BackupTest(unittest.TestCase):
         self.assertGreater(reverse_omega(0.05, self.cfg), 0.0)
         self.assertLess(reverse_omega(-0.05, self.cfg), 0.0)
         self.assertEqual(reverse_omega(0.0, self.cfg), 0.0)
+
+    def test_reverse_omega_deadband_ignores_small_offset(self) -> None:
+        self.assertEqual(reverse_omega(0.02, self.cfg), 0.0)
+        self.assertEqual(reverse_omega(-0.029, self.cfg), 0.0)
+        self.assertNotEqual(reverse_omega(0.04, self.cfg), 0.0)
+
+    def test_visual_omega_changes_are_rate_limited(self) -> None:
+        cfg = BackupConfig(omega_deadband_x_m=0.0, max_omega_step_radps=0.15)
+        state, command = self.step(Backup(), triggered=True, progress_s_m=0.90, cfg=cfg)
+        self.assertEqual(command.reason, "stop_backup")
+        state, command = self.step(state, near_x_m=0.30, progress_s_m=0.89, now_s=1.1, cfg=cfg)
+        self.assertEqual(command.reason, "visual_backup")
+        self.assertAlmostEqual(command.omega_radps, 0.15)
+        state, command = self.step(state, near_x_m=-0.30, progress_s_m=0.88, now_s=1.2, cfg=cfg)
+        self.assertAlmostEqual(command.omega_radps, 0.0)
+        state, command = self.step(state, near_x_m=-0.30, progress_s_m=0.87, now_s=1.3, cfg=cfg)
+        self.assertAlmostEqual(command.omega_radps, -0.15)
+
+    def test_omega_ramp_restarts_after_no_vision_stop(self) -> None:
+        cfg = BackupConfig(omega_deadband_x_m=0.0, max_omega_step_radps=0.15)
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=0.90, yaw_rad=None, cfg=cfg)
+        state, command = self.step(state, near_x_m=0.30, progress_s_m=0.89, now_s=1.1, cfg=cfg)
+        self.assertAlmostEqual(command.omega_radps, 0.15)
+        state, command = self.step(
+            state, near_x_m=None, progress_s_m=0.88, now_s=1.2, yaw_rad=None, cfg=cfg
+        )
+        self.assertEqual(command.reason, "stop_backup_no_vision")
+        state, command = self.step(state, near_x_m=-0.30, progress_s_m=0.87, now_s=1.3, cfg=cfg)
+        self.assertEqual(command.reason, "visual_backup")
+        self.assertAlmostEqual(command.omega_radps, -0.15)
+
+    def test_heading_backup_omega_is_rate_limited(self) -> None:
+        cfg = BackupConfig(max_omega_step_radps=0.15)
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=0.90, yaw_rad=0.0, cfg=cfg)
+        state, command = self.step(
+            state, near_x_m=None, progress_s_m=0.88, now_s=1.1, yaw_rad=-0.06, cfg=cfg
+        )
+        self.assertEqual(command.reason, "heading_backup")
+        self.assertAlmostEqual(command.omega_radps, 0.15)
 
     def test_odometry_progress_completes_backup(self) -> None:
         state, _ = self.step(Backup(), triggered=True, progress_s_m=0.55)
