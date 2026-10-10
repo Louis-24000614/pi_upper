@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>手动棋盘格地面标定</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef2f2;color:#163032;font:15px system-ui,sans-serif}main{max-width:1360px;margin:auto;padding:24px}h1{margin:0;font-size:27px}h2{font-size:17px;margin:0 0 12px}p{line-height:1.65;margin:8px 0;color:#465f61}.eyebrow{color:#167466;letter-spacing:2px;font-size:12px;font-weight:700}.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:12px}.badge{background:#d9eae4;padding:7px 12px;border-radius:20px;white-space:nowrap;color:#235e4e}.workspace{display:grid;grid-template-columns:310px minmax(0,1fr);gap:18px}.panel{background:white;border:1px solid #dce5e4;border-radius:12px;padding:20px;margin-bottom:16px}.hint{font-size:13px;color:#607475}.notice{border-left:3px solid #d39c43;background:#fff8eb;padding:12px 16px;margin:18px 0;color:#745422}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}label{display:block;margin-bottom:12px}input,select,button{font:inherit}input[type=number],select{width:100%;padding:9px;border:1px solid #b9cdcb;border-radius:6px;background:#fbfdfd;color:#183b38}input[type=checkbox]{accent-color:#187465}button,.upload{border:1px solid #a9c6c0;border-radius:6px;background:#f4f9f7;color:#205e51;padding:9px 13px;cursor:pointer;margin:0}.primary{background:#187465;color:white;border-color:#187465}button:disabled{opacity:.45;cursor:default}fieldset{border:0;padding:0;margin:0}fieldset:disabled{display:none}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px}.viewport{width:100%;height:440px;position:relative;border-radius:8px;overflow:hidden;background:#152524;touch-action:none}.viewport canvas{width:100%;height:100%;display:block;touch-action:none}.live-wrap{text-align:center;background:#152524;min-height:180px;border-radius:8px;overflow:hidden}.live-wrap img{max-width:100%;max-height:440px;display:block;margin:auto}.toolbar{margin:14px 0;gap:8px}.toolbar input[type=range]{width:110px;accent-color:#187465}.coordinates{padding:0;list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-variant-numeric:tabular-nums}.coordinates li{background:#edf5f2;border-radius:5px;padding:7px;font-size:13px}pre{font:12px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f4;padding:12px;border-radius:6px;overflow:auto;max-height:340px;color:#28494a}#bev{max-width:100%;max-height:450px;display:block;margin:auto;background:#152524}#status{color:#196b58;min-height:24px;line-height:1.6}#error{color:#a62d21;line-height:1.6;min-height:20px}.actual{padding:12px;background:#e7f2eb;color:#205d43;border-radius:6px;margin:10px 0}summary{cursor:pointer;color:#235e51}details{margin:14px 0}#camera{font-size:13px;margin:8px 0}input[type=file]{max-width:100%;font-size:13px}.upload{display:inline-block}[hidden]{display:none!important}.matrix-title{font-size:13px;color:#536b6b}#result-heading{display:flex;justify-content:space-between;gap:10px;align-items:center}.muted{font-size:12px;color:#647774}@media(max-width:850px){main{padding:12px}.workspace,.twocol{grid-template-columns:1fr}.header{align-items:flex-start}h1{font-size:22px}.viewport{height:300px}.panel{padding:15px}.workspace>aside{order:2}.badge{font-size:12px}.coordinates{grid-template-columns:1fr}}
+#status,#error{overflow-wrap:anywhere}
+</style></head>
+<body><main>
+<header class="header"><div><div class="eyebrow">GROUND CALIBRATION · MANUAL</div><h1>手动棋盘格地面标定</h1></div><span class="badge">独立保存 · 未应用到导航</span></header>
+<p>棋盘板平放在道路地面，只需所选矩形区域的四个外角入镜。无需整板入镜，也不自动检测内角点。</p>
+<div class="workspace"><aside>
+<section class="panel"><h2>1　格数与实际尺寸</h2><p class="hint"><b>N、M 是所选区域包含的格子数量，不是内角点数量。</b></p>
+<div class="two"><label>横向 N 格<input id="columns" type="number" min="1" step="1" value="3"></label><label>纵向 M 格<input id="rows" type="number" min="1" step="1" value="2"></label></div>
+<label>尺寸输入方式<select id="mode"><option value="cell">A · 实测单格边长</option><option value="total">B · 实测区域总宽和总高</option></select></label>
+<label>尺寸单位<select id="unit"><option value="mm">mm · 毫米</option><option value="cm">cm · 厘米</option></select></label>
+<fieldset id="cell-fields"><label>实测单格边长<input id="cell-size" type="number" min="0" step="any" value="30"></label></fieldset>
+<fieldset id="total-fields" disabled><div class="two"><label>实测总宽<input id="total-width" type="number" min="0" step="any" value="90"></label><label>实测总高<input id="total-height" type="number" min="0" step="any" value="60"></label></div></fieldset>
+<div class="actual" id="actual">最终采用：90 × 60 mm（0.09 × 0.06 m）</div><p class="hint">例如 3 列 × 2 行，每格 30 mm，区域为 90 × 60 mm。只采用当前选择的一种尺寸方式。</p></section>
+<section class="panel"><h2>2　坐标基准</h2><p>默认原点：<b>所选区域中心</b>。X 向区域右侧，Y 向区域上侧，单位为米。</p>
+<details><summary>可选：另存车辆坐标候选</summary><p class="hint">先测量导航相机光心的地面垂足。仅当区域 X/Y 与车右/车前对齐时确认，区域中心不能直接当作相机原点。</p>
+<label><input id="aligned" type="checkbox">我确认区域 X 向车右、Y 向车前</label>
+<fieldset id="vehicle-fields" disabled><label>距离单位<select id="vehicle-unit"><option value="cm">cm</option><option value="mm">mm</option></select></label><label>区域中心横向 X（车右为正）<input id="center-x" type="number" step="any"></label><label>区域中心前向 Y（车前为正）<input id="center-y" type="number" step="any"></label></fieldset>
+<p class="hint">未确认方向时仅保存区域坐标。确认并填写距离后另存车辆坐标候选，仍为未验收、未应用。</p></details></section>
+</aside><div>
+<section class="panel"><h2>3　冻结原图，手选四个外角</h2><div id="camera">正在读取导航配置…</div>
+<div class="row toolbar"><button class="primary" id="capture" disabled>冻结画面</button><label class="upload">上传原始图片<input id="upload" type="file" accept="image/png,image/jpeg" hidden></label><button id="live-again" disabled>返回实时画面</button></div>
+<div class="live-wrap" id="live-wrap"><img id="live" alt="实时导航相机画面"><p id="live-placeholder">离线标定请上传原始 PNG 或 JPEG 图片</p></div>
+<div class="viewport" id="viewport" hidden><canvas id="canvas" aria-label="手动选择四个外角的原始图像"></canvas></div>
+<p id="selection-help" class="hint">实时画面不能选点。冻结或上传后，按区域自身 <b>1 左上 → 2 右上 → 3 右下 → 4 左下</b> 点击四个外角。编号定义区域方向，不按屏幕位置自动重排。</p>
+<div class="row toolbar"><button id="zoom-out" disabled>−</button><label style="margin:0">放大 <input id="zoom" type="range" min="50" max="600" value="100" disabled></label><button id="zoom-in" disabled>＋</button><button id="fit" disabled>适合窗口</button><button id="pan" disabled aria-pressed="false">拖动画面</button><button id="undo" disabled>撤销上一个点</button><button id="reset" disabled>重新选点</button></div>
+<p class="hint">直接拖动编号点可修正位置；“拖动画面”用于平移。鼠标滚轮可缩放，手机可用放大按钮。留白处不会添加角点。</p>
+<ol id="points" class="coordinates"></ol><div class="row"><button id="compute" disabled>计算 H 与俯视预览</button><button class="primary" id="save" disabled>独立保存当前结果</button></div>
+<div id="status" role="status">等待冻结或上传原图。</div><div id="error" role="alert"></div></section>
+<section class="panel"><div id="result-heading"><h2>4　投影矩阵与俯视预览</h2><span id="result-state" class="muted">尚未计算</span></div>
+<p class="hint">H 将齐次像素 [u,v,1] 投影到相应坐标。导航、区域、车辆候选的原点不同，BEV 预览还使用像素单位，不能直接混用矩阵。</p>
+<div class="twocol"><div><div class="matrix-title">标定前 H · 当前导航图像 → 车辆地面（米，参数估算）</div><pre id="old-ground">正在读取…</pre><details><summary>标定前 H · 当前导航图像 → 导航 BEV（像素）</summary><pre id="old-bev"></pre></details><p class="hint" id="baseline-note"></p></div>
+<div><div class="matrix-title">标定后 H · 当前原图 → 所选区域地面（米）</div><pre id="new-ground">请选择四个外角后计算。</pre><div id="candidate-panel" hidden><div class="matrix-title">车辆坐标候选 H · 相机光心地面垂足为原点（米）</div><pre id="vehicle-ground"></pre></div></div></div>
+<div id="preview-panel" hidden><p>俯视预览：等比例米制栅格，红色 X 向右、绿色 Y 向上。</p><img id="bev" alt="所选区域坐标下的俯视预览"><details><summary>查看当前完整标定记录</summary><pre id="record"></pre></details></div></section>
+</div></div>
+<div class="notice">四点拟合成功不代表整个测距范围精度已验证。图像未进行镜头去畸变，结果如实记录为原始带畸变图像；后续请用独立距离点检查尺度和畸变。</div>
+<p class="hint">保存到 data/calibration/manual/ 的唯一时间目录，包含原图、四角标注、俯视预览和 JSON。车辆坐标候选另存文件。本页不修改导航或涵洞配置，不应用矩阵、不启动导航或 UART。使用相机模式时请先结束占用导航相机的程序。</p>
+<button id="stop">停止网页并释放相机</button>
+</main><script type="module" src="/manual_calibration.js"></script></body></html>
