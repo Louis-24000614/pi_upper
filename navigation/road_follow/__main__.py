@@ -21,9 +21,6 @@ import yaml
 
 from ipm_proto.junction import (
     KIND_CORNER,
-    KIND_CROSS,
-    KIND_STRAIGHT,
-    KIND_T,
     KIND_UNKNOWN,
     JunctionRead,
     JunctionTracker,
@@ -879,10 +876,10 @@ def _run(args, parser) -> int:
                 mask, cfg, smoother, projection=projection, lazy_raw=args.lazy_raw_centerline
             )
             opening, junction = _junction_read(mask, cfg, junctions, projection=projection)
-            # 路口接近锁存：确认真路口几何（丁字/十字/转角）后转向改用正前方
-            # 窄带；blocked/unknown 只是暂时看不见路，不当路口。非路口分类
-            # 连续数帧后才解除锁存，避免分类抖动导致窄带/常规指令来回切换。
-            if junction in (KIND_T, KIND_CROSS, KIND_CORNER):
+            # 路口接近锁存：仅在直角弯（前方没路、单侧开口，分类=转角）时
+            # 转向改用正前方窄带；丁字/十字前方有路，行为保持原样。
+            # 非转角分类连续数帧后解除锁存，避免分类抖动导致指令来回切换。
+            if opening == KIND_CORNER:
                 junction_strip_latched = True
                 junction_straight_frames = 0
             elif junction_strip_latched:
