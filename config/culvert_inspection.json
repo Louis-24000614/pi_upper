@@ -9,7 +9,7 @@
     "face_threshold": 0.5,
     "knife_threshold": 0.5,
     "confirm_frames": 3,
-    "side_timeout_s": 45,
+    "side_timeout_s": 30,
     "sample_interval_s": 1.2,
     "request_timeout_s": 3.0,
     "roi": [

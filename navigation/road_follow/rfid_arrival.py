@@ -169,9 +169,7 @@ def step_rfid_arrival(
 
     if state.phase == "align":
         if current_s - state.align_started_s >= cfg.align_timeout_s:
-            state.phase = "fault"
-            state.anchor.failure = "align_timeout"
-            return state, VelocityCommand(0.0, 0.0, "stop_heading_anchor_align_timeout")
+            return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
         # 摆正开始后做完。检测带回升只说明车头转进了旁边的路，不能退回循迹。
         _, lane_heading_rad = _forward_strip_view(
             state, cfg, visual, lane_heading_rad, arrival_mode,

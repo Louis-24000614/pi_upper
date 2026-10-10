@@ -221,14 +221,14 @@ class CulvertController:
         target = self.target
         if self.phase == "entering":
             remaining = target.target_s_m - current_s
-            if now >= self.deadline_s:
-                self.fault("enter_timeout", now)
-            elif remaining <= cfg.stop_margin_m:
+            if remaining <= cfg.stop_margin_m:
                 self.stop_requested_s = now
                 if self.send("stop"):
                     self._transition("stopping", now, remaining_m=remaining)
                 else:
                     self.fault("stop_submit_failed", now)
+            elif now >= self.deadline_s:
+                self.fault("enter_timeout", now)
             else:
                 # Lower speed and steering together to retain the same curvature.
                 speed = min(command.v_mps, near_speed)

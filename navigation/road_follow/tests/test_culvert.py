@@ -73,6 +73,47 @@ class CulvertControlTest(unittest.TestCase):
         self.assertTrue(self.step(7.7).resumed)
         self.assertEqual(self.control.phase,"idle")
 
+    def test_arrival_takes_priority_at_or_after_enter_deadline(self):
+        for delay in (0, .1):
+            for remaining in (.009, 0, -.004):
+                with self.subTest(delay=delay,remaining=remaining):
+                    self.setUp(); self.start()
+                    now = self.control.deadline_s + delay
+                    position = self.target.target_s_m - remaining
+                    self.sample(now,position)
+                    outcome = self.step(now,position)
+                    self.assertEqual(self.control.phase,"stopping")
+                    self.assertIsNone(self.control.fault_reason)
+                    self.assertEqual(self.sent,["stop"])
+                    self.assertEqual(self.control.stop_requested_s,now)
+                    self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+                    self.assertFalse(outcome.send_velocity)
+                    self.assertFalse(self.records.done(KEY[0]))
+
+    def test_enter_timeout_still_faults_when_not_arrived(self):
+        self.start()
+        now = self.control.deadline_s
+        position = self.target.target_s_m - self.config.stop_margin_m - .001
+        self.sample(now,position)
+        outcome = self.step(now,position)
+        self.assertEqual(self.control.phase,"fault")
+        self.assertEqual(self.control.fault_reason,"enter_timeout")
+        self.assertEqual(self.sent,["stop"])
+        self.assertFalse(outcome.send_velocity)
+        self.assertFalse(self.records.done(KEY[0]))
+
+    def test_not_arrived_before_deadline_keeps_entering(self):
+        self.start()
+        now = self.control.deadline_s - .1
+        position = self.target.target_s_m - self.config.stop_margin_m - .001
+        self.sample(now,position)
+        outcome = self.step(now,position)
+        self.assertEqual(self.control.phase,"entering")
+        self.assertIsNone(self.control.fault_reason)
+        self.assertEqual(self.sent,[])
+        self.assertAlmostEqual(outcome.command.v_mps,.05)
+        self.assertTrue(outcome.send_velocity)
+
     def test_stop_failure_does_not_complete(self):
         self.start(); self.sample(.1); self.step(.1)
         self.sample(.2); result=self.step(.2,notes=["STOP_FAIL"])

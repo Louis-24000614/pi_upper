@@ -429,9 +429,7 @@ def step_junction_turn(
 
     if state.phase == "align":
         if current_s - state.align_started_s >= cfg.align_timeout_s:
-            state.phase = "fault"
-            state.anchor.failure = "align_timeout"
-            return state, VelocityCommand(0.0, 0.0, "stop_heading_anchor_align_timeout")
+            return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
         ready, state.align_stable = align_ready_to_creep(
             lane_heading_rad,
             state.align_started_s,

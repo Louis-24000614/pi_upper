@@ -325,7 +325,7 @@ class JunctionTurnTest(unittest.TestCase):
         self.assertAlmostEqual(command.v_mps, 0.05)
         self.assertEqual(self.sent, [])
 
-    def test_align_timeout_stops_without_forward(self) -> None:
+    def test_align_timeout_continues_heading_hold(self) -> None:
         state = JunctionTurn()
         cue = JunctionCue(True, "left", 0.32)
         state, _ = step_junction_turn(
@@ -341,10 +341,10 @@ class JunctionTurnTest(unittest.TestCase):
             state, cue, self.follow, self.notes, self.send, self.cfg,
             now_s=11.6, lane_heading_rad=0.20, progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "fault")
-        self.assertEqual(command.reason, "stop_heading_anchor_align_timeout")
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
         self.assertEqual(command.omega_radps, 0.0)
-        self.assertEqual(command.v_mps, 0.0)
+        self.assertAlmostEqual(command.v_mps, 0.05)
         self.assertEqual(self.sent, [])
 
     def test_finite_action_failure_latches_stop(self) -> None:
