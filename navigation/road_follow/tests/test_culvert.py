@@ -100,9 +100,21 @@ class CulvertControlTest(unittest.TestCase):
         self.start(); self.step(.1,.5,key=("c__d","c","d"))
         self.assertEqual(self.control.fault_reason,"edge_changed")
 
-    def test_motion_during_task_fails(self):
+    def test_motion_during_task_fails_and_logs_pose_delta_and_limits(self):
         self.parked(); self.sample(2.4,x=.66); self.step(2.4)
         self.assertEqual(self.control.fault_reason,"moved_during_task")
+        event = next(details for name,details in reversed(self.events)
+                     if name == "culvert_phase" and details.get("phase") == "fault")
+        self.assertEqual(event["reason"],"moved_during_task")
+        self.assertEqual(event["odom_sample_s"],2.4)
+        self.assertAlmostEqual(event["position_delta_x_m"],.025)
+        self.assertAlmostEqual(event["position_delta_y_m"],0)
+        self.assertAlmostEqual(event["position_delta_m"],.025)
+        self.assertAlmostEqual(event["yaw_delta_rad"],0)
+        self.assertEqual(event["position_limit_m"],self.config.stable_position_m)
+        self.assertEqual(event["yaw_limit_rad"],self.config.stable_yaw_rad)
+        self.assertAlmostEqual(event["reference_pose"]["x_m"],.635)
+        self.assertAlmostEqual(event["observed_pose"]["x_m"],.66)
         self.assertFalse(self.records.done(KEY[0]))
 
     def test_executor_can_be_replaced_and_failure_is_not_completion(self):

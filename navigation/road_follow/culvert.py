@@ -184,7 +184,7 @@ class CulvertController:
         self._transition("entering", now, target_s_m=target.target_s_m)
         return True
 
-    def fault(self, reason, now):
+    def fault(self, reason, now, **details):
         if self.phase != "fault":
             # STOP is allowed regardless of the former control mode.
             self.send("stop")
@@ -193,7 +193,7 @@ class CulvertController:
                 self.executor.cancel(reason)
             if self.target:
                 self.records.fail(self.target.edge_id, reason)
-            self._transition("fault", now, reason=reason)
+            self._transition("fault", now, reason=reason, **details)
 
     def cancel_for_obstacle(self, now):
         if hasattr(self.executor, "cancel"):
@@ -260,11 +260,27 @@ class CulvertController:
             elif now - self.stop_ack_s >= cfg.settle_timeout_s:
                 self.fault("settle_timeout", now)
         elif self.phase == "task":
-            x, y, yaw = self.history.samples[-1][2:5]
+            pose_sample = self.history.samples[-1]
+            x, y, yaw = pose_sample[2:5]
             ox, oy, oyaw = self.task_pose
+            delta_x = x - ox
+            delta_y = y - oy
+            position_delta = math.hypot(delta_x, delta_y)
             yaw_delta = math.atan2(math.sin(yaw - oyaw), math.cos(yaw - oyaw))
-            if math.hypot(x - ox, y - oy) > cfg.stable_position_m or abs(yaw_delta) > cfg.stable_yaw_rad:
-                self.fault("moved_during_task", now)
+            if position_delta > cfg.stable_position_m or abs(yaw_delta) > cfg.stable_yaw_rad:
+                self.fault(
+                    "moved_during_task",
+                    now,
+                    odom_sample_s=pose_sample[0],
+                    position_delta_x_m=delta_x,
+                    position_delta_y_m=delta_y,
+                    position_delta_m=position_delta,
+                    yaw_delta_rad=yaw_delta,
+                    position_limit_m=cfg.stable_position_m,
+                    yaw_limit_rad=cfg.stable_yaw_rad,
+                    reference_pose={"x_m": ox, "y_m": oy, "yaw_rad": oyaw},
+                    observed_pose={"x_m": x, "y_m": y, "yaw_rad": yaw},
+                )
             else:
                 try:
                     result = self.executor.step(now)
