@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import queue
+import statistics
+from collections import deque
 import signal
 import subprocess
 import sys
@@ -635,6 +637,12 @@ def _run(args, parser) -> int:
     junction_straight_clear_frames = int(approach_cfg.get("straight_clear_frames", 8))
     junction_strip_latched = False
     junction_straight_frames = 0
+    # 摆正参考的死亡区兜底：前方深度够时信当下实测并记入携带窗口；
+    # 墙端深度不足时改用干净窗口的中位数，不在测不准的地方现测。
+    lane_heading_history: deque = deque(maxlen=12)
+    lane_heading_min_live_depth_m = float(
+        (cfg.get("lane_heading") or {}).get("min_live_depth_m", 0.24)
+    )
     projector = BevProjector() if args.fps_opt else None
     bridge: subprocess.Popen | None = None
     if args.drive:
@@ -889,6 +897,20 @@ def _run(args, parser) -> int:
                     junction_follow_cfg,
                     junction_strip_abs_x_m,
                 )
+            # 前方深度够（普通路口）：信实测并刷新携带窗口；
+            # 深度不足（墙端死区）：用携带中位数；窗口也空则方向未知、不摆正。
+            lane_heading_live = (
+                follow_diag.forward_depth_m is not None
+                and follow_diag.forward_depth_m >= lane_heading_min_live_depth_m
+                and follow_diag.lane_heading_rad is not None
+            )
+            if lane_heading_live:
+                lane_heading_history.append(follow_diag.lane_heading_rad)
+                align_lane_heading_rad = follow_diag.lane_heading_rad
+            elif len(lane_heading_history) >= 3:
+                align_lane_heading_rad = statistics.median(lane_heading_history)
+            else:
+                align_lane_heading_rad = None
             if turn_side is not None:
                 while True:
                     try:
@@ -1091,6 +1113,7 @@ def _run(args, parser) -> int:
                     if culvert_outcome.resumed:
                         culvert_runtime.resume(junction_turn, rfid_arrival, junctions, smoother, segment_stream)
                         junctions = JunctionTracker()
+                        lane_heading_history.clear()
                 if not recovery_owns:
                     previous_phase = junction_turn.phase
                     visual_command = command
@@ -1146,7 +1169,7 @@ def _run(args, parser) -> int:
                             patrol_cfg=rfid_arrival_cfg,
                             visual_safe=visual_safe,
                             near_x_m=follow_diag.near_x_m,
-                            lane_heading_rad=follow_diag.lane_heading_rad,
+                            lane_heading_rad=align_lane_heading_rad,
                             yaw_rad=progress.yaw_rad,
                             centerline_points=follow_diag.centerline_points,
                             road_pixels=follow_diag.bev_road_pixels,
@@ -1321,6 +1344,7 @@ def _run(args, parser) -> int:
             if segment_stream is not None and _invalidate_turn_frames(
                     turn_phases_before, turn_states, segment_stream, smoother):
                 junctions = JunctionTracker()
+                lane_heading_history.clear()
                 command = VelocityCommand(0.0, 0.0, "reacquire")
             line = f"{command.v_mps:.3f} {command.omega_radps:.3f}"
             status_signature = _status_signature(
@@ -1343,14 +1367,25 @@ def _run(args, parser) -> int:
                     f"路段进度={progress.s_m:.2f} m",
                     f"路口={JUNCTION_NAMES.get(opening, opening)}",
                 ]
+                if junction_strip_latched:
+                    details.append("窄带转向")
                 if command.reason in ("align", "heading_hold") or junction_turn.phase in (
                     "align", "heading_hold", "anchor_wait",
                 ):
-                    lane_heading = follow_diag.lane_heading_rad
+                    lane_heading = align_lane_heading_rad
                     details.append(
                         "车道方向=未知"
                         if lane_heading is None
-                        else f"车道方向={lane_heading:+.3f} rad"
+                        else (
+                            f"车道方向={lane_heading:+.3f} rad"
+                            + ("" if lane_heading_live else "（携带）")
+                        )
+                    )
+                    depth = follow_diag.forward_depth_m
+                    details.append(
+                        "前向可见=未知"
+                        if depth is None
+                        else f"前向可见={depth:.2f} m"
                     )
                     near_x = follow_diag.near_x_m
                     details.append(

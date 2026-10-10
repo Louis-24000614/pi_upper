@@ -33,6 +33,7 @@ class FollowDiagnostics:
     near_x_m: float | None
     lane_heading_rad: float | None = None
     centerline_points: tuple = ()
+    forward_depth_m: float | None = None
 
 
 def lane_heading_params_from_mapping(cfg: dict) -> dict:
@@ -125,6 +126,7 @@ def command_from_mask_with_diagnostics(
     ys = [float(y) for _, y in points]
     lookahead_covered = _covers_lookahead(ys, gains.lookahead_m)
     command = command_from_centerline(points, road_pixels, gains)
+    strip_x_m = abs(float(lane_heading_params_from_mapping(cfg)["strip_x_m"]))
     diagnostics = FollowDiagnostics(
         mask_road_pixels=mask_road_pixels,
         bev_road_pixels=road_pixels,
@@ -140,6 +142,10 @@ def command_from_mask_with_diagnostics(
             points, **lane_heading_params_from_mapping(cfg)
         ),
         centerline_points=tuple(points),
+        forward_depth_m=max(
+            (float(y) for x, y in points if abs(float(x)) <= strip_x_m),
+            default=None,
+        ),
     )
     return command, diagnostics
 
