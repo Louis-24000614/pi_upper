@@ -118,6 +118,35 @@ def near_lane_heading(
     return math.atan2(cov, var_y)
 
 
+def forward_lane_heading(
+    points: list[Point2D] | tuple[Point2D, ...],
+    *,
+    strip_x_m: float = 0.09,
+    y_min_m: float = 0.14,
+    y_max_m: float = 0.28,
+    min_points: int = 3,
+) -> float | None:
+    """正前方近距窄条内的中心线方向，墙端摆正的抗开口污染参考。
+
+    侧向开口的点横向超出窄条被剔除；墙端时车前可见路面虽浅，
+    近距浅带内仍有参考点。条内点不足时返回 None：没有测量就不摆。
+    """
+    band = [
+        (float(x), float(y))
+        for x, y in points
+        if y_min_m <= float(y) <= y_max_m and abs(float(x)) <= abs(strip_x_m)
+    ]
+    if len(band) < max(2, int(min_points)):
+        return None
+    y_mean = sum(y for _, y in band) / len(band)
+    x_mean = sum(x for x, _ in band) / len(band)
+    var_y = sum((y - y_mean) ** 2 for _, y in band)
+    if var_y < 1e-6:
+        return None
+    cov = sum((y - y_mean) * (x - x_mean) for x, y in band)
+    return math.atan2(cov, var_y)
+
+
 def reverse_omega(near_x_m: float, cfg: BackupConfig) -> float:
     """负线速度下的 Pure Pursuit 修正；符号与正向循迹相反。
 

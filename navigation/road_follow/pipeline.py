@@ -13,7 +13,7 @@ from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from
 from ipm_proto.temporal import CenterlineSmoother
 from vision.ipm_proto.manual_ground import activation_ipm, runtime_activation
 
-from road_follow.backup import near_lane_heading, near_lane_x
+from road_follow.backup import forward_lane_heading, near_lane_x
 from road_follow.control import FollowConfig, VelocityCommand, command_from_centerline, follow_config_from_mapping
 
 
@@ -33,6 +33,17 @@ class FollowDiagnostics:
     near_x_m: float | None
     lane_heading_rad: float | None = None
     centerline_points: tuple = ()
+
+
+def lane_heading_params_from_mapping(cfg: dict) -> dict:
+    """摆正参考窄条的几何参数；墙端可见路面浅，近端必须比循迹预瞄近得多。"""
+    h = cfg.get("lane_heading", {}) or {}
+    return {
+        "strip_x_m": float(h.get("strip_x_m", 0.09)),
+        "y_min_m": float(h.get("y_min_m", 0.14)),
+        "y_max_m": float(h.get("y_max_m", 0.28)),
+        "min_points": int(h.get("min_points", 3)),
+    }
 
 
 def make_ipm(cfg: dict, image_shape: tuple[int, ...]) -> Ipm:
@@ -125,7 +136,9 @@ def command_from_mask_with_diagnostics(
         y_max_m=max(ys) if ys else None,
         lookahead_covered=lookahead_covered,
         near_x_m=near_lane_x(points),
-        lane_heading_rad=near_lane_heading(points),
+        lane_heading_rad=forward_lane_heading(
+            points, **lane_heading_params_from_mapping(cfg)
+        ),
         centerline_points=tuple(points),
     )
     return command, diagnostics

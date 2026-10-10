@@ -9,6 +9,7 @@ from road_follow.backup import (
     Backup,
     BackupConfig,
     EdgeProgress,
+    forward_lane_heading,
     near_lane_heading,
     near_lane_x,
     reverse_omega,
@@ -267,6 +268,32 @@ class BackupTest(unittest.TestCase):
         slanted = [(0.00, 0.22), (0.04, 0.28), (0.08, 0.34)]
         self.assertGreater(near_lane_heading(slanted), 0.2)
         self.assertIsNone(near_lane_heading([(0.02, 0.22)]))
+
+    def test_forward_lane_heading_ignores_side_opening(self) -> None:
+        forward = [(0.0, 0.14), (0.001, 0.18), (0.002, 0.22), (0.003, 0.26)]
+        opening_left = [(-0.16, 0.22), (-0.22, 0.26), (-0.28, 0.28)]
+        heading = forward_lane_heading(forward + opening_left)
+        self.assertIsNotNone(heading)
+        self.assertLess(abs(heading), 0.05)
+        # 只有开口点时方向未知，绝不能把开口当道路。
+        self.assertIsNone(forward_lane_heading(opening_left))
+
+    def test_forward_lane_heading_survives_wall_end_shallow_road(self) -> None:
+        wall_end = [(0.0, 0.14), (0.001, 0.16), (0.002, 0.19), (0.002, 0.21)]
+        heading = forward_lane_heading(wall_end)
+        self.assertIsNotNone(heading)
+        self.assertLess(abs(heading), 0.05)
+
+    def test_forward_lane_heading_needs_min_points(self) -> None:
+        two_points = [(0.0, 0.15), (0.001, 0.18)]
+        self.assertIsNone(forward_lane_heading(two_points))
+        self.assertIsNone(forward_lane_heading([]))
+
+    def test_forward_lane_heading_detects_real_skew(self) -> None:
+        slanted = [(0.06, 0.15), (0.045, 0.18), (0.03, 0.21), (0.015, 0.24), (0.0, 0.27)]
+        heading = forward_lane_heading(slanted)
+        self.assertIsNotNone(heading)
+        self.assertLess(heading, -0.1)
 
     def test_idle_preserves_forward_command(self) -> None:
         state, command = self.step(Backup(), triggered=False)
