@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import unittest
 
 from road_follow.backup import (
@@ -29,6 +30,9 @@ class BackupTest(unittest.TestCase):
         near_x_m: float | None = 0.0,
         progress_s_m: float = 0.5,
         now_s: float = 1.0,
+        yaw_rad: float | None = 0.0,
+        odom_valid: bool = True,
+        frame_captured_s: float | None = None,
     ) -> tuple[Backup, VelocityCommand]:
         return step_backup(
             state,
@@ -38,6 +42,9 @@ class BackupTest(unittest.TestCase):
             self.follow,
             now_s,
             self.cfg,
+            yaw_rad=yaw_rad,
+            odom_valid=odom_valid,
+            frame_captured_s=now_s if frame_captured_s is None else frame_captured_s,
         )
 
     def test_progress_grows_forward_and_shrinks_in_reverse(self) -> None:
@@ -90,8 +97,8 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(state.phase, "backing")
         self.assertEqual(command.reason, "stop_backup")
 
-    def test_missing_vision_stops_then_faults(self) -> None:
-        state, _ = self.step(Backup(), triggered=True)
+    def test_missing_vision_without_heading_reference_stops_then_faults(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, yaw_rad=None)
         for frame in range(2):
             state, command = self.step(
                 state, near_x_m=None, now_s=1.1 + frame * 0.1
@@ -101,6 +108,107 @@ class BackupTest(unittest.TestCase):
         state, command = self.step(state, near_x_m=None, now_s=1.3)
         self.assertEqual(state.phase, "fault")
         self.assertEqual(command.reason, "stop_backup_road_lost")
+
+    def test_no_vision_reverses_with_heading_until_fifteen_cm(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=.42)
+        for t, progress in ((1.1,.42),(1.2,.40),(1.3,.38),(1.4,.36),(1.5,.34),(1.6,.30),(1.7,.271)):
+            state, command = self.step(state, near_x_m=None, progress_s_m=progress, now_s=t)
+            self.assertEqual(state.phase,"backing")
+            self.assertEqual(command.reason,"heading_backup")
+            self.assertAlmostEqual(command.v_mps,-.08)
+        state, command = self.step(state, near_x_m=None, progress_s_m=.27, now_s=1.8)
+        self.assertEqual(state.phase,"fault")
+        self.assertEqual(command.reason,"stop_backup_no_vision_distance")
+        self.assertEqual(command.v_mps,0)
+        self.assertAlmostEqual(state.no_vision_segment_m,.15)
+
+    def test_three_fresh_frames_restore_visual_reverse(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=.42)
+        self.step(state, near_x_m=None, progress_s_m=.42, now_s=1.1)
+        for t, progress in ((1.2,.41),(1.3,.40)):
+            _, command = self.step(state, near_x_m=.02, progress_s_m=progress, now_s=t)
+            self.assertEqual(command.reason,"heading_backup")
+        _, command = self.step(state, near_x_m=.02, progress_s_m=.39, now_s=1.4)
+        self.assertEqual(command.reason,"visual_backup")
+        self.assertAlmostEqual(state.no_vision_distance_m,.03)
+        self.assertIsNone(state.no_vision_started_s)
+        _, command = self.step(state, progress_s_m=.20, now_s=1.5)
+        self.assertEqual(command.reason,"visual_backup")
+
+    def test_duplicate_and_stale_frames_do_not_restore_vision(self) -> None:
+        state, _ = self.step(Backup(), triggered=True)
+        self.step(state, near_x_m=None, now_s=1.1)
+        self.step(state, now_s=1.2, frame_captured_s=1.2)
+        for t in (1.21,1.22,1.23):
+            _, command = self.step(state, now_s=t, frame_captured_s=1.2)
+            self.assertEqual(command.reason,"heading_backup")
+        self.assertEqual(state.clear_frames,1)
+        self.step(state, now_s=1.5, frame_captured_s=1.2)
+        self.assertEqual(state.clear_frames,0)
+
+    def test_repeated_vision_loss_does_not_reset_fifteen_cm_budget(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=.42)
+        self.step(state, near_x_m=None, progress_s_m=.42, now_s=1.1)
+        for t, progress in ((1.2,.38),(1.3,.37),(1.4,.36)):
+            self.step(state, progress_s_m=progress, now_s=t)
+        self.assertAlmostEqual(state.no_vision_distance_m,.06)
+        self.step(state, progress_s_m=.34, now_s=1.5)
+        self.step(state, near_x_m=None, progress_s_m=.34, now_s=1.6)
+        _, command = self.step(state, near_x_m=None, progress_s_m=.251, now_s=1.7)
+        self.assertEqual(command.reason,"heading_backup")
+        _, command = self.step(state, near_x_m=None, progress_s_m=.25, now_s=1.8)
+        self.assertEqual(command.reason,"stop_backup_no_vision_distance")
+
+    def test_short_edge_stops_at_node_before_fifteen_cm(self) -> None:
+        state, _ = self.step(Backup(), triggered=True, progress_s_m=.04)
+        self.step(state, near_x_m=None, progress_s_m=.04, now_s=1.1)
+        _, command = self.step(state, near_x_m=None, progress_s_m=.01, now_s=1.2)
+        self.assertEqual(command.reason,"heading_backup")
+        _, command = self.step(state, near_x_m=None, progress_s_m=0, now_s=1.3)
+        self.assertEqual(state.phase,"done")
+        self.assertEqual(command.reason,"backup_done")
+
+    def test_no_vision_with_no_progress_times_out(self) -> None:
+        state, _ = self.step(Backup(), triggered=True)
+        self.step(state, near_x_m=None, now_s=1.1)
+        _, command = self.step(state, near_x_m=None, now_s=3.11)
+        self.assertEqual(state.phase,"fault")
+        self.assertEqual(command.reason,"stop_backup_no_vision_timeout")
+
+    def test_stale_odom_cannot_reverse_or_fake_node_arrival(self) -> None:
+        for triggered, progress in ((True,.42),(False,.42),(False,0)):
+            with self.subTest(triggered=triggered,progress=progress):
+                state=Backup()
+                if not triggered:
+                    self.step(state,triggered=True,progress_s_m=.42)
+                _, command=self.step(state,triggered=triggered,progress_s_m=progress,
+                                     near_x_m=None,odom_valid=False)
+                self.assertEqual(state.phase,"fault")
+                self.assertEqual(command.reason,"stop_backup_odom_stale")
+                self.assertEqual(command.v_mps,0)
+
+    def test_no_vision_heading_correction_and_deviation_guard(self) -> None:
+        state, _ = self.step(Backup(),triggered=True,yaw_rad=math.pi-.01)
+        _, command=self.step(state,near_x_m=None,yaw_rad=-math.pi+.01,now_s=1.1)
+        self.assertEqual(command.reason,"heading_backup")
+        self.assertAlmostEqual(command.omega_radps,-.08)
+        _, command=self.step(state,near_x_m=None,yaw_rad=-math.pi+.15,now_s=1.2)
+        self.assertEqual(state.phase,"fault")
+        self.assertEqual(command.reason,"stop_backup_heading_error")
+
+    def test_invalid_current_heading_stops_no_vision_reverse(self) -> None:
+        for yaw in (None,float("nan"),float("inf")):
+            with self.subTest(yaw=yaw):
+                state, _=self.step(Backup(),triggered=True)
+                _, command=self.step(state,near_x_m=None,yaw_rad=yaw,now_s=1.1)
+                self.assertEqual(state.phase,"fault")
+                self.assertEqual(command.reason,"stop_backup_heading_invalid")
+
+    def test_nan_lane_offset_is_missing_vision(self) -> None:
+        state, _=self.step(Backup(),triggered=True)
+        _, command=self.step(state,near_x_m=float("nan"),now_s=1.1)
+        self.assertEqual(command.reason,"heading_backup")
+        self.assertTrue(math.isfinite(command.omega_radps))
 
     def test_timeout_and_distance_limit_do_not_fake_arrival(self) -> None:
         state, _ = self.step(Backup(), triggered=True, progress_s_m=1.30)

@@ -110,6 +110,12 @@ COMMAND_NAMES = {
     "stop_rfid_unsafe": "停车：RFID 搜索时视觉条件不安全",
     "backup": "视觉纠偏倒车",
     "visual_backup": "视觉纠偏倒车",
+    "heading_backup": "保持航向退开障碍（无视觉累计限距 15 cm）",
+    "stop_backup_no_vision_distance": "停车：无视觉后退已达 15 cm，道路仍未恢复",
+    "stop_backup_no_vision_timeout": "停车：无视觉后退超时",
+    "stop_backup_odom_stale": "停车：倒车里程计失效",
+    "stop_backup_heading_invalid": "停车：倒车航向无效",
+    "stop_backup_heading_error": "停车：无视觉倒车航向偏差过大",
     "backup_hold": "停车：遇障后等待停稳",
     "stop_backup": "停车：准备倒车",
     "stop_backup_fault": "停车：倒车动作失败",
@@ -972,12 +978,17 @@ def _run(args, parser) -> int:
                             backup_cfg=backup_cfg,
                             stop_settle_s=junction_turn_cfg.stop_settle_s,
                             reacquire_frames=junction_turn_cfg.reacquire_frames,
+                            yaw_rad=progress.yaw_rad,
+                            odom_valid=progress.is_fresh(time.monotonic()),
+                            frame_captured_s=captured_s,
                         )
                         command = outcome.command
                         if culvert_runtime is not None:
                             culvert_runtime.event("obstacle_backup_control", phase=obstacle_recovery.phase,
                                 progress_m=progress.s_m, near_x_m=follow_diag.near_x_m,
                                 lane_heading_rad=follow_diag.lane_heading_rad,
+                                backup_phase=backup.phase,
+                                no_vision_distance_m=backup.no_vision_distance_m + backup.no_vision_segment_m,
                                 command={"v_mps":command.v_mps,"omega_radps":command.omega_radps,"reason":command.reason})
                         if outcome.reset_smoother:
                             smoother.reset()
@@ -1153,6 +1164,9 @@ def _run(args, parser) -> int:
                             command,
                             time.monotonic(),
                             backup_cfg,
+                            yaw_rad=progress.yaw_rad,
+                            odom_valid=progress.is_fresh(time.monotonic()),
+                            frame_captured_s=captured_s,
                         )
                         if backup.phase == "done" and backup_before != "done":
                             if command.reason == "backup_done_at_entry":
@@ -1251,6 +1265,9 @@ def _run(args, parser) -> int:
                     command,
                     time.monotonic(),
                     backup_cfg,
+                    yaw_rad=progress.yaw_rad,
+                    odom_valid=progress.is_fresh(time.monotonic()),
+                    frame_captured_s=captured_s,
                 )
                 if backup.phase != previous_phase:
                     _event(

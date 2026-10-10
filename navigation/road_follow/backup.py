@@ -6,7 +6,7 @@ import math
 import time
 from dataclasses import dataclass
 
-from road_follow.control import VelocityCommand
+from road_follow.control import VelocityCommand, heading_hold_command
 
 Point2D = tuple[float, float]
 
@@ -24,6 +24,11 @@ class BackupConfig:
     max_distance_m: float = 1.10
     max_duration_s: float = 16.0
     max_missing_frames: int = 3
+    max_no_vision_distance_m: float = 0.15
+    max_no_vision_duration_s: float = 2.0
+    max_no_vision_heading_rad: float = 0.10
+    heading_hold_gain: float = 4.0
+    reacquire_frames: int = 3
 
 
 @dataclass
@@ -70,6 +75,13 @@ class Backup:
     start_progress_m: float = 0.0
     reverse_distance_m: float = 0.0
     missing_frames: int = 0
+    hold_yaw_rad: float | None = None
+    no_vision_started_s: float | None = None
+    no_vision_start_m: float = 0.0
+    no_vision_segment_m: float = 0.0
+    no_vision_distance_m: float = 0.0
+    clear_frames: int = 0
+    last_frame_s: float | None = None
 
 
 def near_lane_x(
@@ -124,6 +136,10 @@ def step_backup(
     command: VelocityCommand,
     now_s: float,
     cfg: BackupConfig | None = None,
+    *,
+    yaw_rad: float | None = None,
+    odom_valid: bool = True,
+    frame_captured_s: float | None = None,
 ) -> tuple[Backup, VelocityCommand]:
     """硬堵塞后以负 `CMD_VEL` 视觉倒车，沿边进度回到 0 才算回到路口中心。"""
     cfg = cfg or BackupConfig()
@@ -136,6 +152,9 @@ def step_backup(
     if state.phase == "idle":
         if not triggered:
             return state, command
+        if not odom_valid or not math.isfinite(progress_s_m):
+            state.phase = "fault"
+            return state, _stop("stop_backup_odom_stale")
         if progress_s_m <= cfg.done_progress_m:
             state.phase = "done"
             return state, _stop("backup_done_at_entry")
@@ -144,8 +163,17 @@ def step_backup(
         state.start_progress_m = max(0.0, progress_s_m)
         state.reverse_distance_m = 0.0
         state.missing_frames = 0
+        state.hold_yaw_rad = yaw_rad if yaw_rad is not None and math.isfinite(yaw_rad) else None
+        state.no_vision_started_s = None
+        state.no_vision_segment_m = state.no_vision_distance_m = 0.0
+        state.clear_frames = 0
+        state.last_frame_s = None
         # 触发帧先发零速；下一帧才开始负速度，避免从正向速度直接跳成倒车。
         return state, _stop("stop_backup")
+
+    if not odom_valid or not math.isfinite(progress_s_m):
+        state.phase = "fault"
+        return state, _stop("stop_backup_odom_stale")
 
     state.reverse_distance_m = max(
         state.reverse_distance_m,
@@ -161,7 +189,55 @@ def step_backup(
         state.phase = "fault"
         return state, _stop("stop_backup_timeout")
 
-    if near_x_m is None:
+    vision_ok = near_x_m is not None and math.isfinite(near_x_m)
+    if not vision_ok and state.no_vision_started_s is None and state.hold_yaw_rad is not None:
+        state.no_vision_started_s = now_s
+        state.no_vision_start_m = progress_s_m
+        state.no_vision_segment_m = 0.0
+        state.clear_frames = 0
+        state.last_frame_s = None
+
+    if state.no_vision_started_s is not None:
+        # A new loss of vision keeps the distance already used in this recovery.
+        state.no_vision_segment_m = max(
+            state.no_vision_segment_m, state.no_vision_start_m - progress_s_m
+        )
+        frame_fresh = (
+            frame_captured_s is not None and math.isfinite(frame_captured_s)
+            and 0.0 <= now_s - frame_captured_s <= 0.20
+        )
+        if not vision_ok or not frame_fresh:
+            state.clear_frames = 0
+        elif state.last_frame_s is None or frame_captured_s > state.last_frame_s:
+            state.clear_frames += 1
+            state.last_frame_s = frame_captured_s
+
+        if state.clear_frames >= cfg.reacquire_frames:
+            state.no_vision_distance_m += state.no_vision_segment_m
+            state.no_vision_segment_m = 0.0
+            state.no_vision_started_s = None
+        else:
+            used_m = state.no_vision_distance_m + state.no_vision_segment_m
+            if used_m >= cfg.max_no_vision_distance_m - 1e-9:
+                state.phase = "fault"
+                return state, _stop("stop_backup_no_vision_distance")
+            if now_s - state.no_vision_started_s >= cfg.max_no_vision_duration_s:
+                state.phase = "fault"
+                return state, _stop("stop_backup_no_vision_timeout")
+            if yaw_rad is None or not math.isfinite(yaw_rad):
+                state.phase = "fault"
+                return state, _stop("stop_backup_heading_invalid")
+            error = math.atan2(math.sin(state.hold_yaw_rad - yaw_rad),
+                               math.cos(state.hold_yaw_rad - yaw_rad))
+            if abs(error) > cfg.max_no_vision_heading_rad:
+                state.phase = "fault"
+                return state, _stop("stop_backup_heading_error")
+            hold = heading_hold_command(-abs(cfg.reverse_speed_mps), yaw_rad,
+                                        state.hold_yaw_rad, cfg.heading_hold_gain,
+                                        cfg.max_abs_omega)
+            return state, VelocityCommand(hold.v_mps, hold.omega_radps, "heading_backup")
+
+    if not vision_ok:
         state.missing_frames += 1
         if state.missing_frames > cfg.max_missing_frames:
             state.phase = "fault"

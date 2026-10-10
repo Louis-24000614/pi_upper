@@ -50,15 +50,59 @@ class CulvertPerceptionTest(unittest.TestCase):
         box=Detection(3,"culvert",.9,408,150,562,325)
         self.assertEqual(self.observe(.7,box=box,points=shifted).reason,"tracking")
 
-    def test_far_near_clipped_and_wrong_class_are_rejected(self):
+    def test_far_near_invalid_and_wrong_class_are_rejected(self):
         for expected,box in (
             ("outside_distance_window",Detection(3,"culvert",.9,243,20,397,150)),
-            ("outside_distance_window",Detection(3,"culvert",.9,243,100,397,450)),
-            ("clipped_entry",Detection(3,"culvert",.9,0,150,397,325)),
+            ("outside_distance_window",Detection(3,"culvert",.9,243,100,397,475)),
+            ("invalid_box",Detection(3,"culvert",.9,-1,150,397,325)),
             ("no_culvert",Detection(2,"fence",.9,243,150,397,325))):
             with self.subTest(expected=expected):
                 self.perception.reset()
                 self.assertEqual(self.observe(.7,box=box).reason,expected)
+
+
+    def test_touching_each_image_edge_can_confirm(self):
+        for box in (
+            Detection(3,"culvert",.9,0,150,580,325),
+            Detection(3,"culvert",.9,60,150,639,325),
+            Detection(3,"culvert",.9,0,150,639,325),
+            Detection(3,"culvert",.9,243,0,397,325),
+            Detection(3,"culvert",.9,243,150,397,479),
+            Detection(3,"culvert",.9,0,0,639,479)):
+            with self.subTest(box=box):
+                self.setUp()
+                # 底边触画面时仍需有效投影，取消截断检查不越过距离窗。
+                mapping=calibration_mapping()
+                mapping["ground_points_m"]=[[-.4,.8],[.4,.8],[-.4,.2],[.4,.2]]
+                self.perception=CulvertPerception(self.config,CulvertCalibration(mapping),3)
+                self.assertEqual(self.observe(.7,box=box).reason,"tracking")
+                self.assertEqual(self.observe(.8,box=box).reason,"tracking")
+                self.assertIsNotNone(self.observe(.9,box=box).target)
+
+    def test_near_entry_between_ten_and_twenty_cm_can_confirm(self):
+        box=Detection(3,"culvert",.9,243,150,397,425)
+        self.assertEqual(self.observe(.7,box=box).reason,"tracking")
+        self.observe(.8,box=box)
+        result=self.observe(.9,box=box)
+        self.assertIsNotNone(result.target)
+        self.assertAlmostEqual(result.distance_m,.15)
+
+    def test_distance_window_boundaries_preserve_lane_and_three_frame_checks(self):
+        from unittest.mock import patch
+        for distance,expected in ((.099,"outside_distance_window"),(.1,"tracking"),
+                                  (.6,"tracking"),(.601,"outside_distance_window")):
+            with self.subTest(distance=distance):
+                self.setUp()
+                points=[(0,y) for y in np.arange(.05,.81,.01)]
+                feet=np.array([[-.1,distance],[.1,distance]])
+                with patch.object(self.calibration.ipm,"image_points_to_ground",return_value=feet):
+                    result=self.observe(.7,points=points)
+                self.assertEqual(result.reason,expected)
+                self.assertIsNone(result.target)
+
+    def test_edge_touching_box_still_requires_current_lane(self):
+        box=Detection(3,"culvert",.9,408,150,639,325)
+        self.assertEqual(self.observe(.7,box=box).reason,"outside_current_lane")
 
     def test_next_edge_entry_is_not_assigned_to_current_edge(self):
         self.edge=Edge("a__b","a","b",.7)

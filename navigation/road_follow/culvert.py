@@ -11,7 +11,7 @@ from road_follow.control import VelocityCommand
 @dataclass(frozen=True)
 class CulvertConfig:
     length_m: float = 0.27
-    min_distance_m: float = 0.20
+    min_distance_m: float = 0.10
     max_distance_m: float = 0.60
     max_lateral_m: float = 0.10
     max_heading_rad: float = 0.10

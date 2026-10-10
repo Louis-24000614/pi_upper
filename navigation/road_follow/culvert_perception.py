@@ -184,8 +184,9 @@ class CulvertPerception:
             if item.score < self.min_score or (item.x2-item.x1)*(item.y2-item.y1)/(width*height) < self.min_area:
                 reason = "low_score_or_small_box"
                 continue
-            if not 0 < item.x1 < item.x2 < width-1 or not 0 < item.y1 < item.y2 < height-1:
-                reason = "clipped_entry"
+            # 允许框贴住画面边缘；保留坐标合法性、地面投影和车道校验。
+            if not 0 <= item.x1 < item.x2 <= width-1 or not 0 <= item.y1 < item.y2 <= height-1:
+                reason = "invalid_box"
                 continue
             feet = self.calibration.ipm.image_points_to_ground([(item.x1, item.y2), (item.x2, item.y2)])
             if not np.isfinite(feet).all():
