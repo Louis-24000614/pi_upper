@@ -11,6 +11,7 @@ function initPage() {
   let frameId = null, resultId = null, revision = 0, points = [], image = null;
   let busy = false, saved = false, panMode = false, drag = null, autoTimer = null, invalidateTimer = null;
   let canCapture = false, offline = true, baseline = null;
+  let checkMode = false, checkPoint = null, checks = [], hasVehicle = false, active = null, canApply = false, restoreToken = null;
   let view = {x: 0, y: 0, scale: 1}, fitScale = 1;
 
   async function post(path, body) {
@@ -25,6 +26,12 @@ function initPage() {
     $('upload').disabled = busy;
     $('compute').disabled = busy || !frameId || points.length !== 4;
     $('save').disabled = busy || !resultId || saved;
+    $('check-mode').disabled = busy || !resultId;
+    $('record-check').disabled = busy || !resultId || !checkPoint || !hasVehicle;
+    $('apply').disabled = busy || !canApply || !resultId || !hasVehicle || !checks.length ||
+      !$('measurement-reviewed').checked || !$('image-source-confirmed').checked;
+    $('restore').disabled = busy || !canApply || (!active && !restoreToken);
+    for(const id of ['columns','rows','mode','unit','cell-size','total-width','total-height','aligned','vehicle-unit','center-x','center-y','check-x','check-y','check-unit','measurement-reviewed','image-source-confirmed','ground-contact'])$(id).disabled=busy;
     for (const id of ['zoom-out', 'zoom-in', 'zoom', 'fit', 'pan', 'reset', 'live-again']) $(id).disabled = !frameId || busy;
     $('undo').disabled = !points.length || busy;
   }
@@ -49,6 +56,10 @@ function initPage() {
   }
   function clearResult() {
     resultId = null; saved = false;
+    checkMode = false; checkPoint = null; checks = []; hasVehicle = false;
+    $('check-mode').setAttribute('aria-pressed','false'); $('checks').replaceChildren();
+    $('check-coordinate').textContent='计算后可切换检查模式，检查点不会修改四个角点。';
+    for (const id of ['measurement-reviewed','image-source-confirmed','ground-contact']) $(id).checked=false;
     $('new-ground').textContent = '角点或输入改变，请重新计算当前 H。';
     $('candidate-panel').hidden = true; $('preview-panel').hidden = true;
     $('bev').removeAttribute('src'); $('record').textContent = '';
@@ -78,6 +89,8 @@ function initPage() {
       context.beginPath(); context.arc(x,y,10,0,Math.PI*2); context.fillStyle='#fff8d7'; context.fill();
       context.strokeStyle='#165d43'; context.stroke(); context.fillStyle='#18352c'; context.font='bold 13px system-ui'; context.textAlign='center';context.textBaseline='middle';context.fillText(String(i+1),x,y);
     });
+    if(checkPoint){const x=view.x+checkPoint[0]*view.scale,y=view.y+checkPoint[1]*view.scale;
+      context.strokeStyle='#ffcf64';context.lineWidth=2;context.beginPath();context.moveTo(x-9,y);context.lineTo(x+9,y);context.moveTo(x,y-9);context.lineTo(x,y+9);context.stroke();}
     $('points').replaceChildren(...points.map((p,i) => {const li=document.createElement('li');li.dataset.x=p[0];li.dataset.y=p[1];li.textContent=`${i+1} ${names[i]} · (${p[0].toFixed(2)}, ${p[1].toFixed(2)}) px`;return li;}));
   }
   function fit() {
@@ -96,8 +109,12 @@ function initPage() {
     view.x += anchor[0]*(old-view.scale); view.y += anchor[1]*(old-view.scale); draw();
   }
   canvas.addEventListener('pointerdown', event => {
-    if (!frameId || !image || event.button > 0) return;
+    if (!frameId || !image || event.button > 0 || busy) return;
     const p = pixel(event), hit = points.findIndex(q => Math.hypot(q[0]-p[0],q[1]-p[1])*view.scale < 18);
+    if(checkMode && !panMode){
+      if(p[0]>=0 && p[1]>=0 && p[0]<image.naturalWidth && p[1]<image.naturalHeight){checkPoint=p;draw();inspectPoint(false);}
+      event.preventDefault();return;
+    }
     if (hit >= 0) drag = {kind:'point',index:hit};
     else if (panMode) drag = {kind:'pan',client:[event.clientX,event.clientY],start:[view.x,view.y]};
     else if (points.length < 4 && p[0]>=0 && p[1]>=0 && p[0]<image.naturalWidth && p[1]<image.naturalHeight) {points.push(p);changed();}
@@ -154,6 +171,7 @@ function initPage() {
       const data=await post('/compute',{frame_id:id,revision:r,parameters:params});
       if(id!==frameId || r!==revision)return;
       resultId=data.result_id;saved=false;const record=data.record;
+      hasVehicle=!!record.vehicle_candidate;
       $('new-ground').textContent=matrix(record.H_img_to_region_ground_m);
       $('candidate-panel').hidden=!record.vehicle_candidate;
       if(record.vehicle_candidate)$('vehicle-ground').textContent=matrix(record.vehicle_candidate.H_img_to_vehicle_ground_m);
@@ -164,6 +182,41 @@ function initPage() {
     finally{busy=false;controls();if(id===frameId && r!==revision && points.length===4)autoTimer=setTimeout(compute,100);}
   }
   $('compute').onclick=compute;
+  function currentValues(){return {frame_id:frameId,revision,result_id:resultId,parameters:parameters()};}
+  function showApplication(value,error=null){
+    active=value;
+    $('application-badge').textContent=error?'已选标定异常':active?'已选手动标定':'未选手动标定';
+    $('active-status').textContent=error||(!canApply?'临时输出目录：应用功能禁用，验证不会影响本项目导航。':active?`下次导航启动使用：${active.calibration_file}。${active.ground_contact_verified?'循迹和涵洞使用同一份标定。':'循迹可用；涵洞停车仍缺少底边地面接触确认。'}`:'下次导航启动使用原配置；涵洞沿用原有标定或显式估算模式。');
+    $('active-ground').textContent=matrix(active?active.candidate.H_img_to_vehicle_ground_m:baseline?.H_img_to_vehicle_ground_m);
+    controls();
+  }
+  $('check-mode').onclick=()=>{checkMode=!checkMode;$('check-mode').setAttribute('aria-pressed',checkMode);$('check-coordinate').textContent=checkMode?'检查模式：点击原图中的已知地面位置。':'选角模式：可以拖动四角，修改后检查记录会清除。';};
+  async function inspectPoint(recordMeasured){
+    if(!resultId||!checkPoint||busy)return;
+    const id=resultId,r=revision;busy=true;controls();
+    try{
+      const values={...currentValues(),image_point:[...checkPoint]};
+      if(recordMeasured)values.measured={unit:$('check-unit').value,x:numeric('check-x'),y:numeric('check-y')};
+      const data=await post('/check-point',values);if(id!==resultId||r!==revision)return;
+      const fmt=p=>p.map(v=>(v*100).toFixed(2)).join(', ');
+      $('check-coordinate').textContent=`原图 (${data.image_point.map(v=>v.toFixed(2)).join(', ')}) px；区域 (X,Y)=(${fmt(data.region_ground_m)}) cm；`+(data.vehicle_ground_m?`车辆 (X,Y)=(${fmt(data.vehicle_ground_m)}) cm。`:'填写中心偏移后才能得到车辆距离。');
+      checks=data.checks;$('checks').replaceChildren(...checks.map((check,i)=>{const li=document.createElement('li');li.textContent=`${i+1} 实测 (${fmt(check.measured_ground_m)}) cm，计算 (${fmt(check.predicted_ground_m)}) cm，误差 ΔX/ΔY=(${fmt(check.error_xy_m)}) cm，总误差 ${(check.error_m*100).toFixed(2)} cm`;return li;}));
+      if(recordMeasured)$('measurement-reviewed').checked=false;
+      $('error').textContent='';
+    }catch(error){$('error').textContent=error.message;}finally{busy=false;controls();}
+  }
+  $('record-check').onclick=()=>inspectPoint(true);
+  for(const id of ['measurement-reviewed','image-source-confirmed','ground-contact'])$(id).addEventListener('input',controls);
+  $('apply').onclick=async()=>{
+    busy=true;controls();
+    try{const data=await post('/apply',{...currentValues(),measurement_reviewed:$('measurement-reviewed').checked,image_source_confirmed:$('image-source-confirmed').checked,ground_contact_verified:$('ground-contact').checked,expected_applied_at:active?.applied_at||null});saved=true;restoreToken=null;showApplication(data.active_calibration);$('status').textContent=data.message;$('error').textContent='';}
+    catch(error){$('error').textContent=error.message;}finally{busy=false;controls();}
+  };
+  $('restore').onclick=async()=>{
+    busy=true;controls();
+    try{const data=await post('/restore',{expected_applied_at:active?.applied_at,restore_token:restoreToken});restoreToken=null;showApplication(data.active_calibration);$('status').textContent=data.message;$('error').textContent='';}
+    catch(error){$('error').textContent=error.message;}finally{busy=false;controls();}
+  };
   $('save').onclick=async()=>{
     const id=frameId,r=revision,result=resultId;busy=true;controls();
     try{const data=await post('/save',{frame_id:id,revision:r,result_id:result,parameters:parameters()});if(id===frameId&&r===revision){saved=true;$('status').textContent='已独立保存：'+data.path;}}
@@ -174,6 +227,7 @@ function initPage() {
   async function poll() {
     try {
       const response=await fetch('/status'),data=await response.json();offline=data.offline;canCapture=data.can_capture;
+      canApply=data.can_apply;if(!busy){restoreToken=data.restore_token;showApplication(data.active_calibration,data.application_error);}
       $('camera').textContent=`${data.offline?'离线上传模式':'导航相机 '+data.device} · ${data.navigation_image_size.join(' × ')} px`+(data.camera_error?' · '+data.camera_error:'');
       if(!initialized){initialized=true;showBaseline(data.baseline);if(!data.offline){$('live').src='/camera.mjpg';$('live-placeholder').hidden=true;}if(data.frame_id)await acceptFrame({frame_id:data.frame_id,revision:data.revision,image_size:data.frozen_image_size,source:data.frozen_source,baseline:data.baseline});}
       controls();

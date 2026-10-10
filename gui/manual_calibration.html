@@ -7,7 +7,7 @@
 #status,#error{overflow-wrap:anywhere}
 </style></head>
 <body><main>
-<header class="header"><div><div class="eyebrow">GROUND CALIBRATION · MANUAL</div><h1>手动棋盘格地面标定</h1></div><span class="badge">独立保存 · 未应用到导航</span></header>
+<header class="header"><div><div class="eyebrow">GROUND CALIBRATION · MANUAL</div><h1>手动棋盘格地面标定</h1></div><span class="badge" id="application-badge">读取导航标定状态…</span></header>
 <p>棋盘板平放在道路地面，只需所选矩形区域的四个外角入镜。无需整板入镜，也不自动检测内角点。</p>
 <div class="workspace"><aside>
 <section class="panel"><h2>1　格数与实际尺寸</h2><p class="hint"><b>N、M 是所选区域包含的格子数量，不是内角点数量。</b></p>
@@ -34,11 +34,25 @@
 <div id="status" role="status">等待冻结或上传原图。</div><div id="error" role="alert"></div></section>
 <section class="panel"><div id="result-heading"><h2>4　投影矩阵与俯视预览</h2><span id="result-state" class="muted">尚未计算</span></div>
 <p class="hint">H 将齐次像素 [u,v,1] 投影到相应坐标。导航、区域、车辆候选的原点不同，BEV 预览还使用像素单位，不能直接混用矩阵。</p>
-<div class="twocol"><div><div class="matrix-title">标定前 H · 当前导航图像 → 车辆地面（米，参数估算）</div><pre id="old-ground">正在读取…</pre><details><summary>标定前 H · 当前导航图像 → 导航 BEV（像素）</summary><pre id="old-bev"></pre></details><p class="hint" id="baseline-note"></p></div>
+<div class="twocol"><div><div class="matrix-title">原配置 H · 图像 → 车辆地面（米，备用参数估算）</div><pre id="old-ground">正在读取…</pre><details><summary>原配置 H · 图像 → 导航 BEV（像素）</summary><pre id="old-bev"></pre></details><p class="hint" id="baseline-note"></p></div>
 <div><div class="matrix-title">标定后 H · 当前原图 → 所选区域地面（米）</div><pre id="new-ground">请选择四个外角后计算。</pre><div id="candidate-panel" hidden><div class="matrix-title">车辆坐标候选 H · 相机光心地面垂足为原点（米）</div><pre id="vehicle-ground"></pre></div></div></div>
 <div id="preview-panel" hidden><p>俯视预览：等比例米制栅格，红色 X 向右、绿色 Y 向上。</p><img id="bev" alt="所选区域坐标下的俯视预览"><details><summary>查看当前完整标定记录</summary><pre id="record"></pre></details></div></section>
-</div></div>
+<section class="panel"><h2>5　检查测距并选择应用</h2>
+<p>先确认车辆坐标与区域中心偏移。车保持静止，点击没有参与四角拟合的地面位置，再输入该点相对相机地面垂足的实测 X、Y。建议检查多个距离和左右位置。</p>
+<div class="row toolbar"><button id="check-mode" disabled aria-pressed="false">点击图像检查测距</button></div>
+<p id="check-coordinate" class="hint">计算后可切换检查模式，检查点不会修改四个角点。</p>
+<div class="two"><label>检查点实测 X（车右为正）<input id="check-x" type="number" step="any"></label><label>检查点实测 Y（车前为正）<input id="check-y" type="number" step="any"></label></div>
+<label>实测单位<select id="check-unit"><option value="cm">cm</option><option value="mm">mm</option></select></label>
+<button id="record-check" disabled>记录实测值并显示误差</button><ol id="checks" class="hint"></ol>
+<label><input id="measurement-reviewed" type="checkbox">我已核对检查点误差，确认采用这份标定</label>
+<label><input id="image-source-confirmed" type="checkbox">原图来自当前导航相机，未裁剪、缩放或去畸变，相机安装和镜头未改变</label>
+<label><input id="ground-contact" type="checkbox">我已核实 YOLO 涵洞框底边对应实际入口地面接触位置</label>
+<p class="hint">未确认涵洞底边时，可应用到循迹，但涵洞停车仍拒绝启动。此确认不由四点拟合自动获得。</p>
+<div class="row"><button id="apply" class="primary" disabled>保存并应用此标定</button><button id="restore" disabled>恢复上次标定设置</button></div>
+<p id="active-status" role="status">正在读取已选标定…</p><div class="matrix-title">导航下次启动采用的 H · 图像 → 车辆地面（米）</div><pre id="active-ground"></pre>
+<p class="hint">应用前至少记录一个实测检查点。检查误差由你核对，页面不会冒充全范围精度验收。保存不会自动应用；应用或恢复仅在重新启动导航后生效。本页不启动导航或发送运动指令。</p>
+</section></div></div>
 <div class="notice">四点拟合成功不代表整个测距范围精度已验证。图像未进行镜头去畸变，结果如实记录为原始带畸变图像；后续请用独立距离点检查尺度和畸变。</div>
-<p class="hint">保存到 data/calibration/manual/ 的唯一时间目录，包含原图、四角标注、俯视预览和 JSON。车辆坐标候选另存文件。本页不修改导航或涵洞配置，不应用矩阵、不启动导航或 UART。使用相机模式时请先结束占用导航相机的程序。</p>
+<p class="hint">保存到 data/calibration/manual/ 的唯一时间目录，包含原图、四角标注、俯视预览和 JSON。车辆坐标候选另存文件。明确应用后，active.json 记录选择和实测检查点，旧设置保存在 activation_history/。本页不覆盖导航或涵洞 YAML，不启动导航或 UART。使用相机模式时请先结束占用导航相机的程序。</p>
 <button id="stop">停止网页并释放相机</button>
 </main><script type="module" src="/manual_calibration.js"></script></body></html>

@@ -18,6 +18,7 @@ from road_follow.culvert_map import CulvertRecords
 from road_follow.culvert_perception import CulvertCalibration, CulvertPerception
 from road_follow.speech import InspectionSpeech, SpeechConfig
 from vision.obstacle.blockage import HardBlockageJudge, hard_block_config_from_mapping
+from vision.ipm_proto.manual_ground import runtime_activation
 
 
 def validate_culvert_config(path, root, *, drive, image_size, near_speed,
@@ -43,8 +44,12 @@ def validate_culvert_config(path, root, *, drive, image_size, near_speed,
     model_path = Path(root)/model["path"]
     if not model_path.is_file() or hashlib.sha256(model_path.read_bytes()).hexdigest() != fingerprint:
         raise ValueError("涵洞模型缺失或SHA256不匹配")
-    calibration = (CulvertCalibration.from_camera_parameters(nav_config or {}, image_size)
-                   if estimated_camera else CulvertCalibration(mapping.get("calibration", {})))
+    active = runtime_activation()
+    if active is not None:
+        calibration = CulvertCalibration.from_manual_activation(active, nav_config or {}, image_size)
+    else:
+        calibration = (CulvertCalibration.from_camera_parameters(nav_config or {}, image_size)
+                       if estimated_camera else CulvertCalibration(mapping.get("calibration", {})))
     if drive and (not calibration.valid or tuple(image_size) != calibration.size):
         raise ValueError("自动涵洞停车需要已核实的四点地面标定，且原始图像尺寸必须一致")
     if not math.isfinite(near_speed) or near_speed <= 0:

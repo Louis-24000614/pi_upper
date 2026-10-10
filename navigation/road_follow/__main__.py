@@ -484,6 +484,17 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("CPU 线程数必须大于零")
     if args.culvert_estimated_camera and not args.culvert_stop:
         parser.error("--culvert-estimated-camera 必须与 --culvert-stop 同时使用")
+    # 在打开模型、相机或串口之前验证已选标定；整个进程保持同一份快照。
+    from vision.ipm_proto.manual_ground import runtime_activation
+    try:
+        active_ground = runtime_activation()
+        if active_ground is not None:
+            ground_cfg = _load_config(args.config)
+            capture = ground_cfg.get("capture", {}) or {}
+            make_ipm(ground_cfg, (int(capture["height"]), int(capture["width"])))
+            print(f"地面投影：手动标定 {active_ground['calibration_file']}；仅重启导航后切换", file=sys.stderr)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
     if args.culvert_stop:
         # 在频率保护、模型初始化、相机或串口打开之前拒绝不完整配置。
         if not args.drive or not (args.left_at_junction or args.turn_at_junction):
@@ -498,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                 image_size=(int(camera.get("width",1280)),int(camera.get("height",720))),
                 near_speed=float((nav_cfg.get("follow") or {}).get("near_mps",.05)),
                 estimated_camera=args.culvert_estimated_camera, nav_config=nav_cfg)
-            if args.culvert_estimated_camera:
+            if args.culvert_estimated_camera and active_ground is None:
                 print(f"涵洞估算试运行：{args.culvert_setup[2].metadata['camera']}；中央停车精度待实测确认", file=sys.stderr)
         except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
             parser.error(str(exc))

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
@@ -18,7 +20,11 @@ import uuid
 import cv2
 import numpy as np
 
-from manual_calibration import ROOT, navigation_settings, render_images, solve_calibration, validate_record
+from manual_calibration import ROOT, UNITS, navigation_settings, number, render_images, solve_calibration, validate_record
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from vision.ipm_proto import manual_ground as ground
 
 
 def encoded(frame, extension):
@@ -62,13 +68,22 @@ class CalibrationSession:
 
     def status(self):
         with self._operation, self._condition:
+            try:
+                active, application_error = ground.read_activation(self.directory), None
+            except ValueError as exc:
+                active, application_error = None, str(exc)
+            active_path = self.directory / "active.json"
+            restore_token = hashlib.sha256(active_path.read_bytes()).hexdigest() if active_path.exists() else None
             return {"offline": self.offline, "device": self.settings["device"],
                     "navigation_image_size": self.settings["image_size"], "camera_error": self.camera_error,
                     "can_capture": self.frame is not None and time.monotonic()-self.captured_s <= 1,
                     "frame_id": self.frozen["id"] if self.frozen else None, "revision": self.revision,
                     "frozen_image_size": list(self.frozen["frame"].shape[1::-1]) if self.frozen else None,
                     "frozen_source": copy.deepcopy(self.frozen["source"]) if self.frozen else None,
-                    "baseline": self.settings["baseline"], "auto_apply": False}
+                    "baseline": self.settings["baseline"], "auto_apply": False,
+                    "active_calibration": active, "application_error": application_error,
+                    "restore_token": restore_token,
+                    "can_apply": self.directory.resolve() == ground.DIRECTORY.resolve()}
 
     def _clear(self):
         self.frozen, self.result, self.revision = None, None, 0
@@ -127,7 +142,7 @@ class CalibrationSession:
             record.update(frame_id=self.frozen["id"], captured_at=self.frozen["captured_at"], input_revision=revision)
             overlay, preview = render_images(self.frozen["frame"], record)
             self.result = {"id": uuid.uuid4().hex, "record": record, "parameters": copy.deepcopy(parameters),
-                           "overlay": overlay, "preview": preview, "path": None}
+                           "overlay": overlay, "preview": preview, "path": None, "checks": []}
             return {"result_id": self.result["id"], "revision": revision, "record": copy.deepcopy(record)}
 
     def image(self, kind, token):
@@ -140,15 +155,85 @@ class CalibrationSession:
                 raise ValueError("计算结果已失效，请重新计算")
             return encoded(self.result["preview" if kind == "bev" else "overlay"], ".png")
 
+    def _valid_result(self, values):
+        revision = self._current(values)
+        result = self.result
+        if not result or values.get("result_id") != result["id"] or revision != self.revision:
+            raise ValueError("没有有效的当前计算结果，请重新计算")
+        if values.get("parameters") != result["parameters"]:
+            self.result = None
+            raise ValueError("角点、尺寸或坐标设置已改变，请重新计算再保存")
+        validate_record(result["record"])
+        return result
+
+    def check_point(self, values):
+        with self._operation:
+            result = self._valid_result(values)
+            point = np.asarray(values.get("image_point"), np.float64)
+            width, height = result["record"]["image_size"]
+            if point.shape != (2,) or not np.isfinite(point).all() or np.any(point < 0) or point[0] >= width or point[1] >= height:
+                raise ValueError("检查点必须位于原始图像内")
+            record = result["record"]
+            region = ground.project(record["H_img_to_region_ground_m"], [point])[0]
+            candidate = record["vehicle_candidate"]
+            vehicle = ground.project(candidate["H_img_to_vehicle_ground_m"], [point])[0] if candidate else None
+            response = {"image_point": point.tolist(), "region_ground_m": region.tolist(),
+                        "vehicle_ground_m": vehicle.tolist() if vehicle is not None else None}
+            measured = values.get("measured")
+            if measured is not None:
+                if not candidate:
+                    raise ValueError("请先确认车辆坐标方向并填写区域中心偏移，再记录实测检查点")
+                if not isinstance(measured, dict) or measured.get("unit") not in UNITS:
+                    raise ValueError("实测检查点单位请选择 mm 或 cm")
+                actual = np.array([number(measured.get("x"), "检查点实测 X"),
+                                   number(measured.get("y"), "检查点实测 Y")]) * UNITS[measured["unit"]]
+                error = vehicle-actual
+                check = {"image_point": point.tolist(), "measured_ground_m": actual.tolist(),
+                         "predicted_ground_m": vehicle.tolist(), "error_xy_m": error.tolist(),
+                         "error_m": float(np.linalg.norm(error)), "coordinate_reference": "navigation_camera_ground_projection",
+                         "checked_at": datetime.now(timezone.utc).isoformat()}
+                ground.validate_checks(candidate, [check])
+                # 同一像素点修正实测值时替换该记录，不能靠重复点击增加检查点数。
+                result["checks"] = [old for old in result["checks"] if np.linalg.norm(np.asarray(old["image_point"])-point) >= 5]
+                result["checks"].append(check)
+            response["checks"] = copy.deepcopy(result["checks"])
+            return response
+
+    def apply(self, values):
+        with self._operation:
+            if self.directory.resolve() != ground.DIRECTORY.resolve():
+                raise ValueError("临时 --output 目录仅用于离线验证，不能应用到本项目导航")
+            result = self._valid_result(values)
+            candidate = result["record"]["vehicle_candidate"]
+            if candidate is None:
+                raise ValueError("请先生成车辆坐标候选，区域坐标不能直接应用到导航")
+            if candidate["image_size"] != self.settings["image_size"]:
+                raise ValueError("上传原图分辨率与导航不同，不能应用")
+            current_settings = navigation_settings(self.settings["baseline"]["config_path"])
+            if current_settings["baseline"]["config_sha256"] != self.settings["baseline"]["config_sha256"]:
+                raise ValueError("导航配置在网页启动后已改变，请重启网页重新标定")
+            if values.get("measurement_reviewed") is not True or values.get("image_source_confirmed") is not True:
+                raise ValueError("请确认实测误差及导航相机原图来源")
+            ground.validate_checks(candidate, result["checks"])
+            current = ground.read_activation(self.directory)
+            if values.get("expected_applied_at") != (current["applied_at"] if current else None):
+                raise ValueError("已选标定发生变化，请刷新状态后再应用")
+            path = self.save(values)["path"]
+            active = ground.apply_activation(self.directory, path, candidate, copy.deepcopy(result["checks"]),
+                device=self.settings["device"], measurement_reviewed=True, image_source_confirmed=True,
+                ground_contact_verified=values.get("ground_contact_verified", False))
+            return {"active_calibration": active, "message": "已选择标定；重启导航后生效，当前运行进程不切换矩阵"}
+
+    def restore(self, values):
+        with self._operation:
+            if self.directory.resolve() != ground.DIRECTORY.resolve():
+                raise ValueError("临时 --output 目录不能恢复本项目导航标定")
+            active = ground.restore_activation(self.directory, values.get("expected_applied_at"), values.get("restore_token"))
+            return {"active_calibration": active, "message": "已恢复上次设置；重启导航后生效"}
+
     def save(self, values):
         with self._operation:
-            revision = self._current(values)
-            result = self.result
-            if not result or values.get("result_id") != result["id"] or revision != self.revision:
-                raise ValueError("没有有效的当前计算结果，请重新计算")
-            if values.get("parameters") != result["parameters"]:
-                self.result = None
-                raise ValueError("角点、尺寸或坐标设置已改变，请重新计算再保存")
+            result = self._valid_result(values)
             record = copy.deepcopy(result["record"])
             validate_record(record)
             if list(self.frozen["frame"].shape[1::-1]) != record["image_size"]:
@@ -252,7 +337,9 @@ def handler_factory(session, stop):
                 values = json.loads(body)
                 if not isinstance(values, dict):
                     raise ValueError("请求必须是 JSON 对象")
-                operations = {"/capture": session.capture, "/compute": session.compute, "/invalidate": session.invalidate, "/save": session.save}
+                operations = {"/capture": session.capture, "/compute": session.compute, "/invalidate": session.invalidate,
+                              "/save": session.save, "/check-point": session.check_point,
+                              "/apply": session.apply, "/restore": session.restore}
                 if request.path in operations:
                     self.send_json(operations[request.path]() if request.path == "/capture" else operations[request.path](values))
                 elif request.path == "/stop":
@@ -330,7 +417,7 @@ def main(argv=None):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signals = [signal.SIGINT, signal.SIGTERM] + ([signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])
     previous = {s: signal.signal(s, request_stop) for s in signals}
-    print(f"MANUAL_CALIBRATION_READY port={server.server_port} offline={args.offline}; 独立保存，不应用导航", flush=True)
+    print(f"MANUAL_CALIBRATION_READY port={server.server_port} offline={args.offline}; 保存不自动应用，明确应用后重启导航生效", flush=True)
     try:
         server.serve_forever(poll_interval=.2)
     finally:

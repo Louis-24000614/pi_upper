@@ -47,6 +47,21 @@ class CulvertCalibration:
                          "ground_contact_verified": True}
 
     @classmethod
+    def from_manual_activation(cls, active, nav_config, image_size):
+        """复用循迹的已选车辆坐标；保留涵洞框底边地面接触确认。"""
+        if active.get("ground_contact_verified") is not True:
+            raise ValueError("已选手动标定尚未确认涵洞框底边对应地面入口，不能启用涵洞停车")
+        from road_follow.pipeline import make_ipm
+        result = cls({})
+        result.ipm = make_ipm(nav_config, (image_size[1], image_size[0]))
+        result.size, result.valid, result.mode = tuple(image_size), True, "manual_vehicle_ground"
+        result.metadata = {"mode": result.mode, "verified": True, "verification": "user_reviewed_check_points",
+                           "origin": "navigation_camera_ground_projection", "image_size": list(image_size),
+                           "ground_contact_verified": True, "calibration_file": active["calibration_file"],
+                           "applied_at": active["applied_at"], "checks": active["checks"]}
+        return result
+
+    @classmethod
     def from_camera_parameters(cls, nav_config, image_size):
         """显式试运行：复用导航针孔参数，不声称已完成地面标定。"""
         size = tuple(image_size)

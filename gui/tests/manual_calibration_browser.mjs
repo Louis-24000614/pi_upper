@@ -89,6 +89,38 @@ if (process.argv.length === 2) {
         const candidate=JSON.parse(await fs.readFile(path.join(path.dirname(file),'vehicle_candidate.json'),'utf8'));
         assert.deepEqual(candidate.region_center_m,[.03,.4]);assert.equal(candidate.verified,false);
       }
+      if(await page.locator('#candidate-panel').isHidden()){
+        await page.locator('summary').filter({hasText:'可选：另存车辆坐标候选'}).click();
+        await page.locator('#aligned').check();await page.locator('#center-x').fill('3');await page.locator('#center-y').fill('40');
+        await page.waitForFunction(()=>!document.querySelector('#candidate-panel').hidden&&!document.querySelector('#save').disabled);
+      }
+      await page.locator('#check-mode').click();await page.locator('#canvas').scrollIntoViewIfNeeded();
+      geometry=await page.locator('#canvas').evaluate(el=>{const r=el.getBoundingClientRect();return {rect:{left:r.left,top:r.top,width:r.width,height:r.height},width:el.clientWidth,height:el.clientHeight};});
+      // 原棋盘区域的对角线交点为独立中心检查点，未参加四角拟合。
+      const a=corners[0],b=corners[2],c=corners[1],d=corners[3];
+      const cross=(a,b)=>a[0]*b[1]-a[1]*b[0],ab=[b[0]-a[0],b[1]-a[1]],cd=[d[0]-c[0],d[1]-c[1]];
+      const t=cross([c[0]-a[0],c[1]-a[1]],cd)/cross(ab,cd),center=[a[0]+t*ab[0],a[1]+t*ab[1]];
+      if(scenario.name==='desktop'){scale=Math.min(geometry.width/1280,geometry.height/720);offset=[(geometry.width-1280*scale)/2,(geometry.height-720*scale)/2];}
+      const at=location(center);if(scenario.mobile)await page.touchscreen.tap(at.x,at.y);else await page.mouse.click(at.x,at.y);
+      await page.waitForFunction(()=>document.querySelector('#check-coordinate').textContent.includes('车辆 (X,Y)'));
+      assert.equal(await page.locator('#points li').count(),4,'check must not change fitting corners');
+      await page.locator('#check-x').fill('3');await page.locator('#check-y').fill('40');await page.locator('#record-check').click();
+      await page.waitForFunction(()=>document.querySelectorAll('#checks li').length===1);
+      assert.ok((await page.locator('#checks').textContent()).includes('总误差'));
+      assert.equal(await page.locator('#apply').isDisabled(),true,'review confirmations must be explicit');
+      await page.locator('#measurement-reviewed').check();await page.locator('#image-source-confirmed').check();await page.locator('#ground-contact').check();
+      const status=await (await page.request.get(url+'/status')).json();
+      if(status.can_apply){
+        await page.locator('#apply').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('已选择标定'));
+        const selected=await (await page.request.get(url+'/status')).json();
+        assert.equal(selected.active_calibration.candidate.coordinate_reference,'navigation_camera_ground_projection');
+        assert.equal(selected.active_calibration.checks.length,1);assert.equal(selected.active_calibration.ground_contact_verified,true);
+        await page.locator('#restore').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('已恢复'));
+        assert.equal((await (await page.request.get(url+'/status')).json()).active_calibration,null);
+        console.log('PASS: '+scenario.name+' measurement / explicit application / restoration.');
+      }else assert.equal(await page.locator('#apply').isDisabled(),true,'custom output cannot select production navigation');
+      await page.locator('#cell-size').fill('31');await page.waitForFunction(()=>document.querySelectorAll('#checks li').length===0);
+      assert.equal(await page.locator('#apply').isDisabled(),true,'input change must clear checks and application eligibility');
       assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth),'page has horizontal overflow');
       await page.screenshot({path:path.join(outputDir,scenario.name+'.png'),fullPage:true});
       // 重新上传必须清除点、H、预览和保存按钮。
