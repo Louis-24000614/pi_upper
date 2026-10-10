@@ -270,7 +270,7 @@ class BackupTest(unittest.TestCase):
         self.assertIsNone(near_lane_heading([(0.02, 0.22)]))
 
     def test_forward_lane_heading_ignores_side_opening(self) -> None:
-        forward = [(0.0, 0.14), (0.001, 0.18), (0.002, 0.22), (0.003, 0.26)]
+        forward = [(0.0, 0.14), (0.0005, 0.16), (0.001, 0.18), (0.002, 0.22), (0.003, 0.26)]
         opening_left = [(-0.16, 0.22), (-0.22, 0.26), (-0.28, 0.28)]
         heading = forward_lane_heading(forward + opening_left)
         self.assertIsNotNone(heading)
@@ -289,8 +289,16 @@ class BackupTest(unittest.TestCase):
         self.assertIsNone(forward_lane_heading(two_points))
         self.assertIsNone(forward_lane_heading([]))
 
+    def test_forward_lane_heading_stops_at_contaminated_corner_rows(self) -> None:
+        # 墙角向左弯的行一旦与基带外推偏差超限就截断，方向仍由干净行决定。
+        clean = [(0.0, 0.14), (0.001, 0.16), (0.002, 0.19)]
+        corner_bend = [(-0.02, 0.21), (-0.05, 0.24), (-0.09, 0.27)]
+        heading = forward_lane_heading(clean + corner_bend)
+        self.assertIsNotNone(heading)
+        self.assertLess(abs(heading), 0.05)
+
     def test_forward_lane_heading_detects_real_skew(self) -> None:
-        slanted = [(0.06, 0.15), (0.045, 0.18), (0.03, 0.21), (0.015, 0.24), (0.0, 0.27)]
+        slanted = [(0.06, 0.15), (0.045, 0.17), (0.03, 0.19), (0.015, 0.24), (0.0, 0.27)]
         heading = forward_lane_heading(slanted)
         self.assertIsNotNone(heading)
         self.assertLess(heading, -0.1)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import queue
 import signal
 import subprocess
@@ -17,6 +18,10 @@ import numpy as np
 import yaml
 
 from ipm_proto.junction import (
+    KIND_CORNER,
+    KIND_CROSS,
+    KIND_STRAIGHT,
+    KIND_T,
     KIND_UNKNOWN,
     JunctionRead,
     JunctionTracker,
@@ -25,7 +30,13 @@ from ipm_proto.junction import (
 from ipm_proto.temporal import temporal_from_mapping
 from road_follow.arrival_policy import resolve_arrival_policy, step_route_arrival
 from road_follow.backup import Backup, BackupConfig, EdgeProgress, step_backup
-from road_follow.control import VelocityCommand, follow_config_from_mapping, heading_anchor_enabled_from_mapping
+from road_follow.control import (
+    VelocityCommand,
+    command_from_forward_strip,
+    follow_config_from_mapping,
+    heading_anchor_enabled_from_mapping,
+    is_visual_follow,
+)
 from road_follow.departure import handoff_arrival, handoff_entrance
 from road_follow.entrance import (
     EntranceDeparture,
@@ -612,6 +623,18 @@ def _run(args, parser) -> int:
             raise
     smoother = temporal_from_mapping(cfg)
     junctions = JunctionTracker()
+    # 路口接近（追踪器确认非直路后锁存）：转向点列先过正前方窄带，
+    # 防止固定预瞄点落进侧向开口；走廊尽头短于预瞄时改按近距预瞄低速前进。
+    approach_cfg = (cfg.get("junction_approach") or {})
+    junction_follow_cfg = dataclasses.replace(
+        follow_config_from_mapping(cfg),
+        min_lookahead_m=float(approach_cfg.get("min_lookahead_m", 0.16)),
+        min_points=int(approach_cfg.get("min_points", 4)),
+    )
+    junction_strip_abs_x_m = float(approach_cfg.get("strip_abs_x_m", 0.10))
+    junction_straight_clear_frames = int(approach_cfg.get("straight_clear_frames", 8))
+    junction_strip_latched = False
+    junction_straight_frames = 0
     projector = BevProjector() if args.fps_opt else None
     bridge: subprocess.Popen | None = None
     if args.drive:
@@ -848,6 +871,24 @@ def _run(args, parser) -> int:
                 mask, cfg, smoother, projection=projection, lazy_raw=args.lazy_raw_centerline
             )
             opening, junction = _junction_read(mask, cfg, junctions, projection=projection)
+            # 路口接近锁存：确认真路口几何（丁字/十字/转角）后转向改用正前方
+            # 窄带；blocked/unknown 只是暂时看不见路，不当路口。非路口分类
+            # 连续数帧后才解除锁存，避免分类抖动导致窄带/常规指令来回切换。
+            if junction in (KIND_T, KIND_CROSS, KIND_CORNER):
+                junction_strip_latched = True
+                junction_straight_frames = 0
+            elif junction_strip_latched:
+                junction_straight_frames += 1
+                if junction_straight_frames >= junction_straight_clear_frames:
+                    junction_strip_latched = False
+                    junction_straight_frames = 0
+            if junction_strip_latched and is_visual_follow(command):
+                command = command_from_forward_strip(
+                    follow_diag.centerline_points,
+                    follow_diag.bev_road_pixels,
+                    junction_follow_cfg,
+                    junction_strip_abs_x_m,
+                )
             if turn_side is not None:
                 while True:
                     try:
@@ -1302,6 +1343,21 @@ def _run(args, parser) -> int:
                     f"路段进度={progress.s_m:.2f} m",
                     f"路口={JUNCTION_NAMES.get(opening, opening)}",
                 ]
+                if command.reason in ("align", "heading_hold") or junction_turn.phase in (
+                    "align", "heading_hold", "anchor_wait",
+                ):
+                    lane_heading = follow_diag.lane_heading_rad
+                    details.append(
+                        "车道方向=未知"
+                        if lane_heading is None
+                        else f"车道方向={lane_heading:+.3f} rad"
+                    )
+                    near_x = follow_diag.near_x_m
+                    details.append(
+                        "近带横向=未知"
+                        if near_x is None
+                        else f"近带横向={near_x:+.3f} m"
+                    )
                 _event("状态", "；".join(details))
                 last_status_signature = status_signature
                 last_status_s = now_s

@@ -155,3 +155,13 @@ lane_heading:
   y_min_m: 0.14
   y_max_m: 0.28
   min_points: 3
+
+# 路口接近转向（追踪器确认非直路后锁存，直路连续 straight_clear_frames 帧解除）：
+# 转向点列先过正前方窄带，固定 0.30 m 预瞄点不再落进侧向开口；
+# 走廊尽头短于固定预瞄时改按近距预瞄低速前进（min_lookahead_m / min_points
+# 仅作用于该锁存路径，普通循迹配置不受影响）。
+junction_approach:
+  strip_abs_x_m: 0.10
+  min_lookahead_m: 0.16
+  min_points: 4
+  straight_clear_frames: 8
