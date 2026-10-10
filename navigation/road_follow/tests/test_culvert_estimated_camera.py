@@ -34,7 +34,7 @@ class EstimatedCameraTest(unittest.TestCase):
         self.assertFalse(projection.metadata["verified"])
         self.assertFalse(projection.metadata["ground_contact_verified"])
         self.assertEqual(projection.mode, "estimated_camera")
-        self.assertEqual(projection.metadata["camera"]["height_m"], .16)
+        self.assertEqual(projection.metadata["camera"]["height_m"], self.nav["camera"]["height_m"])
         self.assertEqual(projection.metadata["camera"]["pitch_deg"], 28)
 
     def test_projection_matches_original_camera_and_physical_ground_points(self):
