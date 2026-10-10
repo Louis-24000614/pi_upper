@@ -11,7 +11,7 @@ from road_follow.rfid_arrival import RfidArrival, RfidArrivalConfig, step_rfid_a
 
 class RfidArrivalTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = RfidArrivalConfig(
+        self.cfg = RfidArrivalConfig(heading_anchor_enabled=False,
             step_distance_mm=200,
             search_speed_mmps=50,
             edge_visible_frames=2,
@@ -282,8 +282,8 @@ class RfidArrivalTest(unittest.TestCase):
         state, command = self.step(
             state, forward_band_ratio=0.29, lane_heading_rad=0.20, now_s=6.6
         )
-        self.assertEqual(state.phase, "heading_hold")
-        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(state.phase, "fault")
+        self.assertEqual(command.reason, "stop_heading_anchor_align_timeout")
         self.assertEqual(self.sent, [])
 
     def test_latched_visual_end_follows_the_forward_strip_not_the_opening(self) -> None:

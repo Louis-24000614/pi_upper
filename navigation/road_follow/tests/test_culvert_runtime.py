@@ -78,6 +78,29 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.assertEqual(self.agent.state.current_node,"a")
         self.assertEqual(self.graph.blocked,set())
 
+    def test_runtime_binds_confirmed_speech_callback_and_handles_its_own_receipt(self):
+        from road_follow.speech import SpeechConfig
+        executor = NS(web=None, close=lambda: None)
+        prefix = Path(self.folder.name)/"speech_binding"
+        with patch("road_follow.inspection.create_inspection", return_value=executor) as factory:
+            runtime = CulvertRuntime(
+                self.mapping, self.runtime.config, self.runtime.calibration,
+                nav_config=self.runtime.nav_config, agent=self.agent,
+                send=lambda line: self.sent.append(line) or True, event=lambda *_: None,
+                root=ROOT, prefix=prefix, inspection_settings=NS(),
+                speech_config=SpeechConfig((1000,) * 32))
+        self.addCleanup(runtime.close)
+        callback = factory.call_args.kwargs["notify"]
+        self.assertTrue(factory.call_args.kwargs["speech_enabled"])
+        self.assertTrue(callback(dict(status="confirmed", category="suspect",
+                                      identity="suspect_10", edge_id="a__b", direction="A")))
+        verb, event_id, audio_id = self.sent[-1].split()
+        self.assertEqual((verb, audio_id), ("speech", "22"))
+        self.assertTrue(runtime.handle_speech_note(f"SPEECH_RESULT {event_id} 22 ACK_OK"))
+        self.assertEqual(runtime.speech.requests[event_id]["state"], "accepted_by_lower")
+        self.assertFalse(callback(dict(status="unconfirmed", category="knife",
+                                       identity="knife_01", edge_id="a__b", direction="B")))
+
     def test_configured_bias_logs_raw_and_corrected_distance_and_completes_at_corrected_center(self):
         for t in (.7,.8,.9): self.update(t)
         target=self.runtime.controller.target

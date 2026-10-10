@@ -25,7 +25,7 @@ from ipm_proto.junction import (
 from ipm_proto.temporal import temporal_from_mapping
 from road_follow.arrival_policy import resolve_arrival_policy, step_route_arrival
 from road_follow.backup import Backup, BackupConfig, EdgeProgress, step_backup
-from road_follow.control import VelocityCommand, follow_config_from_mapping
+from road_follow.control import VelocityCommand, follow_config_from_mapping, heading_anchor_enabled_from_mapping
 from road_follow.departure import handoff_arrival, handoff_entrance
 from road_follow.entrance import (
     EntranceDeparture,
@@ -76,6 +76,7 @@ COMMAND_NAMES = {
     "entrance_recovery": "转弯后低速恢复",
     "blind_forward": "路口定距前进",
     "heading_hold": "锁视觉航向",
+    "anchor_wait": "等待停稳与航向参考同步",
     "forward": "定距前进",
     "forward_wait": "等待定距前进",
     "stopping": "正在停车",
@@ -154,6 +155,7 @@ ACTION_NAMES = {
 }
 
 PHASE_NAMES = {
+    "anchor_wait": "等待航向参考同步",
     "pending": "准备",
     "follow": "视觉循迹",
     "align": "交接前摆正",
@@ -280,6 +282,8 @@ def _watch_uart_notes(
     odom_samples: queue.Queue[tuple[float, float, float, float]] | None = None,
     rfid_enabled: bool = False,
     map_rfid_events=None,
+    anchor_notes: queue.Queue[tuple[str, float]] | None = None,
+    speech_notes: queue.Queue[str] | None = None,
 ) -> None:
     """分发有限动作、里程计。读卡始终记日志；只有 RFID 独立测试才把卡号送进转弯状态机。"""
     stdout = proc.stdout
@@ -287,7 +291,14 @@ def _watch_uart_notes(
         return
     for line in stdout:
         text = line.strip()
-        if text.startswith(("FORWARD_", "BACKWARD_", "TURN_", "STOP_")):
+        if text == "ANCHOR_DONE" or text.startswith("ANCHOR_FAIL "):
+            if anchor_notes is not None:
+                anchor_notes.put((text, time.monotonic()))
+            _event("航向校正", "下位机动作参考已同步" if text == "ANCHOR_DONE" else text)
+        elif text.startswith(("SPEECH_QUEUED ", "SPEECH_REJECT ", "SPEECH_SENT ", "SPEECH_RESULT ")):
+            if speech_notes is not None:
+                speech_notes.put(text)
+        elif text.startswith(("FORWARD_", "BACKWARD_", "TURN_", "STOP_")):
             _event("动作", ACTION_NAMES.get(text, text))
             action_notes.put(text)
         elif text.startswith("ODOM ") and odom_samples is not None:
@@ -421,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--culvert-config", type=Path, default=ROOT / "config" / "culvert.yaml")
     parser.add_argument("--culvert-inspect", action="store_true", help="显式启用涵洞两侧识别和 PWM；替换 5 秒占位任务")
     parser.add_argument("--inspection-config", type=Path, default=ROOT / "config" / "culvert_inspection.json")
+    parser.add_argument("--speech-config", type=Path, default=ROOT / "config" / "speech.json",
+                        help="32 条音轨的已测占音时长；缺项时阻止新识别播报")
     parser.add_argument("--inspection-web", action="store_true", help="导航期间推流侧视相机并允许网页持久化调参")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
@@ -539,6 +552,18 @@ def _run(args, parser) -> int:
             parser.error("录像必须使用新的 .avi 路径，不能覆盖已有文件")
 
     cfg = _load_config(args.config)
+    from road_follow.speech import SpeechConfig
+    try:
+        anchor_enabled = heading_anchor_enabled_from_mapping(cfg)
+        speech_config = SpeechConfig.load(args.speech_config)
+    except (OSError, ValueError) as exc:
+        _event("错误", f"航向/播报配置无效：{exc}")
+        return 1
+    if turn_side is not None:
+        _event("航向校正", "已启用路口参考同步，旧固件将拒绝启动" if anchor_enabled
+               else "已显式关闭中途参考校正，当前模式不更新下位机动作航向参考")
+    if args.culvert_inspect and not speech_config.ready:
+        _event("播报", f"识别播报已阻止：缺少已测音轨时长 {','.join(map(str, speech_config.missing_ids))}；UID 原流程保留")
     capture_cfg = cfg.get("capture", {}) or {}
     uart_cfg = cfg.get("uart", {}) or {}
     device = str(capture_cfg.get("device", "/dev/video0"))
@@ -576,7 +601,9 @@ def _run(args, parser) -> int:
         serial = str(uart_cfg.get("device", "/dev/ttyS6"))
         baud = str(int(uart_cfg.get("baud", 921600)))
         bridge = subprocess.Popen(
-            [str(uart_bin), "--device", serial, "--baud", baud],
+            [str(uart_bin), "--device", serial, "--baud", baud]
+            + (["--require-heading-anchor"] if turn_side is not None and anchor_enabled else [])
+            + speech_config.bridge_args(),
             stdin=subprocess.PIPE,
             # 始终由监视线程消费 ODOM 等高频内部消息，避免直接刷满终端。
             stdout=subprocess.PIPE,
@@ -586,6 +613,8 @@ def _run(args, parser) -> int:
     rfid_events: queue.Queue[tuple[int, int]] = queue.Queue()
     odom_samples: queue.Queue[tuple[float, float, float, float]] = queue.Queue()
     map_rfid_events = queue.Queue() if args.culvert_stop else None
+    anchor_notes: queue.Queue[tuple[str, float]] = queue.Queue()
+    speech_notes: queue.Queue[str] = queue.Queue()
     if bridge is not None:
         threading.Thread(
             target=_watch_uart_notes,
@@ -596,6 +625,8 @@ def _run(args, parser) -> int:
                 odom_samples,
                 turn_side is None,
                 map_rfid_events,
+                anchor_notes,
+                speech_notes,
             ),
             daemon=True,
         ).start()
@@ -682,7 +713,8 @@ def _run(args, parser) -> int:
         try:
             culvert_runtime = CulvertRuntime(*args.culvert_setup, nav_config=cfg, agent=route_agent,
                 send=lambda line: write_velocity(bridge, line), event=_event, root=ROOT,
-                inspection_settings=args.inspection_settings, inspection_web=args.inspection_web)
+                inspection_settings=args.inspection_settings, inspection_web=args.inspection_web,
+                speech_config=speech_config)
         except BaseException as exc:
             _event("错误", f"涵洞初始化失败：{exc}")
             _stop_bridge(bridge)
@@ -736,6 +768,15 @@ def _run(args, parser) -> int:
         capture = _open_camera(device, width, height)
         while not stopping:
             culvert_outcome = None
+            while True:
+                try:
+                    speech_note = speech_notes.get_nowait()
+                except queue.Empty:
+                    break
+                if culvert_runtime is not None:
+                    culvert_runtime.handle_speech_note(speech_note)
+                else:
+                    _event("播报回执", speech_note)
             if culvert_runtime is not None:
                 while True:
                     try:
@@ -1047,6 +1088,9 @@ def _run(args, parser) -> int:
                             centerline_points=follow_diag.centerline_points,
                             road_pixels=follow_diag.bev_road_pixels,
                             follow=follow_config_from_mapping(cfg),
+                            frame_captured_s=captured_s,
+                            odom_received_s=progress.last_sample_s,
+                            anchor_notes=anchor_notes,
                         )
                         if trigger and (
                             trigger not in ("guard", "odom_stale")

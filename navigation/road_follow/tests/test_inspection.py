@@ -107,6 +107,8 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(self.task.result["status"], "done")
         self.assertEqual([s["direction"] for s in self.task.result["sides"]], ["A", "B"])
         self.assertEqual(len(self.notifications), 2)
+        self.assertEqual([item["edge_id"] for item in self.notifications], [TARGET.edge_id] * 2)
+        self.assertNotIn("edge_id", self.task.result["sides"][0])
         self.assertFalse(self.task.result["speech_enabled"])
         self.task.start(10, TARGET)
         self.assertEqual(self.task.side, "B")
@@ -168,6 +170,20 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(self.task.result["status"], "partial")
         self.assertEqual(self.servo.angles, [180])
         self.assertTrue(all(s["status"] == "unconfirmed" for s in self.task.result["sides"]))
+
+    def test_speech_failure_does_not_fail_the_side_inspection(self):
+        from road_follow.speech import InspectionSpeech, SpeechConfig
+        speech = InspectionSpeech(SpeechConfig((1000,) * 32), lambda line: False,
+                                  lambda *args, **values: None, "task")
+        self.task.notify = speech.request
+        self.task.speech_enabled = True
+        self.confirm()
+        self.second_side()
+        self.assertEqual(self.confirm(6), "done")
+        self.assertIsNone(self.task.failure_reason)
+        self.assertTrue(self.task.result["speech_enabled"])
+        self.assertEqual(len(speech.requests), 2)
+        self.assertTrue(all(item["state"] == "submit_failed" for item in speech.requests.values()))
 
     def test_failed_servo_is_task_failure_not_unconfirmed(self):
         self.confirm()

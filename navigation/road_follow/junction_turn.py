@@ -9,12 +9,15 @@ from dataclasses import dataclass, field
 
 from road_follow.control import (
     VelocityCommand,
+    HeadingAnchorGate,
     align_ready_to_creep,
     align_settle_command,
     alignment_command,
     heading_hold_command,
     heading_needs_align,
+    heading_anchor_enabled_from_mapping,
     is_visual_follow,
+    step_heading_anchor,
 )
 
 
@@ -55,6 +58,7 @@ class JunctionTurnConfig:
     align_timeout_s: float = 1.5
     align_gain: float = 4.0
     align_max_abs_omega: float = 0.5
+    heading_anchor_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,7 @@ class JunctionTurn:
     align_stable: int = 0
     hold_start_m: float | None = None
     hold_yaw_rad: float | None = None
+    anchor: HeadingAnchorGate = field(default_factory=HeadingAnchorGate)
 
 
 def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
@@ -147,6 +152,7 @@ def junction_turn_config_from_mapping(cfg: dict) -> JunctionTurnConfig:
         odom_stop_margin_m=max(
             0.0, float(raw.get("odom_stop_margin_m", 0.05))
         ),
+        heading_anchor_enabled=heading_anchor_enabled_from_mapping(cfg),
     )
 
 
@@ -284,13 +290,18 @@ def step_junction_turn(
     odom_valid: bool = True,
     lane_heading_rad: float | None = None,
     yaw_rad: float | None = None,
+    frame_captured_s: float | None = None,
+    odom_received_s: float | None = None,
+    anchor_notes=None,
+    visual_safe: bool = True,
 ) -> tuple[JunctionTurn, VelocityCommand]:
     """在视觉仍可靠时交接；有限动作期间不再发送 ``CMD_VEL``。"""
     current_s = time.monotonic() if now_s is None else now_s
     _consume_notes(state, notes, send, current_s)
 
     if state.phase == "fault":
-        return state, VelocityCommand(0.0, 0.0, "stop_action_fail")
+        reason = "stop_heading_anchor_" + state.anchor.failure if state.anchor.failure else "stop_action_fail"
+        return state, VelocityCommand(0.0, 0.0, reason)
 
     if state.phase == "arrived":
         return state, VelocityCommand(0.0, 0.0, "arrived")
@@ -303,6 +314,22 @@ def step_junction_turn(
 
     if state.phase == "odom_wait":
         return state, VelocityCommand(0.0, 0.0, "stop_odom_junction_wait")
+
+    def advance_anchor():
+        state.phase, result, ready = step_heading_anchor(
+            state.anchor, state.phase, lane_heading_rad=lane_heading_rad,
+            frame_captured_s=frame_captured_s, visual_safe=visual_safe, now_s=current_s,
+            odom_valid=odom_valid, odom_received_s=odom_received_s, yaw_rad=yaw_rad,
+            notes=anchor_notes, send=send, max_abs_heading_rad=cfg.align_max_abs_heading_rad,
+            stable_frames=cfg.align_stable_frames, align_timeout_s=cfg.align_timeout_s,
+            align_gain=cfg.align_gain, max_abs_omega=cfg.align_max_abs_omega,
+        )
+        if ready:
+            return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+        return state, result
+
+    if cfg.heading_anchor_enabled and state.phase in ("align", "anchor_wait"):
+        return advance_anchor()
 
     if state.phase == "stopped":
         if current_s - state.stop_started_s < state.stop_settle_s:
@@ -386,6 +413,11 @@ def step_junction_turn(
         state.side = cue.side
         state.forward_mm = forward_mm
         state.arm = 0
+        if cfg.heading_anchor_enabled:
+            state.phase = "align"
+            state.align_started_s = current_s
+            state.anchor = HeadingAnchorGate(started_s=current_s)
+            return advance_anchor()
         if heading_needs_align(lane_heading_rad, cfg.align_max_abs_heading_rad):
             state.phase = "align"
             state.align_started_s = current_s
@@ -396,6 +428,10 @@ def step_junction_turn(
         return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
     if state.phase == "align":
+        if current_s - state.align_started_s >= cfg.align_timeout_s:
+            state.phase = "fault"
+            state.anchor.failure = "align_timeout"
+            return state, VelocityCommand(0.0, 0.0, "stop_heading_anchor_align_timeout")
         ready, state.align_stable = align_ready_to_creep(
             lane_heading_rad,
             state.align_started_s,

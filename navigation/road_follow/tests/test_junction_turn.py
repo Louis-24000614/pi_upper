@@ -20,7 +20,7 @@ from road_follow.junction_turn import (
 
 class JunctionTurnTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.cfg = JunctionTurnConfig(
+        self.cfg = JunctionTurnConfig(heading_anchor_enabled=False,
             stable_frames=2, reacquire_frames=2, road_end_missing_frames=2
         )
         self.notes: queue.Queue[str] = queue.Queue()
@@ -137,7 +137,7 @@ class JunctionTurnTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
     def test_side_branch_only_latches_and_blue_band_triggers_forward(self) -> None:
-        cfg = JunctionTurnConfig(
+        cfg = JunctionTurnConfig(heading_anchor_enabled=False,
             stable_frames=2,
             branch_observe_min_distance_m=0.18,
             road_end_missing_frames=2,
@@ -325,7 +325,7 @@ class JunctionTurnTest(unittest.TestCase):
         self.assertAlmostEqual(command.v_mps, 0.05)
         self.assertEqual(self.sent, [])
 
-    def test_align_timeout_still_sends_forward(self) -> None:
+    def test_align_timeout_stops_without_forward(self) -> None:
         state = JunctionTurn()
         cue = JunctionCue(True, "left", 0.32)
         state, _ = step_junction_turn(
@@ -341,10 +341,10 @@ class JunctionTurnTest(unittest.TestCase):
             state, cue, self.follow, self.notes, self.send, self.cfg,
             now_s=11.6, lane_heading_rad=0.20, progress_m=0.80, odom_valid=True,
         )
-        self.assertEqual(state.phase, "heading_hold")
-        self.assertEqual(command.reason, "heading_hold")
+        self.assertEqual(state.phase, "fault")
+        self.assertEqual(command.reason, "stop_heading_anchor_align_timeout")
         self.assertEqual(command.omega_radps, 0.0)
-        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(command.v_mps, 0.0)
         self.assertEqual(self.sent, [])
 
     def test_finite_action_failure_latches_stop(self) -> None:
@@ -547,7 +547,7 @@ class JunctionTurnTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
     def test_far_branch_latch_survives_long_occlusion(self) -> None:
-        cfg = JunctionTurnConfig(branch_vote_window=8, branch_vote_min=2)
+        cfg = JunctionTurnConfig(heading_anchor_enabled=False, branch_vote_window=8, branch_vote_min=2)
         state = JunctionTurn()
         cue = JunctionCue(True, "right", 0.80, "side_branch")
         for _ in range(2):
@@ -570,7 +570,7 @@ class JunctionTurnTest(unittest.TestCase):
 
     def test_odom_at_expected_junction_stops_without_visual_turn(self) -> None:
         state = JunctionTurn()
-        cfg = JunctionTurnConfig(odom_stop_margin_m=0.05)
+        cfg = JunctionTurnConfig(heading_anchor_enabled=False, odom_stop_margin_m=0.05)
         self.assertFalse(
             should_stop_at_expected_junction(0.70, 0.80, "junction", state, cfg)
         )
@@ -584,7 +584,7 @@ class JunctionTurnTest(unittest.TestCase):
 
     def test_latched_cross_uses_odom_for_last_twenty_centimeters(self) -> None:
         """十字路口前方仍有道路时，也必须在边末端完成到点交接。"""
-        cfg = JunctionTurnConfig(
+        cfg = JunctionTurnConfig(heading_anchor_enabled=False,
             stable_frames=2,
             turn_forward_m=0.20,
             road_end_missing_frames=3,
@@ -634,7 +634,7 @@ class JunctionTurnTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
     def test_odom_handoff_requires_a_latched_junction_and_safe_follow(self) -> None:
-        cfg = JunctionTurnConfig(turn_forward_m=0.20)
+        cfg = JunctionTurnConfig(heading_anchor_enabled=False, turn_forward_m=0.20)
         cases = (
             (JunctionTurn(phase="approach", side="right"), self.follow, "junction"),
             (

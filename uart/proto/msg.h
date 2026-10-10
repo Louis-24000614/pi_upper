@@ -25,6 +25,7 @@ enum class MsgType : uint8_t {
   kCmdVel = 0x12,
   kMotionAction = 0x13,
   kSpeakAudio = 0x14,
+  kHeadingReference = 0x15,
   kAck = 0x80,
   kHelloInfo = 0x81,
   kOdomState = 0x90,
@@ -60,6 +61,7 @@ enum CapabilityBit : uint8_t {
   kCapEncoder = 1u << 1,
   kCapImu = 1u << 2,
   kCapOled = 1u << 3,
+  kCapHeadingReference = 1u << 4,
 };
 
 /// ODOM_STATE 的 status_flags 位（8 位位图）。
@@ -125,7 +127,7 @@ struct MotionAction {
 
 /// SPEAK_AUDIO (0x14)。请求下位机通过 UART4 播放预录音频。
 struct SpeakAudio {
-  /// 音频编号，当前有效范围为 1～12。
+  /// 音频编号，当前有效范围为 1～32。
   uint8_t audio_id = 0;
 };
 

@@ -586,7 +586,151 @@ void TestRequestSpeechRejectsInvalidIdAndDisconnectedLink() {
   CHECK(!f.session.RequestSpeech(1));
   f.Connect();
   CHECK(!f.session.RequestSpeech(0));
-  CHECK(!f.session.RequestSpeech(13));
+  CHECK(!f.session.RequestSpeech(33));
+  CHECK(f.session.RequestSpeech(32));
+}
+
+void EnableHeadingReference(Fixture& f) {
+  HelloInfo info;
+  info.protocol_version = kProtocolVersion;
+  info.boot_id = kBootId;
+  info.remote_state = f.session.remote_state();
+  info.capabilities = kCapMotor | kCapEncoder | kCapImu | kCapHeadingReference;
+  f.mcu.SendHelloInfo(f.port, info);
+  f.Tick(1);
+}
+
+bool FindCompletion(Session& session, MsgType type, RequestCompletion* out) {
+  RequestCompletion event;
+  while (session.PopRequestCompletion(&event)) {
+    if (event.request_type == type) { *out = event; return true; }
+  }
+  return false;
+}
+
+void TestSpeechIndependentFromMotionAndStop() {
+  Fixture f;
+  f.Connect();
+  f.Arm();
+  CHECK(f.session.RequestSpeech(13));
+  CHECK(f.session.speech_request_pending());
+  CHECK(!f.session.management_request_pending());
+  CHECK(f.session.SetVelocity(0.05f, 0.1f));
+  f.Tick(20);
+  CHECK(f.mcu.CountOf(MsgType::kCmdVel) > 0);
+  CHECK(f.session.RequestMotionAction(static_cast<uint8_t>(MotionActionId::kTurnLeft), 1));
+  f.Tick(1);
+  CHECK(f.mcu.CountOf(MsgType::kMotionAction) == 1);
+  Ack speech_ack{static_cast<uint8_t>(MsgType::kSpeakAudio), AckResult::kOk};
+  f.mcu.SendAck(f.port, speech_ack);
+  f.Tick(1);
+  CHECK(!f.session.speech_request_pending());
+  CHECK(f.session.management_request_pending());
+  CHECK(f.session.awaiting_motion_result());
+  CHECK(f.session.RequestMotionAction(static_cast<uint8_t>(MotionActionId::kStop)));
+  f.Tick(1);
+  CHECK(f.mcu.CountOf(MsgType::kMotionAction) == 2);
+}
+
+void TestSpeechCompletionTimeoutAndLateAck() {
+  Fixture f;
+  f.Connect();
+  CHECK(f.session.RequestSpeech(23));
+  const uint64_t serial = f.session.last_request_serial();
+  f.Tick(501);
+  RequestCompletion event;
+  CHECK(FindCompletion(f.session, MsgType::kSpeakAudio, &event));
+  CHECK(event.serial == serial && event.boot_id == kBootId);
+  CHECK(event.code == RequestCompletionCode::kTimeout);
+  CHECK(f.session.speech_channel_blocked());
+  CHECK(!f.session.RequestSpeech(24));
+  Ack late{static_cast<uint8_t>(MsgType::kSpeakAudio), AckResult::kOk};
+  f.mcu.SendAck(f.port, late);
+  f.Tick(1);
+  CHECK(!FindCompletion(f.session, MsgType::kSpeakAudio, &event));
+  CHECK(f.session.speech_channel_blocked());
+  // ARM and STOP remain usable while only the speech lane is quarantined.
+  f.Arm();
+  CHECK(f.session.RequestMotionAction(static_cast<uint8_t>(MotionActionId::kStop)));
+  f.session.Start();
+  f.Connect();
+  CHECK(!f.session.speech_channel_blocked());
+  CHECK(f.session.RequestSpeech(24));
+}
+
+void TestHeadingReferenceCapabilityZeroAndCompletion() {
+  Fixture f;
+  f.Connect();
+  CHECK(!f.session.supports_heading_reference());
+  CHECK(!f.session.RequestHeadingReference());
+  EnableHeadingReference(f);
+  CHECK(f.session.supports_heading_reference());
+  CHECK(f.session.SetVelocity(0.05f, 0.0f));
+  CHECK(!f.session.RequestHeadingReference());
+  CHECK(f.session.SetVelocity(0.0f, 0.0f));
+  CHECK(f.session.RequestHeadingReference());
+  const uint64_t serial = f.session.last_request_serial();
+  CHECK(!f.session.SetVelocity(0.1f, 0.0f));
+  CHECK(f.session.SetVelocity(0.0f, 0.0f));
+  f.Tick(1);
+  const auto* frame = f.mcu.Last(MsgType::kHeadingReference);
+  CHECK(frame != nullptr && frame->payload.empty());
+  // An unrelated speech ACK must not release the heading gate.
+  Ack unrelated{static_cast<uint8_t>(MsgType::kSpeakAudio), AckResult::kOk};
+  f.mcu.SendAck(f.port, unrelated);
+  f.Tick(1);
+  CHECK(f.session.management_request_pending());
+  Ack ok{static_cast<uint8_t>(MsgType::kHeadingReference), AckResult::kOk};
+  f.mcu.SendAck(f.port, ok);
+  f.Tick(1);
+  RequestCompletion event;
+  CHECK(FindCompletion(f.session, MsgType::kHeadingReference, &event));
+  CHECK(event.serial == serial && event.code == RequestCompletionCode::kAck);
+  CHECK(event.result == AckResult::kOk);
+  CHECK(f.session.SetVelocity(0.05f, 0.0f));
+}
+
+void TestHeadingTimeoutNoReplayAndRebootCancels() {
+  Fixture f;
+  f.Connect();
+  EnableHeadingReference(f);
+  CHECK(f.session.RequestHeadingReference());
+  f.Tick(501);
+  RequestCompletion event;
+  CHECK(FindCompletion(f.session, MsgType::kHeadingReference, &event));
+  CHECK(event.code == RequestCompletionCode::kTimeout);
+  CHECK(!f.session.RequestHeadingReference());
+  f.Tick(20);
+  CHECK(f.mcu.CountOf(MsgType::kHeadingReference) == 1);
+  f.Connect();
+  EnableHeadingReference(f);
+  CHECK(f.session.RequestHeadingReference());
+  CHECK(f.session.RequestSpeech(32));
+  HelloInfo reboot;
+  reboot.protocol_version = kProtocolVersion;
+  reboot.boot_id = kBootId + 1;
+  reboot.remote_state = RemoteState::kReady;
+  reboot.capabilities = kCapHeadingReference;
+  f.mcu.SendHelloInfo(f.port, reboot);
+  f.Tick(1);
+  CHECK(FindCompletion(f.session, MsgType::kHeadingReference, &event));
+  CHECK(event.code == RequestCompletionCode::kLinkLost && event.boot_id == kBootId);
+  CHECK(FindCompletion(f.session, MsgType::kSpeakAudio, &event));
+  CHECK(event.code == RequestCompletionCode::kLinkLost && event.boot_id == kBootId);
+}
+
+void TestWriteFailureCompletesOutstandingSpeech() {
+  Fixture f;
+  f.Connect();
+  f.Arm();
+  CHECK(f.session.RequestSpeech(13));
+  const uint64_t serial = f.session.last_request_serial();
+  f.port.set_fail_write(true);
+  CHECK(!f.session.RequestMotionAction(static_cast<uint8_t>(MotionActionId::kStop)));
+  RequestCompletion event;
+  CHECK(FindCompletion(f.session, MsgType::kSpeakAudio, &event));
+  CHECK(event.serial == serial && event.code == RequestCompletionCode::kLinkLost);
+  CHECK(!f.session.speech_request_pending());
 }
 
 }  // namespace
@@ -622,5 +766,10 @@ int main() {
   TestSecondFiniteActionRefusedWhileWaiting();
   TestRequestSpeechSendsAudioIdAndWaitsAck();
   TestRequestSpeechRejectsInvalidIdAndDisconnectedLink();
+  TestSpeechIndependentFromMotionAndStop();
+  TestSpeechCompletionTimeoutAndLateAck();
+  TestHeadingReferenceCapabilityZeroAndCompletion();
+  TestHeadingTimeoutNoReplayAndRebootCancels();
+  TestWriteFailureCompletesOutstandingSpeech();
   return uart::test::Finish("sess");
 }

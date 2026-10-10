@@ -140,6 +140,10 @@ def step_route_arrival(
     centerline_points=None,
     road_pixels=800,
     follow=None,
+    frame_captured_s=None,
+    odom_received_s=None,
+    anchor_notes=None,
+    now_s=None,
 ):
     """共享地图选择和 ODOM 新鲜度检查。贯通点按边长保护，尽头巡检点仍等墙。"""
     approaching = state.phase in ("follow", "approach") and (
@@ -200,8 +204,12 @@ def step_route_arrival(
             centerline_points=centerline_points,
             road_pixels=road_pixels,
             follow=follow,
+            frame_captured_s=frame_captured_s,
+            odom_received_s=odom_received_s,
+            anchor_notes=anchor_notes,
+            now_s=now_s,
         )
-        source = policy.mode if before in ("follow", "align") and patrol_state.phase == "heading_hold" else ""
+        source = policy.mode if before in ("follow", "align", "anchor_wait") and patrol_state.phase == "heading_hold" else ""
         return state, patrol_state, command, source
 
     cfg = replace(
@@ -232,6 +240,8 @@ def step_route_arrival(
         state, cue, command, notes, send, cfg, near_x_m=near_x_m,
         progress_m=progress_m, odom_valid=odom_valid,
         lane_heading_rad=lane_heading_rad, yaw_rad=yaw_rad,
+        frame_captured_s=frame_captured_s, odom_received_s=odom_received_s,
+        anchor_notes=anchor_notes, now_s=now_s, visual_safe=visual_safe,
     )
-    source = cue.source if before in ("follow", "approach", "align") and state.phase == "heading_hold" else ""
+    source = cue.source if before in ("follow", "approach", "align", "anchor_wait") and state.phase == "heading_hold" else ""
     return state, patrol_state, command, source

@@ -89,15 +89,123 @@ def align_ready_to_creep(
     required_frames: int,
     timeout_s: float,
 ) -> tuple[bool, int]:
-    """摆正结束条件。测量消失时继续等待；只有连续稳住或超时才放行。"""
+    """摆正结束条件。测量消失或超时都不能冒充稳定成功。"""
     if now_s - started_s >= timeout_s:
-        return True, stable_frames
+        return False, 0
     if near_x_m is None or not math.isfinite(near_x_m):
         return False, 0
     if abs(near_x_m) <= max_abs_x_m:
         stable_frames += 1
         return stable_frames >= required_frames, stable_frames
     return False, 0
+
+
+@dataclass
+class HeadingAnchorGate:
+    """只在新鲜视觉稳定后请求 MCU 重锚动作参考，不改变原始 yaw。"""
+
+    started_s: float = 0.0
+    last_frame_s: float | None = None
+    stable_frames: int = 0
+    requested_s: float | None = None
+    acknowledged_s: float | None = None
+    failure: str = ""
+
+
+def heading_anchor_enabled_from_mapping(cfg: dict) -> bool:
+    enabled = (cfg.get("heading_anchor", {}) or {}).get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("heading_anchor.enabled 必须是 true 或 false")
+    return enabled
+
+
+def step_heading_anchor(
+    gate: HeadingAnchorGate,
+    phase: str,
+    *,
+    lane_heading_rad: float | None,
+    frame_captured_s: float | None,
+    visual_safe: bool,
+    now_s: float,
+    odom_valid: bool,
+    odom_received_s: float | None,
+    yaw_rad: float | None,
+    notes,
+    send,
+    max_abs_heading_rad: float,
+    stable_frames: int,
+    align_timeout_s: float,
+    align_gain: float,
+    max_abs_omega: float,
+    anchor_timeout_s: float = 3.0,
+) -> tuple[str, VelocityCommand, bool]:
+    """MCU ACK 证明已重锚；之后还须等一帧新的 ODOM 才允许短程前进。"""
+    stopped = VelocityCommand(0.0, 0.0, "anchor_wait" if phase == "anchor_wait" else "align")
+
+    def fail(reason):
+        gate.failure = reason
+        send("stop")
+        return "fault", VelocityCommand(0.0, 0.0, "stop_heading_anchor_" + reason), False
+
+    frame_fresh = (
+        frame_captured_s is not None
+        and math.isfinite(frame_captured_s)
+        and 0.0 <= now_s - frame_captured_s <= 0.20
+    )
+    heading_known = lane_heading_rad is not None and math.isfinite(lane_heading_rad)
+    evidence_valid = visual_safe and frame_fresh and heading_known and odom_valid
+
+    if phase == "align":
+        if now_s - gate.started_s >= align_timeout_s:
+            return fail("align_timeout")
+        if not evidence_valid:
+            gate.stable_frames = 0
+            return phase, stopped, False
+        if gate.last_frame_s is not None and frame_captured_s <= gate.last_frame_s:
+            return phase, stopped, False
+        gate.last_frame_s = frame_captured_s
+        ready, gate.stable_frames = align_ready_to_creep(
+            lane_heading_rad, gate.started_s, gate.stable_frames, now_s,
+            max_abs_x_m=max_abs_heading_rad, required_frames=stable_frames,
+            timeout_s=align_timeout_s,
+        )
+        if not ready:
+            return phase, align_settle_command(
+                lane_heading_rad, align_gain, max_abs_omega, max_abs_heading_rad
+            ), False
+        # 发请求前清除无主的旧回执；本流程同时只允许一个参考请求。
+        while notes is not None and not notes.empty():
+            notes.get_nowait()
+        if not send("0 0") or not send("anchor_heading"):
+            return fail("submit_failed")
+        gate.requested_s = now_s
+        return "anchor_wait", VelocityCommand(0.0, 0.0, "anchor_wait"), False
+
+    if gate.requested_s is None:
+        return fail("invalid_state")
+    if now_s - gate.requested_s >= anchor_timeout_s:
+        return fail("timeout")
+    if not evidence_valid or abs(lane_heading_rad) > max_abs_heading_rad:
+        return fail("evidence_lost")
+    while notes is not None and not notes.empty():
+        text, received_s = notes.get_nowait()
+        if received_s < gate.requested_s:
+            continue
+        if text == "ANCHOR_DONE":
+            gate.acknowledged_s = received_s
+        elif text.startswith("ANCHOR_FAIL"):
+            reason = text.partition(" ")[2] or "rejected"
+            return fail(reason.lower())
+    if (
+        gate.acknowledged_s is not None
+        and odom_received_s is not None
+        and odom_received_s > gate.acknowledged_s
+        and 0.0 <= now_s - odom_received_s <= 0.5
+        and yaw_rad is not None
+        and math.isfinite(yaw_rad)
+    ):
+        return "heading_hold", stopped, True
+    return "anchor_wait", stopped, False
 
 
 def align_settle_command(

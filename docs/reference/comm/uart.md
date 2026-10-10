@@ -81,7 +81,17 @@ flowchart TB
 
 `link/clock.h` — `Clock` 单调时间接口与 `SteadyClock` 实现。抽出接口是为了让超时与节拍能用假时钟测。
 
-`link/sess.h` — `Session` 会话状态机。`Start()` 进入建链，`Poll()` 由通信线程反复调用，`SetVelocity()` 写入覆盖式目标速度（速度环），`RequestMotionAction()` 发离散动作（路口 90° / STOP），`RequestSpeech()` 请求下位机通过 UART4 播放 1～12 号预录音频，`RequestArm()` / `RequestDisarm()` 是使能命令，`Shutdown()` 做停车收尾。状态查询有 `link_state()`、`remote_state()`、`motion_mode()`、`command_enabled()`、`config_valid()`、`peer_protocol_version()`、`request_pending()`。
+`link/sess.h` — `Session` 会话状态机。`Start()` 进入建链，`Poll()` 由通信线程反复调用，`SetVelocity()` 写入覆盖式目标速度（速度环），`RequestMotionAction()` 发离散动作（路口 90° / STOP），`RequestSpeech()` 请求下位机通过 UART4 播放 1～32 号预录音频，`RequestArm()` / `RequestDisarm()` 是使能命令，`Shutdown()` 做停车收尾。状态查询有 `link_state()`、`remote_state()`、`motion_mode()`、`command_enabled()`、`config_valid()`、`peer_protocol_version()`、`request_pending()`。
+
+`RequestHeadingReference()` 发送空载荷 `0x15`，调用前使用
+`supports_heading_reference()` 检查 HELLO 能力 bit4。详细门禁与桥接口见
+[路口航向参考校正](heading_reference.md)。
+
+语音与管理请求各有一个等待槽，`management_request_pending()` 与
+`speech_request_pending()` 可分别查询。`PopRequestCompletion()` 消费本次已发送
+请求的 ACK、超时、断线或取消事件，事件带本地 serial 和 boot_id；反复运行的
+调用方须持续消费完成队列，不应把缓存的 `last_ack` 当成新请求结果。
+识别播报映射、FIFO 和实际音轨时长配置见 [语音接口](speech.md)。
 
 `proto/detail/bytes.h` — 模块内部的小端序读写辅助，不对外暴露。
 

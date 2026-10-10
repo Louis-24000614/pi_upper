@@ -9,11 +9,13 @@ from road_follow.inspection_io import FrameHub, Recognizer, ServoBridge, SideCam
 
 
 class SideInspection:
-    def __init__(self, settings, hub, servo, recognizer, *, event=None, notify=None, pool=None):
+    def __init__(self, settings, hub, servo, recognizer, *, event=None, notify=None, pool=None,
+                 speech_enabled=False):
         self.settings, self.hub, self.servo, self.recognizer = settings, hub, servo, recognizer
         self.event = event or (lambda *args, **kwargs: None)
-        # 预留结果事件；默认不发送任何 UART/语音消息。
+        # 默认保持只输出结果；正式导航由 runtime 注入共用 UART 桥的语音请求。
         self.notify = notify or (lambda result: None)
+        self.speech_enabled = speech_enabled
         config, self.revision = settings.snapshot()
         self.config = config
         self.side = config["servo"]["initial_side"]
@@ -71,12 +73,12 @@ class SideInspection:
                   "reason": "confirmed" if confirmed else "side_timeout:"+self.last_reason}
         self.sides.append(record)
         self._emit("inspection_side_result", result=record)
-        self.notify(deepcopy(record))
+        self.notify({**deepcopy(record), "edge_id": self.target.edge_id})
         self.generation += 1  # 第一侧仍在途的 HTTP 结果不能进入第二侧。
         if len(self.sides) == 2:
             self.phase = "done"
             self.result = {"status": "done" if all(s["status"] == "confirmed" for s in self.sides) else "partial",
-                           "sides": deepcopy(self.sides), "speech_enabled": False}
+                           "sides": deepcopy(self.sides), "speech_enabled": self.speech_enabled}
             self._emit("inspection_finished", result=self.result)
             return
         self.next_side = "B" if self.side == "A" else "A"
@@ -186,7 +188,7 @@ class SideInspection:
                     "candidate": deepcopy(self.candidate), "sides": deepcopy(self.sides),
                     "remaining_s": max(0, self.deadline_s-time.monotonic()) if self.phase == "recognizing" else None,
                     "failure_reason": self.failure_reason, "reason": self.last_reason,
-                    "result": deepcopy(self.result), "speech_enabled": False,
+                    "result": deepcopy(self.result), "speech_enabled": self.speech_enabled,
                     "target": asdict(self.target) if self.target is not None else None}
 
     def close(self):
@@ -206,12 +208,14 @@ class SideInspection:
                 self.pool.shutdown(wait=False, cancel_futures=True)
 
 
-def create_inspection(settings, root, *, web_enabled=False, event=None):
+def create_inspection(settings, root, *, web_enabled=False, event=None, notify=None,
+                      speech_enabled=False):
     """显式启用后的初始化；导航开始前确认首次 PWM 写入和姿态等待。"""
     config, _ = settings.snapshot()
     hub = FrameHub(config["servo"]["initial_side"])
     servo = ServoBridge(root, config["servo"])
-    executor = SideInspection(settings, hub, servo, Recognizer(config["services"]), event=event)
+    executor = SideInspection(settings, hub, servo, Recognizer(config["services"]), event=event,
+                              notify=notify, speech_enabled=speech_enabled)
     try:
         executor.camera = SideCamera(config["camera"], hub)
         token = servo.request(config["servo"]["angles"][executor.side])

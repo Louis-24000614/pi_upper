@@ -53,6 +53,10 @@ void Session::Start() {
   config_valid_ = false;
   peer_protocol_version_ = 0;
   pending_request_type_ = 0;
+  speech_pending_ = false;
+  speech_blocked_ = false;
+  heading_blocked_ = false;
+  completions_.clear();
   telemetry_ = Telemetry{};
 
   const uint64_t now_ms = clock_.NowMs();
@@ -64,6 +68,7 @@ void Session::Start() {
 bool Session::Send(MsgType type, const uint8_t* payload, size_t payload_len) {
   if (!port_.IsOpen()) {
     link_state_ = LinkState::kClosed;
+    DropSession();
     return false;
   }
   uint8_t frame[kMaxFrameSize] = {};
@@ -78,6 +83,7 @@ bool Session::Send(MsgType type, const uint8_t* payload, size_t payload_len) {
     ++diagnostics_.link_drops;
     port_.Close();
     link_state_ = LinkState::kClosed;
+    DropSession();
     return false;
   }
   ++diagnostics_.tx_frames;
@@ -96,21 +102,44 @@ bool Session::SendRequest(MsgType type, const uint8_t* payload, size_t payload_l
   }
   pending_request_type_ = static_cast<uint8_t>(type);
   pending_request_ms_ = clock_.NowMs();
+  pending_request_serial_ = ++request_serial_;
+  return true;
+}
+
+void Session::CompleteManagement(RequestCompletionCode code, AckResult result) {
+  if (pending_request_type_ == 0) return;
+  completions_.push_back({pending_request_serial_, boot_id_,
+                         static_cast<MsgType>(pending_request_type_), code, result});
+  if (pending_request_type_ == static_cast<uint8_t>(MsgType::kHeadingReference) &&
+      code != RequestCompletionCode::kAck) heading_blocked_ = true;
+  pending_request_type_ = 0;
+}
+
+void Session::CompleteSpeech(RequestCompletionCode code, AckResult result) {
+  if (!speech_pending_) return;
+  completions_.push_back({speech_request_serial_, boot_id_, MsgType::kSpeakAudio, code, result});
+  speech_pending_ = false;
+  if (code != RequestCompletionCode::kAck) speech_blocked_ = true;
+}
+
+bool Session::PopRequestCompletion(RequestCompletion* out) {
+  if (out == nullptr || completions_.empty()) return false;
+  *out = completions_.front();
+  completions_.pop_front();
   return true;
 }
 
 void Session::OnAck(const uint8_t* payload, size_t len) {
   Ack ack;
-  if (!DecodeAck(payload, len, &ack)) {
-    return;
-  }
+  if (!DecodeAck(payload, len, &ack)) return;
   telemetry_.last_ack = ack;
   telemetry_.has_ack = true;
-  if (ack.request_type != pending_request_type_) {
+  if (ack.request_type == static_cast<uint8_t>(MsgType::kSpeakAudio)) {
+    CompleteSpeech(RequestCompletionCode::kAck, ack.result);
     return;
   }
-  pending_request_type_ = 0;
-
+  if (ack.request_type != pending_request_type_) return;
+  CompleteManagement(RequestCompletionCode::kAck, ack.result);
   if (ack.request_type == static_cast<uint8_t>(MsgType::kArmRequest)) {
     arm_ok_ = ack.result == AckResult::kOk;
     config_valid_ = ack.result == AckResult::kOk;
@@ -132,6 +161,8 @@ void Session::OnMotionResult(const uint8_t* payload, size_t len) {
 }
 
 void Session::DropSession() {
+  CompleteManagement(RequestCompletionCode::kLinkLost);
+  CompleteSpeech(RequestCompletionCode::kLinkLost);
   arm_ok_ = false;
   config_valid_ = false;
   remote_state_ = RemoteState::kDisabled;
@@ -156,8 +187,12 @@ void Session::OnHelloInfo(const uint8_t* payload, size_t len) {
     return;
   }
 
+  const bool new_session = link_state_ != LinkState::kConnected || !has_boot_id_ ||
+                           info.boot_id != boot_id_;
   if (has_boot_id_ && info.boot_id != boot_id_) {
     ++diagnostics_.boot_id_changes;
+    CompleteManagement(RequestCompletionCode::kLinkLost);
+    CompleteSpeech(RequestCompletionCode::kLinkLost);
     arm_ok_ = false;
     config_valid_ = false;
     EnterIdleMotion();
@@ -176,6 +211,10 @@ void Session::OnHelloInfo(const uint8_t* payload, size_t len) {
   remote_state_ = info.remote_state;
   telemetry_.hello = info;
   telemetry_.has_hello = true;
+  if (new_session) {
+    speech_blocked_ = false;
+    heading_blocked_ = false;
+  }
   link_state_ = LinkState::kConnected;
 }
 
@@ -287,6 +326,7 @@ void Session::Poll() {
       ++diagnostics_.link_drops;
       link_state_ = LinkState::kClosed;
     }
+    DropSession();
     return;
   }
 
@@ -316,7 +356,11 @@ void Session::Poll() {
 
   if (pending_request_type_ != 0 && now_ms - pending_request_ms_ > config_.ack_timeout_ms) {
     ++diagnostics_.ack_timeouts;
-    pending_request_type_ = 0;
+    CompleteManagement(RequestCompletionCode::kTimeout);
+  }
+  if (speech_pending_ && now_ms - speech_request_ms_ > config_.ack_timeout_ms) {
+    ++diagnostics_.ack_timeouts;
+    CompleteSpeech(RequestCompletionCode::kTimeout);
   }
 
   if (link_state_ == LinkState::kConnected && now_ms - last_rx_ms_ > config_.link_timeout_ms) {
@@ -346,7 +390,9 @@ bool Session::SetVelocity(float linear_x_mps, float angular_z_radps) {
     ++diagnostics_.tx_errors;
     return false;
   }
-  if (awaiting_motion_result_ || motion_mode_ == MotionMode::kAction) {
+  if ((pending_request_type_ == static_cast<uint8_t>(MsgType::kHeadingReference) &&
+       (linear_x_mps != 0.0f || angular_z_radps != 0.0f)) ||
+      awaiting_motion_result_ || motion_mode_ == MotionMode::kAction) {
     return false;
   }
   target_linear_ = linear_x_mps;
@@ -379,6 +425,8 @@ bool Session::RequestArm() {
 }
 
 bool Session::RequestDisarm() {
+  if (pending_request_type_ == static_cast<uint8_t>(MsgType::kHeadingReference))
+    CompleteManagement(RequestCompletionCode::kCancelled);
   EnterIdleMotion();
   arm_ok_ = false;
   return SendEmpty(MsgType::kDisarm);
@@ -407,6 +455,8 @@ bool Session::RequestMotionAction(uint8_t action, uint8_t quarter_turns, uint16_
   }
 
   if (stop) {
+    if (pending_request_type_ == static_cast<uint8_t>(MsgType::kHeadingReference))
+      CompleteManagement(RequestCompletionCode::kCancelled);
     has_target_ = false;
     target_linear_ = 0.0f;
     target_angular_ = 0.0f;
@@ -432,17 +482,29 @@ bool Session::RequestMotionAction(uint8_t action, uint8_t quarter_turns, uint16_
 }
 
 bool Session::RequestSpeech(uint8_t speech_id) {
-  if (link_state_ != LinkState::kConnected || speech_id < 1U || speech_id > 12U) {
-    return false;
-  }
-
+  if (link_state_ != LinkState::kConnected || speech_id < 1U || speech_id > 32U ||
+      speech_pending_ || speech_blocked_) return false;
   SpeakAudio msg;
   msg.audio_id = speech_id;
   uint8_t payload[kSizeSpeakAudio] = {};
-  if (EncodeSpeakAudio(msg, payload, sizeof(payload)) != kSizeSpeakAudio) {
-    return false;
-  }
-  return SendRequest(MsgType::kSpeakAudio, payload, sizeof(payload));
+  if (EncodeSpeakAudio(msg, payload, sizeof(payload)) != kSizeSpeakAudio ||
+      !Send(MsgType::kSpeakAudio, payload, sizeof(payload))) return false;
+  speech_pending_ = true;
+  speech_request_ms_ = clock_.NowMs();
+  speech_request_serial_ = ++request_serial_;
+  return true;
+}
+
+bool Session::supports_heading_reference() const {
+  return link_state_ == LinkState::kConnected && telemetry_.has_hello &&
+         (telemetry_.hello.capabilities & kCapHeadingReference) != 0;
+}
+
+bool Session::RequestHeadingReference() {
+  if (!supports_heading_reference() || heading_blocked_ || awaiting_motion_result_ ||
+      motion_mode_ == MotionMode::kAction ||
+      (has_target_ && (target_linear_ != 0.0f || target_angular_ != 0.0f))) return false;
+  return SendRequest(MsgType::kHeadingReference, nullptr, 0);
 }
 
 void Session::Shutdown() {

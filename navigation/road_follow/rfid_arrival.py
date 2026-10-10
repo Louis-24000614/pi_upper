@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 import queue
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from road_follow.backup import near_lane_heading
 from road_follow.control import (
     FollowConfig,
+    HeadingAnchorGate,
     VelocityCommand,
     align_ready_to_creep,
     align_settle_command,
@@ -18,6 +19,8 @@ from road_follow.control import (
     forward_strip_points,
     heading_hold_command,
     heading_needs_align,
+    heading_anchor_enabled_from_mapping,
+    step_heading_anchor,
 )
 
 
@@ -35,6 +38,7 @@ class RfidArrivalConfig:
     align_gain: float = 4.0
     align_max_abs_omega: float = 0.5
     forward_strip_abs_x_m: float = 0.12
+    heading_anchor_enabled: bool = True
 
 
 @dataclass
@@ -57,6 +61,7 @@ class RfidArrival:
     align_stable: int = 0
     hold_start_m: float | None = None
     hold_yaw_rad: float | None = None
+    anchor: HeadingAnchorGate = field(default_factory=HeadingAnchorGate)
 
 
 def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
@@ -75,6 +80,7 @@ def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
         road_end_band_max_ratio=max(
             0.0, min(1.0, float(raw.get("road_end_band_max_ratio", 0.10)))
         ),
+        heading_anchor_enabled=heading_anchor_enabled_from_mapping(cfg),
     )
 
 
@@ -103,13 +109,17 @@ def step_rfid_arrival(
     centerline_points=None,
     road_pixels: int = 800,
     follow: FollowConfig | None = None,
+    frame_captured_s: float | None = None,
+    odom_received_s: float | None = None,
+    anchor_notes=None,
 ) -> tuple[RfidArrival, VelocityCommand]:
     """侧边端头只负责锁存；正前方检测带稳定无 road mask 后才直走一次。"""
     received = _drain_notes(notes)
     current_s = time.monotonic() if now_s is None else now_s
 
     if state.phase == "fault":
-        return state, VelocityCommand(0.0, 0.0, "stop_rfid_not_found")
+        reason = "stop_heading_anchor_" + state.anchor.failure if state.anchor.failure else "stop_rfid_not_found"
+        return state, VelocityCommand(0.0, 0.0, reason)
     if state.phase == "odom_wait":
         return state, VelocityCommand(0.0, 0.0, "stop_arrival_guard")
     if state.phase == "arrived":
@@ -136,7 +146,32 @@ def step_rfid_arrival(
     if state.phase == "heading_hold":
         return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
+    def advance_anchor():
+        _, heading = _forward_strip_view(
+            state, cfg, visual, lane_heading_rad, arrival_mode,
+            centerline_points, road_pixels, follow,
+        )
+        state.phase, result, ready = step_heading_anchor(
+            state.anchor, state.phase, lane_heading_rad=heading,
+            frame_captured_s=frame_captured_s, visual_safe=visual_safe, now_s=current_s,
+            odom_valid=odom_valid, odom_received_s=odom_received_s, yaw_rad=yaw_rad,
+            notes=anchor_notes, send=send, max_abs_heading_rad=cfg.align_max_abs_heading_rad,
+            stable_frames=cfg.align_stable_frames, align_timeout_s=cfg.align_timeout_s,
+            align_gain=_visual_end_align_gain(cfg, follow, arrival_mode),
+            max_abs_omega=cfg.align_max_abs_omega,
+        )
+        if ready:
+            return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+        return state, result
+
+    if cfg.heading_anchor_enabled and state.phase in ("align", "anchor_wait"):
+        return advance_anchor()
+
     if state.phase == "align":
+        if current_s - state.align_started_s >= cfg.align_timeout_s:
+            state.phase = "fault"
+            state.anchor.failure = "align_timeout"
+            return state, VelocityCommand(0.0, 0.0, "stop_heading_anchor_align_timeout")
         # 摆正开始后做完。检测带回升只说明车头转进了旁边的路，不能退回循迹。
         _, lane_heading_rad = _forward_strip_view(
             state, cfg, visual, lane_heading_rad, arrival_mode,
@@ -196,6 +231,11 @@ def step_rfid_arrival(
         # 整幅路消失不能当成到墙，也不锁故障；画面恢复后继续循迹。
         state.road_end_missing_frames = 0
         return state, visual
+    if cfg.heading_anchor_enabled:
+        state.phase = "align"
+        state.align_started_s = current_s
+        state.anchor = HeadingAnchorGate(started_s=current_s)
+        return advance_anchor()
     if heading_needs_align(lane_heading_rad, cfg.align_max_abs_heading_rad):
         state.phase = "align"
         state.align_started_s = current_s

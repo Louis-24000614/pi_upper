@@ -16,6 +16,7 @@ from road_follow.control import VelocityCommand
 from road_follow.culvert import CulvertConfig, CulvertController, CulvertOutcome, OdomHistory
 from road_follow.culvert_map import CulvertRecords
 from road_follow.culvert_perception import CulvertCalibration, CulvertPerception
+from road_follow.speech import InspectionSpeech, SpeechConfig
 from vision.obstacle.blockage import HardBlockageJudge, hard_block_config_from_mapping
 
 
@@ -68,7 +69,7 @@ def drain_notes(notes):
 
 class CulvertRuntime:
     def __init__(self, mapping, config, calibration, *, nav_config, agent, send, event, root, prefix=None,
-                 inspection_settings=None, inspection_web=False):
+                 inspection_settings=None, inspection_web=False, speech_config=None):
         self.inspection_settings = inspection_settings
         self.obstacle_revision = None
         self.obstacle_judge_revisions = {}
@@ -83,11 +84,14 @@ class CulvertRuntime:
         prefix = Path(prefix) if prefix else Path(root)/"data"/"road"/("culvert_"+datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
         self.records = CulvertRecords(agent.graph, prefix)
         self.log = Path(str(prefix)+".culvert.jsonl").open("x", encoding="utf-8")
+        self.speech = InspectionSpeech(speech_config or SpeechConfig(), send, self.event,
+                                       self.records.session_id)
         executor = None
         try:
             if inspection_settings is not None:
                 from road_follow.inspection import create_inspection
-                executor = create_inspection(inspection_settings, root, web_enabled=inspection_web, event=self.event)
+                executor = create_inspection(inspection_settings, root, web_enabled=inspection_web, event=self.event,
+                                             notify=self.speech.request, speech_enabled=self.speech.enabled)
                 if executor.web is not None:
                     executor.web.map_status = self.records.topology_snapshot
                     executor.web.map_svg = self.records.svg
@@ -117,6 +121,9 @@ class CulvertRuntime:
     def edge_key(self):
         state = self.agent.state
         return (state.current_edge, state.from_node, state.to_node)
+
+    def handle_speech_note(self, text):
+        return self.speech.handle_note(text)
 
     def record_odom(self, sample, progress):
         if len(sample) != 4:

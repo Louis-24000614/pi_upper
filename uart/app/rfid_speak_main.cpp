@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
   uint8_t last_number = 0;
   uint8_t last_generation = 0;
   bool speak_pending = false;
-  uint32_t timeouts_before = 0;
+  uint64_t speech_serial = 0;
   uint8_t speaking_id = 0;
   uint64_t last_status_ms = clock.NowMs();
 
@@ -101,6 +101,24 @@ int main(int argc, char** argv) {
 
   while (!g_stop.load()) {
     session.Poll();
+
+    uart::RequestCompletion completion;
+    while (session.PopRequestCompletion(&completion)) {
+      if (!speak_pending || completion.serial != speech_serial ||
+          completion.request_type != uart::MsgType::kSpeakAudio) continue;
+      speak_pending = false;
+      if (completion.code == uart::RequestCompletionCode::kAck &&
+          completion.result == uart::AckResult::kOk) {
+        std::cout << "播报 " << static_cast<unsigned>(speaking_id) << " 号已收下\n" << std::flush;
+      } else if (completion.code == uart::RequestCompletionCode::kAck) {
+        std::cerr << "播报 " << static_cast<unsigned>(speaking_id) << " 号失败: "
+                  << AckName(completion.result) << "\n";
+      } else {
+        std::cerr << "播报 " << static_cast<unsigned>(speaking_id)
+                  << (completion.code == uart::RequestCompletionCode::kTimeout
+                          ? " 号等待确认超时\n" : " 号等待确认时链路丢失\n");
+      }
+    }
 
     if (!announced && session.link_state() == uart::LinkState::kConnected) {
       announced = true;
@@ -124,7 +142,7 @@ int main(int argc, char** argv) {
         } else {
           speak_pending = true;
           speaking_id = rfid.card_number;
-          timeouts_before = session.diagnostics().ack_timeouts;
+          speech_serial = session.last_request_serial();
           std::cerr << "播报 " << static_cast<unsigned>(speaking_id) << " 号\n";
         }
       } else if (have_rfid_state && last_present != 0 && rfid.present == 0) {
@@ -150,22 +168,6 @@ int main(int argc, char** argv) {
         std::cerr << "卡还在 " << static_cast<unsigned>(last_number) << " 号\n";
       } else {
         std::cerr << "卡在场，但卡号无效\n";
-      }
-    }
-
-    if (speak_pending && !session.request_pending()) {
-      speak_pending = false;
-      if (telemetry.has_ack &&
-          telemetry.last_ack.request_type == static_cast<uint8_t>(uart::MsgType::kSpeakAudio)) {
-        const uart::AckResult result = telemetry.last_ack.result;
-        if (result == uart::AckResult::kOk) {
-          std::cout << "播报 " << static_cast<unsigned>(speaking_id) << " 号已收下\n" << std::flush;
-        } else {
-          std::cerr << "播报 " << static_cast<unsigned>(speaking_id) << " 号失败: " << AckName(result)
-                    << "\n";
-        }
-      } else if (session.diagnostics().ack_timeouts > timeouts_before) {
-        std::cerr << "播报 " << static_cast<unsigned>(speaking_id) << " 号等待确认超时\n";
       }
     }
 
