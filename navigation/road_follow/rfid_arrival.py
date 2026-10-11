@@ -42,7 +42,8 @@ class RfidArrivalConfig:
     early_lock_min_depth_m: float = 0.30
     early_lock_frames: int = 3
     early_lock_max_spread_rad: float = 0.10
-    early_lock_handoff_m: float = 0.55
+    early_lock_handoff_m: float = 0.57
+    early_lock_blocked_frames: int = 3
 
 
 @dataclass
@@ -67,6 +68,7 @@ class RfidArrival:
     hold_yaw_rad: float | None = None
     heading_candidates: list[float] = field(default_factory=list)
     locked_heading_yaw_rad: float | None = None
+    early_lock_blocked_count: int = 0
     imu_full_edge: bool = False
     fault_reason: str = ""
     anchor: HeadingAnchorGate = field(default_factory=HeadingAnchorGate)
@@ -97,7 +99,10 @@ def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
             0.0, float(raw.get("early_lock_max_spread_rad", 0.10))
         ),
         early_lock_handoff_m=max(
-            0.0, float(raw.get("early_lock_handoff_m", 0.55))
+            0.0, float(raw.get("early_lock_handoff_m", 0.57))
+        ),
+        early_lock_blocked_frames=max(
+            1, int(raw.get("early_lock_blocked_frames", 3))
         ),
     )
 
@@ -159,7 +164,20 @@ def step_rfid_arrival(
 
     if state.phase == "follow" and early_heading_lock:
         measured = _measured_progress(progress_m, odom_valid)
-        if measured is not None and measured + 1e-6 >= cfg.early_lock_handoff_m:
+        vision_blocked = visual.reason in (
+            "stop_road", "stop_centerline", "stop_lookahead", "stop_forward_strip",
+        )
+        if state.locked_heading_yaw_rad is not None and vision_blocked:
+            state.early_lock_blocked_count += 1
+        else:
+            state.early_lock_blocked_count = 0
+        blocked_fallback = (
+            state.locked_heading_yaw_rad is not None
+            and state.early_lock_blocked_count >= cfg.early_lock_blocked_frames
+        )
+        if measured is not None and (
+            measured + 1e-6 >= cfg.early_lock_handoff_m or blocked_fallback
+        ):
             target = state.locked_heading_yaw_rad
             if target is None and yaw_rad is not None and math.isfinite(yaw_rad):
                 relative = (
@@ -300,7 +318,7 @@ def step_rfid_arrival(
     if early_heading_lock and arrival_mode == "visual_end":
         measured = _measured_progress(progress_m, odom_valid)
         if measured is not None and measured + 1e-6 < cfg.early_lock_handoff_m:
-            # 这些角点按固定的 0.55 m / 余程分段；提前出现的“路尽头”只当作
+            # 这些角点按固定的 0.57 m / 余程分段；提前出现的“路尽头”只当作
             # 视觉波动，不能让车辆提前停车或进入墙边摆正流程。
             state.road_end_missing_frames = 0
             early_before_handoff = True
@@ -507,7 +525,8 @@ def _hold_step_mm(cfg: RfidArrivalConfig, remaining_edge_m: float | None) -> int
     """提前停车后按剩余边长走完；拿不到边长就沿用策略定距。"""
     if remaining_edge_m is None or not math.isfinite(remaining_edge_m):
         return None
-    return min(500, max(1, int(round(remaining_edge_m * 1000.0))))
+    # 提前丢失道路时可能在名义交接点前较远处切换，必须补完整段余程。
+    return min(1000, max(1, int(round(remaining_edge_m * 1000.0))))
 
 
 def _begin_heading_hold(
