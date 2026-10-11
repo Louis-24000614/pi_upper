@@ -138,6 +138,12 @@ rfid_turn:
   # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
   # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
+  # 驶入 2_1/2_4/5_1/5_4 的 0.97 m 直边：前 0.50 m 视觉循迹，
+  # 到点后锁住绝对航向，剩余约 0.47 m 由 IMU 航向保持走完。
+  early_lock_min_depth_m: 0.30
+  early_lock_frames: 3
+  early_lock_max_spread_rad: 0.10
+  early_lock_handoff_m: 0.50
 
 temporal:
   # 帧间中心线 X 的 EMA；70% 采用新帧，使纠偏在约 2 帧内完成主要响应，
@@ -157,7 +163,8 @@ lane_heading:
   min_points: 3
   # 前向可见深度低于该值时（墙端死区）不再信当下实测，改用干净窗口
   # 携带的中位数方向；普通路口深度足够，仍用实测。
-  min_live_depth_m: 0.24
+  # 墙端停车时仍有 ~0.20 m 连续中心线（重放实测），静止测量可信。
+  min_live_depth_m: 0.18
 
 # 路口接近转向（追踪器确认非直路后锁存，直路连续 straight_clear_frames 帧解除）：
 # 转向点列先过正前方窄带，固定 0.30 m 预瞄点不再落进侧向开口；

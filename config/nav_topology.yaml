@@ -80,8 +80,8 @@ nodes:
 arrival_overrides:
   - from_node: "1_2"
     to_node: "2_2"
-    handoff_progress_m: 0.80
-    final_forward_m: 0.17
+    handoff_progress_m: 0.50
+    final_forward_m: 0.47
     guard_progress_m: 0.92
 
 edges:

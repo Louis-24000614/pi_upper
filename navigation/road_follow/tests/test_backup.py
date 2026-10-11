@@ -9,6 +9,7 @@ from road_follow.backup import (
     Backup,
     BackupConfig,
     EdgeProgress,
+    forward_corridor_depth,
     forward_lane_heading,
     near_lane_heading,
     near_lane_x,
@@ -296,6 +297,25 @@ class BackupTest(unittest.TestCase):
         heading = forward_lane_heading(clean + corner_bend)
         self.assertIsNotNone(heading)
         self.assertLess(abs(heading), 0.05)
+
+    def test_forward_corridor_depth_reports_true_wall_at_opening(self) -> None:
+        clean = [(0.0, 0.14), (0.001, 0.16), (0.002, 0.19)]
+        # 开口近处的弯行落在窄条里，会把"最大 y"撑到 0.27；
+        # 连续走廊尽头必须在墙线处截断。
+        corner_bend = [(-0.02, 0.21), (-0.05, 0.24), (-0.09, 0.27)]
+        depth = forward_corridor_depth(clean + corner_bend)
+        self.assertIsNotNone(depth)
+        self.assertLessEqual(depth, 0.22)
+
+    def test_forward_corridor_depth_deep_on_straight_road(self) -> None:
+        straight = [(0.0, y) for y in (0.14, 0.16, 0.18, 0.2, 0.3, 0.5, 0.8, 1.0)]
+        depth = forward_corridor_depth(straight)
+        self.assertIsNotNone(depth)
+        self.assertGreaterEqual(depth, 0.9)
+
+    def test_forward_corridor_depth_none_without_base_rows(self) -> None:
+        self.assertIsNone(forward_corridor_depth([(-0.2, 0.2), (-0.3, 0.3)]))
+        self.assertIsNone(forward_corridor_depth([]))
 
     def test_forward_lane_heading_detects_real_skew(self) -> None:
         slanted = [(0.06, 0.15), (0.045, 0.17), (0.03, 0.19), (0.015, 0.24), (0.0, 0.27)]

@@ -17,12 +17,12 @@ from vision.obstacle.detect import Detection
 from vision.obstacle.blockage import HardBlockageJudge
 
 
-KEY = ("a__b", "a", "b")
+KEY = ("2_3__3_3", "2_3", "3_3")
 
 
 def graph():
-    return TopologyGraph({}, {"a":Node("a",0,0),"b":Node("b",0,1),"c":Node("c",0,2)},
-        {"a__b":Edge("a__b","a","b",1),"b__c":Edge("b__c","b","c",1)})
+    return TopologyGraph({}, {"2_3":Node("2_3",0,0),"3_3":Node("3_3",0,1),"4_3":Node("4_3",0,2)},
+        {"2_3__3_3":Edge("2_3__3_3","2_3","3_3",1),"3_3__4_3":Edge("3_3__4_3","3_3","4_3",1)})
 
 
 class EdgeObstacleTest(unittest.TestCase):
@@ -49,7 +49,7 @@ class EdgeObstacleTest(unittest.TestCase):
         items, details = self.filter(progress=.8)
         self.assertEqual(items,[])
         self.assertEqual(details[0]["reason"],"beyond_current_edge")
-        self.assertEqual(details[0]["target"]["edge_id"],"b__c")
+        self.assertEqual(details[0]["target"]["edge_id"],"3_3__4_3")
         self.assertAlmostEqual(details[0]["target"]["canonical_offset_m"],.15)
         judge=HardBlockageJudge()
         for _ in range(5): observation=judge.update(items,(480,640))
@@ -84,11 +84,11 @@ class EdgeObstacleTest(unittest.TestCase):
         self.assertEqual(self.filter()[1][0]["reason"],"outside_distance_window")
 
     def test_turn_or_ambiguous_continuation_does_not_invent_next_edge(self):
-        self.graph.nodes["c"]=Node("c",1,1)
+        self.graph.nodes["4_3"]=Node("4_3",1,1)
         self.assertIsNone(locate_ahead(self.graph,KEY,.8,.35))
-        self.graph.nodes["c"]=Node("c",0,2)
-        self.graph.nodes["d"]=Node("d",0,3)
-        self.graph.edges["b__d"]=Edge("b__d","b","d",2)
+        self.graph.nodes["4_3"]=Node("4_3",0,2)
+        self.graph.nodes["5_3"]=Node("5_3",0,3)
+        self.graph.edges["3_3__5_3"]=Edge("3_3__5_3","3_3","5_3",2)
         self.assertIsNone(locate_ahead(self.graph,KEY,.8,.35))
 
     def test_invalid_detection_and_odometry_are_safe_for_json_status(self):
@@ -103,7 +103,7 @@ class EdgeObstacleTest(unittest.TestCase):
         self.assertEqual(details[0]["reason"],"unaligned_odom")
 
     def test_reverse_map_offset_uses_canonical_edge_direction(self):
-        target=locate_ahead(self.graph,("a__b","b","a"),.2,.35)
+        target=locate_ahead(self.graph,("2_3__3_3","3_3","2_3"),.2,.35)
         self.assertAlmostEqual(target["canonical_offset_m"],.45)
 
 
@@ -113,11 +113,11 @@ class TaskMapTest(unittest.TestCase):
         detail={"class_id":1,"label":"施工警示牌","score":.9,"bbox":[1,2,3,4],
             "target":locate_ahead(g,KEY,.8,.35),"reason":"beyond_current_edge"}
         records.observe_obstacles([detail],confirmed_bbox=detail["bbox"])
-        self.assertEqual(records.topology_snapshot()["obstacles"]["b__c:1"]["status"],"observed")
+        self.assertEqual(records.topology_snapshot()["obstacles"]["3_3__4_3:1"]["status"],"observed")
         self.assertEqual(g.blocked,set())
         detail.update(target=locate_ahead(g,KEY,.2,.35),reason="current_edge")
         records.observe_obstacles([detail],confirmed_bbox=detail["bbox"])
-        self.assertEqual(records.topology_snapshot()["obstacles"]["a__b:1"]["status"],"confirmed")
+        self.assertEqual(records.topology_snapshot()["obstacles"]["2_3__3_3:1"]["status"],"confirmed")
         # 记录层不直接替代现有规划器的封边操作。
         self.assertEqual(g.blocked,set())
 
@@ -140,7 +140,7 @@ class TaskMapTest(unittest.TestCase):
                 records.flush()
                 self.assertEqual(save.call_count,3)
             payload=json.loads((Path(folder)/"task.culverts.json").read_text(encoding="utf-8"))
-            self.assertEqual(payload["obstacles"]["a__b:1"]["score"],.92)
+            self.assertEqual(payload["obstacles"]["2_3__3_3:1"]["score"],.92)
 
     def test_new_task_resets_markers_and_retains_old_task_file(self):
         with tempfile.TemporaryDirectory() as folder:

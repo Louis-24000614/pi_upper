@@ -20,13 +20,13 @@ from topo_proto.graph import Edge, Node, TopologyGraph
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = Path(__file__).with_name("fixtures")/"culvert_inspection.json"
-KEY = ("a__b", "a", "b")
+KEY = ("4_3__5_3", "4_3", "5_3")
 TARGET = CulvertTarget(*KEY, .5, .635, .77, .635, 0)
 
 
 def graph():
-    return TopologyGraph({}, {"a": Node("a", 0, 0), "b": Node("b", 1.2, 0)},
-                         {KEY[0]: Edge(KEY[0], "a", "b", 1.2)})
+    return TopologyGraph({}, {"4_3": Node("4_3", 0, 0), "5_3": Node("5_3", 1.2, 0)},
+                         {KEY[0]: Edge(KEY[0], "4_3", "5_3", 1.2)})
 
 
 def accepted(label="knife_01"):

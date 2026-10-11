@@ -1,15 +1,15 @@
-# 仅 --culvert-stop 使用。类别由最近录像离线推理 + 目视核对，不影响旧模型。
+# 仅 --culvert-stop 使用，同时识别障碍物与涵洞。新模型类别顺序由用户确认不变。
 model:
-  id: trainV2_train-6_yolo11_3
-  path: models/obstacle/trainV2_train-6_yolo11_3.rknn
-  sha256: 0db021de9ea4fa3905be21f810f5f37d04ca26de7bf913c11fad9bfb4ccaf0b5
+  id: trainV2_train-7_yolo11_4
+  path: models/obstacle/trainV2_train-7_yolo11_4.rknn
+  sha256: 4aebd07bcb1658455580e7f8da698127ea399552cc8f85b4c5dac811097ef3fe
   verify_sha256: true
   task: detect
   core_mask: "0"  # 此处填核编号；加载器转成位掩码 1，SEG 使用核 1、2。
   input: {name: images, size: 640, layout: nhwc, dtype: uint8, color: rgb}
   classes:
     count: 4
-    # 以下为录像观察名称，不声称是原始训练 data.yaml 的名称。
+    # 编号 0/1/2/3 分别为禁入标牌/施工警示牌/栅栏/涵洞，用户已确认。
     names: [禁入标牌, 施工警示牌, 栅栏, 涵洞]
   outputs:
     strides: [8, 16, 32]
@@ -31,11 +31,12 @@ hard_block:
   min_track_iou: 0.20
 class_mapping:
   verified: true
-  model_sha256: 0db021de9ea4fa3905be21f810f5f37d04ca26de7bf913c11fad9bfb4ccaf0b5
+  model_sha256: 4aebd07bcb1658455580e7f8da698127ea399552cc8f85b4c5dac811097ef3fe
   culvert_class_id: 3
   hard_block_class_ids: [0, 1, 2]
-  evidence_video: drive_20261007_152745_625318.avi
-  evidence_seconds: {"0": [115, 270, 275], "1": [75], "2": [115, 120], "3": [45, 100, 190]}
+  # 旧录像证据属于旧模型；本次映射依据用户确认。
+  evidence_video: null
+  evidence_seconds: {}
 culvert:
   length_m: 0.27
   # 临时试验值：入口、中央、出口沿行驶方向统一提前 10 cm；尚未实车验收。

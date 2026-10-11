@@ -8,6 +8,8 @@ import time
 import xml.etree.ElementTree as ET
 import uuid
 
+from road_follow.placement_rules import placement_allowed
+
 
 def identity_label(value):
     if value and value.startswith("suspect_") and value[8:].isdigit():
@@ -65,7 +67,7 @@ class CulvertRecords:
         with self.lock:
             for detail in details:
                 target = detail.get("target")
-                if not target:
+                if not target or not placement_allowed(self.graph.edges.get(target["edge_id"]), "obstacle"):
                     continue
                 key = target["edge_id"]+":"+str(detail["class_id"])
                 confirmed = confirmed_bbox is not None and list(confirmed_bbox) == detail["bbox"] and detail["reason"] == "current_edge"
@@ -102,8 +104,12 @@ class CulvertRecords:
 
     def discover(self, target):
         with self.lock:
+            edge = self.graph.edges.get(target.edge_id)
+            if not placement_allowed(edge, "culvert") or set((target.from_node, target.to_node)) != set((edge.u, edge.v)):
+                return False
             self.entries[target.edge_id] = {**asdict(target), "status":"discovered", "stop_error_m":None}
             self._save()
+            return True
 
     def fail(self, edge_id, reason):
         with self.lock:

@@ -128,6 +128,48 @@ def _lane_heading_fit(band: list[Point2D]) -> float | None:
     return math.atan2(cov, var_y)
 
 
+def forward_corridor_depth(
+    points: list[Point2D] | tuple[Point2D, ...],
+    *,
+    strip_x_m: float = 0.09,
+    y_min_m: float = 0.14,
+    y_max_m: float = 1.00,
+    min_points: int = 3,
+    base_y_max_m: float = 0.19,
+    extend_max_dev_m: float = 0.02,
+) -> float | None:
+    """正前方连续走廊尽头：浅处基带定向后向深处逐行一致性延伸。
+
+    与窄条内最大 y 的区别：开口近处的行虽然落在窄条里，但横向会弯，
+    一致性检查把它截断——墙端报真实墙距，开口续不了命。
+    行数不足返回 None。
+    """
+    strip = sorted(
+        (float(x), float(y))
+        for x, y in points
+        if y_min_m <= float(y) <= y_max_m + 1e-9 and abs(float(x)) <= abs(strip_x_m)
+    )
+    base = [p for p in strip if p[1] <= base_y_max_m + 1e-9]
+    if len(base) < max(2, int(min_points)):
+        return None
+    heading = _lane_heading_fit(base)
+    if heading is None:
+        return None
+    accepted = list(base)
+    for x, y in strip:
+        if y <= base_y_max_m + 1e-9:
+            continue
+        last_x, last_y = accepted[-1]
+        predicted = last_x + math.tan(heading) * (y - last_y)
+        if abs(x - predicted) > abs(extend_max_dev_m):
+            break
+        accepted.append((x, y))
+        extended = _lane_heading_fit(accepted)
+        if extended is not None:
+            heading = extended
+    return accepted[-1][1]
+
+
 def forward_lane_heading(
     points: list[Point2D] | tuple[Point2D, ...],
     *,

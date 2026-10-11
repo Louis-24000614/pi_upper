@@ -99,6 +99,20 @@ class EntranceDepartureTest(unittest.TestCase):
         self.assertEqual(state.recovery, 0)
         self.assertEqual(command.v_mps, 0.0)
 
+    def test_direct_edge_starts_immediately_after_turn_done(self) -> None:
+        state = EntranceDeparture(
+            phase="turning", turn_side="right", direct_after_turn=True,
+        )
+        self.notes.put("TURN_DONE")
+
+        state, command = step_entrance_departure(
+            state, self.notes, self.send, self.follow, now_s=14.0,
+        )
+
+        self.assertEqual(state.phase, "done")
+        self.assertEqual(command.reason, "entrance_reacquire")
+        self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+
     def test_forward_failure_stops(self) -> None:
         state = EntranceDeparture(phase="forward")
         self.notes.put("FORWARD_FAIL")

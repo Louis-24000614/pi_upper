@@ -111,6 +111,7 @@ class CulvertRuntime:
         self.last_key = None
         self.first_capture_s = None
         self.paused_s = None
+        self.pending_obstacle = None
         self.event("culvert_projection", **calibration.metadata)
 
     def close(self):
@@ -171,28 +172,97 @@ class CulvertRuntime:
                        stable_frames=observation.stable_frames, reason=observation.reason)
 
     def cancel_for_obstacle(self, now, notes):
+        self.pending_obstacle = None
         if self.controller.owns:
             self.controller.cancel_for_obstacle(now)
             drain_notes(notes)
             self.perception.reset()
             self.paused_s = None
 
-    def update(self, *, detections, frame, mask, captured_s, sequence, source, now, progress,
-               command, eligible, notes, navigation_diagnostics=None, inference_s=None):
+    def _sync_edge(self):
         key = self.edge_key()
         if key != self.last_key:
             self.unknown_judge.reset()
             self.perception.reset()
             self.last_key = key
+            if self.pending_obstacle is not None and self.pending_obstacle["edge"] != key:
+                self.event("culvert_obstacle_discarded", reason="edge_changed")
+                self.pending_obstacle = None
             if self.history.key != key:
                 self.history.reset(key)
+        return key
+
+    def observe_culvert(self, *, detections, frame, mask, captured_s, sequence, source,
+                        now, progress):
+        key = self._sync_edge()
+        _, culverts, _ = self.split(detections)
+        points = self.calibration.road_points(mask, self.nav_config) if self.calibration.check_shape(frame.shape) else []
+        edge = self.agent.graph.edges[key[0]]
+        observation = self.perception.observe(culverts, image_shape=frame.shape, captured_s=captured_s,
+            now=now, frame_signature=zlib.crc32(frame), edge=edge, from_node=key[1], to_node=key[2],
+            points=points, history=self.history, already_done=self.records.handled(edge.id))
+        if self.first_capture_s is None:
+            self.first_capture_s = captured_s
+        self.event("culvert_observation", captured_s=captured_s, sequence=sequence, source=source,
+                   video_relative_s=captured_s-self.first_capture_s,
+                   detections=[asdict(d) for d in detections],
+                   reason=observation.reason, stable_frames=observation.stable_frames,
+                   bbox=observation.bbox, entry_distance_m=observation.distance_m,
+                   corrected_entry_distance_m=observation.corrected_distance_m,
+                   entry_distance_bias_m=self.config.entry_distance_bias_m,
+                   lateral_m=observation.lateral_m, progress_m=progress.s_m)
+        return observation
+
+    def obstacle_preempts(self, observation, culvert_observation, *, now,
+                          hard_detections=(), image_shape=None, hard_config=None):
+        """只比较本帧已通过当前边/车道检查的框；y2 更大表示更近。"""
+        key = self._sync_edge()
+        pending = self.pending_obstacle
+        if pending is not None:
+            if self.controller.phase == "fault":
+                return False  # 涵洞失败仍保持停车，不能自动倒车掩盖故障。
+            if self.controller.phase == "reacquire" or (not self.controller.owns and self.records.handled(key[0])):
+                self.event("culvert_obstacle_released", reason="task_done", bbox=pending["bbox"])
+                return True
+        elif observation is None or not observation.just_confirmed:
+            return False
+
+        boxes = [observation.bbox] if observation is not None and observation.bbox is not None else []
+        if hard_config is not None and image_shape is not None:
+            for item in hard_detections:
+                # 与原障碍确认使用相同的面积、置信度和走廊条件。
+                if HardBlockageJudge(hard_config).update([item], image_shape).candidate:
+                    boxes.append((item.x1, item.y1, item.x2, item.y2))
+        if pending is not None:
+            boxes.append(pending["bbox"])
+        obstacle_box = max(boxes, key=lambda box: box[3]) if boxes else None
+        culvert_box = (culvert_observation.bbox if culvert_observation is not None
+                       and culvert_observation.reason in ("tracking", "confirmed") else None)
+
+        if pending is not None and self.controller.owns and culvert_box is None:
+            return False  # 进入后框可能被遮挡；已确认的后方障碍保留到任务结束。
+        if pending is not None and not self.controller.owns and now-pending["since_s"] >= self.config.odom_timeout_s:
+            self.event("culvert_obstacle_released", reason="confirmation_timeout")
+            return True
+        if obstacle_box is not None and culvert_box is not None and culvert_box[3] > obstacle_box[3]:
+            if pending is None:
+                self.pending_obstacle = {"edge":key, "bbox":obstacle_box, "since_s":now}
+                self.event("culvert_obstacle_deferred", culvert_bbox=culvert_box,
+                           obstacle_bbox=obstacle_box, reason="culvert_nearer")
+            return False
+        return True  # 障碍更近、底边相同或涵洞证据失效，沿用原倒车处理。
+
+    def update(self, *, detections, frame, mask, captured_s, sequence, source, now, progress,
+               command, eligible, notes, navigation_diagnostics=None, inference_s=None,
+               culvert_observation=None):
+        key = self._sync_edge()
         hard, culverts, unknown = self.split(detections)
         if unknown:
             from road_follow.obstacle_edge import filter_current_edge
             unknown, _ = filter_current_edge(unknown, graph=self.agent.graph, edge_key=key,
                 progress_m=self.history.progress_at(captured_s), ipm=self.calibration.ipm,
                 image_shape=frame.shape, settings=self.obstacle_settings(),
-                lane_x_m=getattr(navigation_diagnostics, "near_x_m", 0))
+                lane_x_m=getattr(navigation_diagnostics, "near_x_m", 0), placement_kind=None)
         if (eligible or self.controller.owns) and self.unknown_judge.update(unknown, frame.shape).hard_blocked:
             self.controller.fault("unknown_near_target", now)
         was_inspecting = self.controller.phase == "task"
@@ -200,27 +270,17 @@ class CulvertRuntime:
         frame_fresh = math.isfinite(frame_age_s) and frame_age_s >= 0
         road_safe = frame_fresh and command.v_mps > 0 and command.reason in ("follow", "follow_near")
         if eligible and not self.controller.owns:
-            points = self.calibration.road_points(mask, self.nav_config) if self.calibration.check_shape(frame.shape) else []
-            edge = self.agent.graph.edges[key[0]]
-            observation = self.perception.observe(culverts, image_shape=frame.shape, captured_s=captured_s,
-                now=now, frame_signature=zlib.crc32(frame), edge=edge, from_node=key[1], to_node=key[2],
-                points=points, history=self.history, already_done=self.records.handled(edge.id))
-            if self.first_capture_s is None:
-                self.first_capture_s = captured_s
-            self.event("culvert_observation", captured_s=captured_s, sequence=sequence, source=source,
-                       video_relative_s=captured_s-self.first_capture_s,
-                       detections=[asdict(d) for d in detections],
-                       reason=observation.reason, stable_frames=observation.stable_frames,
-                       bbox=observation.bbox, entry_distance_m=observation.distance_m,
-                       corrected_entry_distance_m=observation.corrected_distance_m,
-                       entry_distance_bias_m=self.config.entry_distance_bias_m,
-                       lateral_m=observation.lateral_m, progress_m=progress.s_m)
+            observation = culvert_observation or self.observe_culvert(detections=detections,
+                frame=frame, mask=mask, captured_s=captured_s, sequence=sequence, source=source,
+                now=now, progress=progress)
             if observation.target and road_safe:
                 drain_notes(notes)  # 接管前清理已经结束的旧动作消息。
                 near_speed = float((self.nav_config.get("follow") or {}).get("near_mps", .05))
                 if self.controller.begin(observation.target, now, progress.s_m, near_speed):
                     self.paused_s = now
         if not self.controller.owns:
+            if self.pending_obstacle is not None:
+                return CulvertOutcome(VelocityCommand(0, 0, "wait_culvert_confirmation"), True)
             return CulvertOutcome(command, False)
         near_speed = float((self.nav_config.get("follow") or {}).get("near_mps", .05))
         received = drain_notes(notes)
@@ -242,6 +302,7 @@ class CulvertRuntime:
             self.controller.fault(reason, now)
 
     def reset_progress_origin(self):
+        self.pending_obstacle = None
         self.history.reset(self.edge_key())
         self.perception.reset()
         self.event("culvert_progress_origin_reset")

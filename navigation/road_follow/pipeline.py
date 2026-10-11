@@ -13,7 +13,7 @@ from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from
 from ipm_proto.temporal import CenterlineSmoother
 from vision.ipm_proto.manual_ground import activation_ipm, runtime_activation
 
-from road_follow.backup import forward_lane_heading, near_lane_x
+from road_follow.backup import forward_corridor_depth, forward_lane_heading, near_lane_x
 from road_follow.control import FollowConfig, VelocityCommand, command_from_centerline, follow_config_from_mapping
 
 
@@ -142,10 +142,7 @@ def command_from_mask_with_diagnostics(
             points, **lane_heading_params_from_mapping(cfg)
         ),
         centerline_points=tuple(points),
-        forward_depth_m=max(
-            (float(y) for x, y in points if abs(float(x)) <= strip_x_m),
-            default=None,
-        ),
+        forward_depth_m=forward_corridor_depth(points, strip_x_m=strip_x_m),
     )
     return command, diagnostics
 

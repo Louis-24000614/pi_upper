@@ -86,6 +86,7 @@ COMMAND_NAMES = {
     "entrance_recovery": "转弯后低速恢复",
     "blind_forward": "路口定距前进",
     "heading_hold": "锁视觉航向",
+    "imu_edge_hold": "起步短边 IMU 定向前进",
     "anchor_wait": "等待停稳与航向参考同步",
     "forward": "定距前进",
     "forward_wait": "等待定距前进",
@@ -106,6 +107,7 @@ COMMAND_NAMES = {
     "stop_camera": "停车：相机读取失败",
     "stop_entrance_fail": "停车：出发动作失败",
     "stop_action_fail": "停车：路口动作失败",
+    "stop_align_timeout": "停车：提前锁定航向后摆正超时",
     "stop_bad_turn_distance": "停车：转弯前进距离不安全",
     "stop_odom_junction_wait": "停车：里程计到达预计路口但视觉未确认",
     "stop_arrival_guard": "停车：超过到点保护位置，交接未完成",
@@ -408,6 +410,8 @@ def _invalidate_turn_frames(before, states, stream, smoother):
         return False
     for state in changed:
         # 状态函数可能已把当前旧画面计入 clear；撤回这些证据，帧数阈值仍用原配置。
+        if getattr(state, "direct_after_turn", False) and state.phase == "done":
+            continue
         state.phase, state.clear = "reacquire", 0
     smoother.reset()
     stream.invalidate()
@@ -731,6 +735,7 @@ def _run(args, parser) -> int:
     rfid_arrival_cfg = rfid_arrival_config_from_mapping(cfg)
     arrival_policy = None
     arrival_key = None
+    trusted_culvert_arrival_key = None
     if route_agent is not None:
         try:
             # 启动相机和运动前检查所有可行驶方向，错误配置不能在途中才发现。
@@ -935,6 +940,9 @@ def _run(args, parser) -> int:
                         entrance.turn_side, next_edge = handoff_entrance(
                             route_agent, node_xy
                         )
+                        entrance.direct_after_turn = (
+                            next_edge.from_node == "0_J" and next_edge.to_node == "1_2"
+                        )
                     except (KeyError, ValueError) as exc:
                         entrance.phase = "fault"
                         command = VelocityCommand(0.0, 0.0, "stop_entrance_fail")
@@ -947,10 +955,11 @@ def _run(args, parser) -> int:
                             f"{next_edge.to_node}；原地"
                             f"{DIRECTION_NAMES[entrance.turn_side]}",
                         )
-                if entrance_before == "turning" and entrance.phase == "reacquire":
+                if entrance_before == "turning" and entrance.phase in ("reacquire", "done"):
                     # 原地转弯期间的画面不属于新道路，禁止污染新方向的 EMA。
                     smoother.reset()
                     entrance.clear = 0
+                    lane_heading_history.clear()
                 if entrance.phase != entrance_before:
                     _event(
                         "出发",
@@ -1109,8 +1118,16 @@ def _run(args, parser) -> int:
                     recovery_owns = culvert_outcome.owns
                     if culvert_outcome.resumed:
                         culvert_runtime.resume(junction_turn, rfid_arrival, junctions, smoother, segment_stream)
+                        if route_agent is not None and route_agent.state.current_edge:
+                            trusted_culvert_arrival_key = (
+                                route_agent.state.current_edge,
+                                route_agent.state.from_node,
+                                route_agent.state.to_node,
+                            )
                         junctions = JunctionTracker()
                         lane_heading_history.clear()
+                        rfid_arrival.heading_candidates.clear()
+                        rfid_arrival.locked_heading_yaw_rad = None
                 if not recovery_owns:
                     previous_phase = junction_turn.phase
                     visual_command = command
@@ -1141,10 +1158,13 @@ def _run(args, parser) -> int:
                                 f"预期开口={','.join(arrival_policy.expected_openings) or '无'}，"
                                 f"交接={arrival_policy.handoff_progress_m:.2f} m，"
                                 f"定距={arrival_policy.final_forward_m:.2f} m，"
+                                f"整段IMU={'是' if arrival_policy.imu_full_edge else '否'}，"
+                                f"提前锁航向={'是' if arrival_policy.early_heading_lock else '否'}，"
                                 f"保护={guard_label}",
                             )
                     if target is not None and arrival_policy is not None:
                         previous_rfid_phase = rfid_arrival.phase
+                        locked_heading_before = rfid_arrival.locked_heading_yaw_rad
                         follow_cfg = cfg.get("follow", {}) or {}
                         visual_safe = (
                             command.reason != "stop_camera"
@@ -1153,6 +1173,11 @@ def _run(args, parser) -> int:
                             and follow_diag.output_points
                             >= int(follow_cfg.get("min_points", 8))
                         )
+                        # 盲走按策略目标里程补齐；0_J→1_2 会在物理边长上额外前进 7 cm。
+                        remaining_edge_m = (
+                            max(0.0, arrival_policy.edge_length_m - progress.s_m)
+                            if route_agent.state.current_edge else None
+                        )
                         junction_turn, rfid_arrival, command, trigger = step_route_arrival(
                             arrival_policy,
                             patrol=target.role == "patrol_slot",
@@ -1160,6 +1185,9 @@ def _run(args, parser) -> int:
                             reading=junction, opening=opening, command=command,
                             progress_m=progress.s_m,
                             odom_valid=progress.is_fresh(time.monotonic()),
+                            remaining_edge_m=remaining_edge_m,
+                            forward_depth_m=follow_diag.forward_depth_m,
+                            trusted_odom_handoff=(trusted_culvert_arrival_key == key),
                             notes=action_notes,
                             send=lambda line: write_velocity(bridge, line),
                             junction_cfg=junction_turn_cfg,
@@ -1175,6 +1203,16 @@ def _run(args, parser) -> int:
                             odom_received_s=progress.last_sample_s,
                             anchor_notes=anchor_notes,
                         )
+                        if (
+                            locked_heading_before is None
+                            and rfid_arrival.locked_heading_yaw_rad is not None
+                        ):
+                            _event(
+                                "航向锁存",
+                                f"目标={target.id}；绝对航向="
+                                f"{rfid_arrival.locked_heading_yaw_rad:+.3f} rad；"
+                                f"进度={progress.s_m:.2f} m",
+                            )
                         if trigger and (
                             trigger not in ("guard", "odom_stale")
                             or previous_phase != junction_turn.phase
@@ -1187,6 +1225,8 @@ def _run(args, parser) -> int:
                                 f"检测带={junction.forward_band_ratio:.2f}",
                             )
                         last_arrival_reason = command.reason
+                        if trigger == "culvert_odom_handoff":
+                            trusted_culvert_arrival_key = None
                         if rfid_arrival.phase != previous_rfid_phase:
                             _event(
                                 "巡检点",
@@ -1361,6 +1401,7 @@ def _run(args, parser) -> int:
                 details = [
                     COMMAND_NAMES.get(command.reason, command.reason),
                     f"速度={command.v_mps:.3f} m/s",
+                    f"角速度={command.omega_radps:.3f} rad/s",
                     f"路段进度={progress.s_m:.2f} m",
                     f"路口={JUNCTION_NAMES.get(opening, opening)}",
                 ]

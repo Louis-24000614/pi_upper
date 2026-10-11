@@ -10,6 +10,7 @@ from ipm_proto.ipm import BevConfig, CameraExtrinsics, Ipm
 from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from_mapping
 from road_follow.backup import near_lane_heading
 from road_follow.culvert import CulvertTarget
+from road_follow.placement_rules import placement_allowed
 
 
 class CulvertCalibration:
@@ -149,6 +150,9 @@ class CulvertPerception:
             self.key = key
         if already_done:
             return CulvertObservation("already_done")
+        if not placement_allowed(edge, "culvert"):
+            self.reset()
+            return CulvertObservation("outside_placement_area")
         if not math.isfinite(now-captured_s) or now < captured_s:
             self.positions.clear()
             return CulvertObservation("stale_frame")

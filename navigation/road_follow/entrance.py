@@ -28,6 +28,7 @@ class EntranceDeparture:
     stop_started_s: float = 0.0
     clear: int = 0
     recovery: int = 0
+    direct_after_turn: bool = False
 
 
 def entrance_config_from_mapping(cfg: dict) -> EntranceConfig:
@@ -103,6 +104,9 @@ def step_entrance_departure(
 
     if state.phase == "turning":
         if "TURN_DONE" in received:
+            if state.direct_after_turn:
+                state.phase = "done"
+                return state, VelocityCommand(0.0, 0.0, "entrance_reacquire")
             state.phase = "reacquire"
             state.clear = 0
             state.recovery = 0

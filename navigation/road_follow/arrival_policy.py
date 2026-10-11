@@ -25,6 +25,9 @@ _GRID_HANDOFF_M = 0.80
 _GRID_FINAL_M = 0.17
 _GRID_ALIGN_TIMEOUT_S = 3.0
 _GRID_ALIGN_STABLE_FRAMES = 8
+_IMU_FULL_EDGES = frozenset({("0_J", "1_2")})
+_IMU_FULL_EDGE_EXTRA_M = 0.07
+_EARLY_HEADING_TARGETS = frozenset({"2_1", "2_4", "5_1", "5_4"})
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,9 @@ class ArrivalPolicy:
     expected_openings: tuple[str, ...]
     align_timeout_s: float
     align_stable_frames: int
+    imu_full_edge: bool = False
+    early_heading_lock: bool = False
+    edge_length_m: float = 0.0
 
 
 def _exit_directions(graph, from_node: str, to_node: str) -> set[str]:
@@ -112,10 +118,16 @@ def resolve_arrival_policy(
     ):
         raise ValueError(f"不安全的到点距离配置: {from_node} -> {to_node}")
 
+    directed_edge = (from_node, to_node)
+    imu_full_edge = directed_edge in _IMU_FULL_EDGES
+    arrival_distance_m = edge_length_m + (_IMU_FULL_EDGE_EXTRA_M if imu_full_edge else 0.0)
     return ArrivalPolicy(
         from_node, to_node, mode, handoff, final, guard,
         tuple(side for side in ("forward", "left", "right") if side in directions),
         align_timeout_s, align_stable_frames,
+        imu_full_edge,
+        to_node in _EARLY_HEADING_TARGETS,
+        arrival_distance_m,
     )
 
 
@@ -144,6 +156,9 @@ def step_route_arrival(
     odom_received_s=None,
     anchor_notes=None,
     now_s=None,
+    remaining_edge_m=None,
+    forward_depth_m=None,
+    trusted_odom_handoff=False,
 ):
     """共享地图选择和 ODOM 新鲜度检查。贯通点按边长保护，尽头巡检点仍等墙。"""
     approaching = state.phase in ("follow", "approach") and (
@@ -155,6 +170,7 @@ def step_route_arrival(
         if (
             (not patrol or policy.mode == "visual_odom")
             and odom_valid
+            and not trusted_odom_handoff
             and progress_m + 1e-6 >= policy.guard_progress_m
         ):
             if patrol:
@@ -169,13 +185,18 @@ def step_route_arrival(
             return state, patrol_state, VelocityCommand(0.0, 0.0, "stop_odom_stale"), "odom_stale"
 
     side_cue = expected_side_cue(policy, reading, opening)
-    if approaching and state.suppress_cue:
+    if (
+        approaching and state.suppress_cue and not policy.imu_full_edge
+        and not trusted_odom_handoff
+    ):
         if side_cue.detected:
             return state, patrol_state, command, ""
         state.suppress_cue = False
 
     final_mm = int(round(policy.final_forward_m * 1000))
     if patrol and state.phase == "follow":
+        if remaining_edge_m is None and math.isfinite(progress_m):
+            remaining_edge_m = max(0.0, policy.edge_length_m - progress_m)
         before = patrol_state.phase
         side_valid = (
             side_cue.detected and side_cue.distance_m is not None
@@ -208,8 +229,20 @@ def step_route_arrival(
             odom_received_s=odom_received_s,
             anchor_notes=anchor_notes,
             now_s=now_s,
+            remaining_edge_m=remaining_edge_m,
+            forward_depth_m=forward_depth_m,
+            imu_full_edge=policy.imu_full_edge,
+            early_heading_lock=policy.early_heading_lock,
         )
-        source = policy.mode if before in ("follow", "align", "anchor_wait") and patrol_state.phase == "heading_hold" else ""
+        if before in ("follow", "align", "anchor_wait") and patrol_state.phase == "heading_hold":
+            if policy.imu_full_edge:
+                source = "imu_full_edge"
+            elif policy.early_heading_lock:
+                source = "early_imu"
+            else:
+                source = policy.mode
+        else:
+            source = ""
         return state, patrol_state, command, source
 
     cfg = replace(
@@ -217,14 +250,35 @@ def step_route_arrival(
         align_timeout_s=policy.align_timeout_s,
         align_stable_frames=policy.align_stable_frames,
     )
+    if state.phase == "heading_hold" and state.forward_mm > 0:
+        cfg = replace(cfg, turn_forward_m=state.forward_mm / 1000.0)
     cue = side_cue
     if policy.mode == "visual_odom":
-        if (
+        normal_handoff = (
             state.branch_latched and odom_valid and is_visual_follow(command)
             and progress_m + 1e-6 >= policy.handoff_progress_m
             and progress_m < policy.guard_progress_m
+        )
+        trusted_handoff = (
+            trusted_odom_handoff and odom_valid and is_visual_follow(command)
+            and progress_m + 1e-6 >= policy.handoff_progress_m
+            and progress_m < policy.edge_length_m
+        )
+        if (normal_handoff or trusted_handoff) and state.phase in (
+            "follow", "approach", "align", "anchor_wait",
         ):
-            cue = JunctionCue(True, state.side, policy.final_forward_m, "odom_handoff")
+            side = state.side if state.side in ("left", "right") else next(
+                (item for item in policy.expected_openings if item in ("left", "right")),
+                "left",
+            )
+            cue = JunctionCue(True, side, policy.final_forward_m, "odom_handoff")
+            # 涵洞恢复等情况可能晚于标准交接点，只补齐到拓扑边末端，不能
+            # 从恢复位置重新走完整个 0.47 m。
+            remaining_m = max(
+                junction_cfg.min_forward_mm / 1000.0,
+                policy.edge_length_m - progress_m,
+            )
+            cfg = replace(cfg, turn_forward_m=remaining_m)
     else:
         end_cue = road_end_turn_cue(
             side=state.side, stable_blocked=False, raw_blocked=False,
@@ -243,5 +297,8 @@ def step_route_arrival(
         frame_captured_s=frame_captured_s, odom_received_s=odom_received_s,
         anchor_notes=anchor_notes, now_s=now_s, visual_safe=visual_safe,
     )
-    source = cue.source if before in ("follow", "approach", "align", "anchor_wait") and state.phase == "heading_hold" else ""
+    if before in ("follow", "approach", "align", "anchor_wait") and state.phase == "heading_hold":
+        source = "culvert_odom_handoff" if trusted_odom_handoff else cue.source
+    else:
+        source = ""
     return state, patrol_state, command, source
