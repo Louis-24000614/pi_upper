@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -23,6 +24,7 @@
 #include "link/clock.h"
 #include "link/port.h"
 #include "link/sess.h"
+#include "link/speech_queue.h"
 
 namespace {
 
@@ -52,17 +54,43 @@ const char* AckName(uart::AckResult result) {
 
 enum class FiniteAction { kNone, kForward, kBackward, kTurn, kStopping };
 
+const char* CompletionName(const uart::RequestCompletion& completion) {
+  switch (completion.code) {
+    case uart::RequestCompletionCode::kAck: return AckName(completion.result);
+    case uart::RequestCompletionCode::kTimeout: return "ACK_TIMEOUT";
+    case uart::RequestCompletionCode::kLinkLost: return "LINK_LOST";
+    case uart::RequestCompletionCode::kCancelled: return "CANCELLED";
+  }
+  return "UNKNOWN";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   std::string device = "/dev/ttyS6";
   unsigned baud = 921600;
+  bool require_heading_anchor = false;
+  uart::SpeechQueue speech_queue;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--device" && i + 1 < argc) {
       device = argv[++i];
     } else if (arg == "--baud" && i + 1 < argc) {
       baud = static_cast<unsigned>(std::stoul(argv[++i]));
+    } else if (arg == "--require-heading-anchor") {
+      require_heading_anchor = true;
+    } else if (arg == "--speech-hold-ms" && i + 1 < argc) {
+      std::istringstream spec(argv[++i]);
+      unsigned id = 0;
+      uint64_t ms = 0;
+      char colon = 0;
+      std::string extra;
+      if (!(spec >> id >> colon >> ms) || colon != ':' || (spec >> extra) ||
+          ms > std::numeric_limits<uint32_t>::max() ||
+          !speech_queue.SetDuration(id, static_cast<uint32_t>(ms))) {
+        std::cerr << "Invalid --speech-hold-ms, expected id:positive_milliseconds\n";
+        return 2;
+      }
     } else {
       std::cerr << "用法: uart_vel --device /dev/ttyS6 [--baud 921600]\n";
       return 2;
@@ -111,16 +139,48 @@ int main(int argc, char** argv) {
   uint8_t last_rfid_present = 0;
   uint8_t last_rfid_number = 0;
   uint8_t last_rfid_generation = 0;
-  uint8_t queued_speech = 0;
-  bool speak_inflight = false;
-  uint8_t speaking_id = 0;
-  uint32_t speak_timeouts_before = 0;
-  std::string deferred_motion;
+  uint64_t uid_event_serial = 0;
+  uint64_t speech_serial = 0;
+  bool anchor_active = false;
+  bool anchor_sent = false;
+  uint64_t anchor_serial = 0;
+  uint64_t anchor_started_ms = 0;
+  uint64_t anchor_retry_ms = 0;
+  bool motion_ack_denied = false;
+  int exit_code = 0;
+  bool had_connection = false;
+  uint32_t connected_boot_id = 0;
+
+  auto enqueue_speech = [&](const uart::SpeechItem& item) {
+    std::string reason;
+    if (session.speech_channel_blocked()) reason = "CHANNEL_BLOCKED";
+    else if (session.link_state() != uart::LinkState::kConnected) reason = "LINK_NOT_READY";
+    if (!reason.empty() || !speech_queue.Enqueue(item, &reason)) {
+      std::cout << "SPEECH_REJECT " << item.event_id << " "
+                << static_cast<unsigned>(item.audio_id) << " " << reason << "\n" << std::flush;
+    } else {
+      std::cout << "SPEECH_QUEUED " << item.event_id << " "
+                << static_cast<unsigned>(item.audio_id) << "\n" << std::flush;
+    }
+  };
+  auto anchor_fail = [&](const char* reason) {
+    anchor_active = false;
+    anchor_sent = false;
+    have_cmd = false;
+    session.SetVelocity(0.0f, 0.0f);
+    std::cout << "ANCHOR_FAIL " << reason << "\n" << std::flush;
+  };
 
   while (!g_stop.load()) {
     session.Poll();
+    if (require_heading_anchor && session.link_state() == uart::LinkState::kConnected &&
+        !session.supports_heading_reference()) {
+      std::cout << "ANCHOR_FAIL UNSUPPORTED\n" << std::flush;
+      exit_code = 1;
+      break;
+    }
     if (session.link_state() == uart::LinkState::kConnected && !session.command_enabled() &&
-        !session.request_pending()) {
+        !session.management_request_pending()) {
       session.RequestArm();
     }
     if (!announced && session.command_enabled()) {
@@ -136,7 +196,7 @@ int main(int argc, char** argv) {
       if (valid && (!have_rfid_state || rfid.generation != last_rfid_generation)) {
         std::cout << "RFID_EVENT " << static_cast<unsigned>(rfid.card_number) << " "
                   << static_cast<unsigned>(rfid.generation) << "\n" << std::flush;
-        queued_speech = rfid.card_number;
+        enqueue_speech({"uid-" + std::to_string(++uid_event_serial), rfid.card_number});
       } else if (have_rfid_state && last_rfid_present != 0 && rfid.present == 0) {
         std::cout << "RFID_REMOVED " << static_cast<unsigned>(last_rfid_generation) << "\n"
                   << std::flush;
@@ -151,26 +211,89 @@ int main(int argc, char** argv) {
       last_rfid_generation = rfid.generation;
     }
 
-    if (speak_inflight && !session.request_pending()) {
-      speak_inflight = false;
-      const uart::Telemetry& spoken = session.telemetry();
-      if (spoken.has_ack &&
-          spoken.last_ack.request_type == static_cast<uint8_t>(uart::MsgType::kSpeakAudio)) {
-        if (spoken.last_ack.result == uart::AckResult::kOk) {
-          std::cerr << "[播报] " << static_cast<unsigned>(speaking_id) << " 号\n";
-        } else {
-          std::cerr << "[播报] " << static_cast<unsigned>(speaking_id)
-                    << " 号失败: " << AckName(spoken.last_ack.result) << "\n";
+    uart::RequestCompletion completed;
+    while (session.PopRequestCompletion(&completed)) {
+      if (completed.request_type == uart::MsgType::kSpeakAudio &&
+          completed.serial == speech_serial) {
+        uart::SpeechItem item;
+        if (speech_queue.Finish(&item)) {
+          const char* result = CompletionName(completed);
+          std::cout << "SPEECH_RESULT " << item.event_id << " "
+                    << static_cast<unsigned>(item.audio_id) << " " << result << "\n" << std::flush;
         }
-      } else if (session.diagnostics().ack_timeouts > speak_timeouts_before) {
-        std::cerr << "[播报] " << static_cast<unsigned>(speaking_id) << " 号等待确认超时\n";
-      } else if (queued_speech == 0) {
-        queued_speech = speaking_id;
+        if (completed.code != uart::RequestCompletionCode::kAck) {
+          while (speech_queue.PopQueued(&item)) {
+            std::cout << "SPEECH_REJECT " << item.event_id << " "
+                      << static_cast<unsigned>(item.audio_id) << " "
+                      << CompletionName(completed) << "\n" << std::flush;
+          }
+        }
+      } else if (completed.request_type == uart::MsgType::kHeadingReference &&
+                 anchor_active && completed.serial == anchor_serial) {
+        anchor_sent = false;
+        if (completed.code == uart::RequestCompletionCode::kAck &&
+            completed.result == uart::AckResult::kOk) {
+          anchor_active = false;
+          // Poll may have read ODOM before this ACK. Do not give that cached
+          // sample a new stdout timestamp; wait for the next received frame.
+          seen_odom_us = session.telemetry().odom_us;
+          std::cout << "ANCHOR_DONE\n" << std::flush;
+        } else if (completed.code == uart::RequestCompletionCode::kAck &&
+                   completed.result == uart::AckResult::kBusy &&
+                   clock.NowMs() - anchor_started_ms < 2000) {
+          anchor_retry_ms = clock.NowMs() + 100;
+        } else {
+          anchor_fail(CompletionName(completed));
+        }
+      } else if (completed.request_type == uart::MsgType::kMotionAction &&
+                 completed.code == uart::RequestCompletionCode::kAck &&
+                 completed.result != uart::AckResult::kOk) {
+        motion_ack_denied = true;
       }
     }
 
+    const bool connected = session.link_state() == uart::LinkState::kConnected;
+    if (had_connection && (!connected || session.boot_id() != connected_boot_id)) {
+      uart::SpeechItem item;
+      while (speech_queue.PopQueued(&item)) {
+        std::cout << "SPEECH_REJECT " << item.event_id << " "
+                  << static_cast<unsigned>(item.audio_id) << " LINK_LOST\n" << std::flush;
+      }
+      if (anchor_active) anchor_fail("LINK_LOST");
+    }
+    had_connection = connected;
+    if (connected) connected_boot_id = session.boot_id();
+
     auto apply_line = [&](const std::string& line) {
+      if (line.rfind("speech ", 0) == 0) {
+        std::istringstream in(line);
+        std::string verb, event_id, extra;
+        unsigned id = 0;
+        if (!(in >> verb >> event_id >> id) || (in >> extra) || id < 1 || id > 32) {
+          std::cout << "SPEECH_REJECT invalid 0 bad_request\n" << std::flush;
+        } else {
+          enqueue_speech({event_id, static_cast<uint8_t>(id)});
+        }
+        return;
+      }
+      if (line == "anchor_heading") {
+        have_cmd = false;
+        linear = angular = 0.0f;
+        if (anchor_active || finite_action != FiniteAction::kNone) {
+          std::cout << "ANCHOR_FAIL BUSY\n" << std::flush;
+        } else if (!session.supports_heading_reference()) {
+          std::cout << "ANCHOR_FAIL UNSUPPORTED\n" << std::flush;
+        } else {
+          session.SetVelocity(0.0f, 0.0f);
+          anchor_active = true;
+          anchor_sent = false;
+          anchor_started_ms = clock.NowMs();
+          anchor_retry_ms = anchor_started_ms;
+        }
+        return;
+      }
       if (line == "stop") {
+        if (anchor_active) anchor_fail("CANCELLED");
         const bool was_finite = finite_action != FiniteAction::kNone;
         have_cmd = false;
         seen_motion_us = session.telemetry().motion_us;
@@ -186,17 +309,15 @@ int main(int argc, char** argv) {
         return;
       }
       if (line == "turn left" || line == "turn right") {
+        if (anchor_active) { std::cout << "TURN_FAIL\n" << std::flush; return; }
+        motion_ack_denied = false;
         if (finite_action == FiniteAction::kNone) {
           const auto action = line == "turn left" ? uart::MotionActionId::kTurnLeft
                                                    : uart::MotionActionId::kTurnRight;
           have_cmd = false;
           seen_motion_us = session.telemetry().motion_us;
           if (!session.RequestMotionAction(static_cast<uint8_t>(action), 1)) {
-            if (speak_inflight) {
-              deferred_motion = line;
-            } else {
-              std::cout << "TURN_FAIL\n" << std::flush;
-            }
+            std::cout << "TURN_FAIL\n" << std::flush;
           } else {
             finite_action = FiniteAction::kTurn;
             action_ms = clock.NowMs();
@@ -208,6 +329,7 @@ int main(int argc, char** argv) {
         return;
       }
       if (line.rfind("forward ", 0) == 0 || line.rfind("backward ", 0) == 0) {
+        motion_ack_denied = false;
         const bool backward = line.rfind("backward ", 0) == 0;
         std::istringstream in(line);
         std::string verb;
@@ -218,7 +340,7 @@ int main(int argc, char** argv) {
                            distance_mm >= 1 && distance_mm <= 1000 &&
                            speed_mmps >= 20 && speed_mmps <= 400;
         const char* name = backward ? "BACKWARD" : "FORWARD";
-        if (!valid || finite_action != FiniteAction::kNone) {
+        if (!valid || anchor_active || finite_action != FiniteAction::kNone) {
           std::cout << name << "_FAIL\n" << std::flush;
         } else {
           have_cmd = false;
@@ -228,11 +350,7 @@ int main(int argc, char** argv) {
           const bool sent = session.RequestMotionAction(
               static_cast<uint8_t>(action), 0, static_cast<uint16_t>(speed_mmps), distance_mm);
           if (!sent) {
-            if (speak_inflight) {
-              deferred_motion = line;
-            } else {
-              std::cout << name << "_FAIL\n" << std::flush;
-            }
+            std::cout << name << "_FAIL\n" << std::flush;
           } else {
             finite_action = backward ? FiniteAction::kBackward : FiniteAction::kForward;
             action_ms = clock.NowMs();
@@ -253,18 +371,12 @@ int main(int argc, char** argv) {
         next_v = 0.0f;
         next_w = 0.0f;
       }
+      if (anchor_active) { next_v = 0.0f; next_w = 0.0f; }
       linear = next_v;
       angular = next_w;
       have_cmd = true;
       cmd_ms = clock.NowMs();
     };
-
-    if (!deferred_motion.empty() && !speak_inflight && !session.request_pending() &&
-        finite_action == FiniteAction::kNone) {
-      const std::string line = deferred_motion;
-      deferred_motion.clear();
-      apply_line(line);
-    }
 
     char buf[256];
     const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
@@ -296,10 +408,7 @@ int main(int argc, char** argv) {
     }
     if (finite_action != FiniteAction::kNone) {
       const uart::Telemetry& tel = session.telemetry();
-      const bool denied = !session.request_pending() && tel.has_ack &&
-                          tel.last_ack.request_type ==
-                              static_cast<uint8_t>(uart::MsgType::kMotionAction) &&
-                          tel.last_ack.result != uart::AckResult::kOk;
+      const bool denied = motion_ack_denied;
       const bool finished = tel.has_motion && tel.motion_us != seen_motion_us &&
                             !session.awaiting_motion_result();
       const char* prefix = finite_action == FiniteAction::kForward
@@ -325,13 +434,27 @@ int main(int argc, char** argv) {
       session.SetVelocity(0.0f, 0.0f);
     }
 
-    if (queued_speech != 0 && !speak_inflight && deferred_motion.empty() &&
-        finite_action == FiniteAction::kNone && !session.request_pending()) {
-      if (session.RequestSpeech(queued_speech)) {
-        speak_inflight = true;
-        speaking_id = queued_speech;
-        queued_speech = 0;
-        speak_timeouts_before = session.diagnostics().ack_timeouts;
+    if (anchor_active) {
+      session.SetVelocity(0.0f, 0.0f);
+      if (!anchor_sent && now_ms - anchor_started_ms >= 2000) {
+        anchor_fail("BUSY");
+      } else if (!anchor_sent && now_ms >= anchor_retry_ms &&
+                 !session.management_request_pending()) {
+        if (session.RequestHeadingReference()) {
+          anchor_sent = true;
+          anchor_serial = session.last_request_serial();
+        }
+      }
+    }
+    if (!anchor_active && finite_action == FiniteAction::kNone &&
+        !session.management_request_pending() && !session.speech_channel_blocked()) {
+      const uart::SpeechItem* next = speech_queue.Next(now_ms);
+      if (next != nullptr && session.RequestSpeech(next->audio_id)) {
+        const uart::SpeechItem sent = *next;
+        speech_serial = session.last_request_serial();
+        speech_queue.MarkSent(now_ms);
+        std::cout << "SPEECH_SENT " << sent.event_id << " "
+                  << static_cast<unsigned>(sent.audio_id) << "\n" << std::flush;
       }
     }
 
@@ -353,5 +476,5 @@ int main(int argc, char** argv) {
 
   session.Shutdown();
   std::cerr << "[串口] 已停车\n";
-  return 0;
+  return exit_code;
 }

@@ -11,6 +11,7 @@ from ipm_proto.centerline import extract_centerline
 from ipm_proto.ipm import BevConfig, CameraExtrinsics, Ipm
 from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from_mapping
 from ipm_proto.temporal import CenterlineSmoother
+from vision.ipm_proto.manual_ground import activation_ipm, runtime_activation
 
 from road_follow.backup import near_lane_heading, near_lane_x
 from road_follow.control import FollowConfig, VelocityCommand, command_from_centerline, follow_config_from_mapping
@@ -35,7 +36,7 @@ class FollowDiagnostics:
 
 
 def make_ipm(cfg: dict, image_shape: tuple[int, ...]) -> Ipm:
-    """按 ``nav_camera.yaml`` 的外参做鸟瞰。内参缺省时用约 63.3° 水平视场。"""
+    """优先使用启动时已选手动标定，否则按原导航相机参数做鸟瞰。"""
     b = cfg.get("bev", {}) or {}
     bev = BevConfig(
         y_min=float(b.get("y_min", 0.20)),
@@ -44,6 +45,10 @@ def make_ipm(cfg: dict, image_shape: tuple[int, ...]) -> Ipm:
         x_max=float(b.get("x_max", 0.5)),
         m_per_px=float(b.get("m_per_px", 0.01)),
     )
+    active = runtime_activation()
+    if active is not None:
+        return activation_ipm(active, bev, (image_shape[1], image_shape[0]),
+                              (cfg.get("capture", {}) or {}).get("device"))
     cam_cfg = cfg.get("camera", {}) or {}
     height, width = image_shape[:2]
     fx = float(cam_cfg.get("fx", 0.5 * width / np.tan(np.deg2rad(63.3) / 2.0)))

@@ -7,8 +7,29 @@ from pathlib import Path
 import tempfile
 import threading
 
+from road_follow.obstacle_edge import OBSTACLE_DEFAULTS
+
 
 EDITABLE = {"face_threshold", "knife_threshold", "confirm_frames", "side_timeout_s", "roi"}
+OBSTACLE_EDITABLE = set(OBSTACLE_DEFAULTS)
+OBSTACLE_NAMES = {"edge_end_margin_m":"路段终点保留余量", "distance_bias_m":"投影距离修正",
+                  "max_distance_m":"最大判定距离", "max_lateral_m":"横向容差",
+                  "min_score":"障碍检测置信度", "min_bottom_ratio":"框底部最低位置",
+                  "confirm_frames":"障碍连续确认帧数"}
+
+
+def validate_obstacle(values):
+    if not isinstance(values, dict) or set(values) != OBSTACLE_EDITABLE:
+        raise ValueError("障碍参数字段不完整或包含未知项")
+    for key in ("edge_end_margin_m", "max_distance_m", "max_lateral_m"):
+        number(values[key], OBSTACLE_NAMES[key], 0 if key == "edge_end_margin_m" else .01, 5)
+    number(values["distance_bias_m"], OBSTACLE_NAMES["distance_bias_m"], -1, 1)
+    for key in ("min_score", "min_bottom_ratio"):
+        number(values[key], OBSTACLE_NAMES[key], 0, 1)
+    number(values["confirm_frames"], OBSTACLE_NAMES["confirm_frames"], 1, 100)
+    if not isinstance(values["confirm_frames"], int):
+        raise ValueError("障碍连续帧数必须是整数")
+    return values
 
 
 def number(value, name, minimum, maximum):
@@ -21,6 +42,8 @@ def number(value, name, minimum, maximum):
 def validate(config):
     if config.get("version") != 1:
         raise ValueError("不支持的侧视识别配置版本")
+    config["obstacle"] = {**OBSTACLE_DEFAULTS, **config.get("obstacle", {})}
+    validate_obstacle(config["obstacle"])
     rec = config["recognition"]
     number(rec["face_threshold"], "人脸阈值（服务身份门限为 0.45）", .45, 1)
     number(rec["knife_threshold"], "刀具阈值", 0, 1)
@@ -68,6 +91,37 @@ class Settings:
         self._lock = threading.RLock()
         self._config = validate(json.loads(self.path.read_text(encoding="utf-8")))
         self._revision = 0
+        self._obstacle_revision = 0
+
+    def obstacle_snapshot(self):
+        with self._lock:
+            return deepcopy(self._config["obstacle"]), self._obstacle_revision
+
+    def _store(self, candidate):
+        fd, temporary = tempfile.mkstemp(prefix=self.path.name+".", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(candidate, stream, ensure_ascii=False, indent=2, allow_nan=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        self._config = candidate
+
+    def update_obstacle(self, values):
+        if not isinstance(values, dict) or set(values)-OBSTACLE_EDITABLE:
+            raise ValueError("网页只允许修改已列出的障碍判定参数")
+        with self._lock:
+            candidate = deepcopy(self._config)
+            candidate["obstacle"].update(values)
+            validate_obstacle(candidate["obstacle"])
+            if candidate != self._config:
+                self._store(candidate)
+                self._obstacle_revision += 1
+            return deepcopy(self._config["obstacle"]), self._obstacle_revision
 
     def snapshot(self):
         with self._lock:
@@ -81,18 +135,7 @@ class Settings:
             candidate["recognition"].update(values)
             validate(candidate)
             if candidate != self._config:
-                fd, temporary = tempfile.mkstemp(prefix=self.path.name+".", suffix=".tmp", dir=self.path.parent)
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                        json.dump(candidate, stream, ensure_ascii=False, indent=2, allow_nan=False)
-                        stream.write("\n")
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(temporary, self.path)
-                finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
-                self._config = candidate
+                self._store(candidate)
                 self._revision += 1
             return deepcopy(self._config["recognition"]), self._revision
 

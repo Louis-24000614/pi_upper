@@ -107,6 +107,8 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(self.task.result["status"], "done")
         self.assertEqual([s["direction"] for s in self.task.result["sides"]], ["A", "B"])
         self.assertEqual(len(self.notifications), 2)
+        self.assertEqual([item["edge_id"] for item in self.notifications], [TARGET.edge_id] * 2)
+        self.assertNotIn("edge_id", self.task.result["sides"][0])
         self.assertFalse(self.task.result["speech_enabled"])
         self.task.start(10, TARGET)
         self.assertEqual(self.task.side, "B")
@@ -168,6 +170,20 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(self.task.result["status"], "partial")
         self.assertEqual(self.servo.angles, [180])
         self.assertTrue(all(s["status"] == "unconfirmed" for s in self.task.result["sides"]))
+
+    def test_speech_failure_does_not_fail_the_side_inspection(self):
+        from road_follow.speech import InspectionSpeech, SpeechConfig
+        speech = InspectionSpeech(SpeechConfig((1000,) * 32), lambda line: False,
+                                  lambda *args, **values: None, "task")
+        self.task.notify = speech.request
+        self.task.speech_enabled = True
+        self.confirm()
+        self.second_side()
+        self.assertEqual(self.confirm(6), "done")
+        self.assertIsNone(self.task.failure_reason)
+        self.assertTrue(self.task.result["speech_enabled"])
+        self.assertEqual(len(speech.requests), 2)
+        self.assertTrue(all(item["state"] == "submit_failed" for item in speech.requests.values()))
 
     def test_failed_servo_is_task_failure_not_unconfirmed(self):
         self.confirm()
@@ -247,6 +263,26 @@ class RecognizerTest(unittest.TestCase):
         self.assertTrue(result["accepted"])
         self.assertEqual(result["bbox"], [21, 22, 40, 50])
         self.assertEqual(self.request.call_count, 1)
+
+    def test_numeric_registered_ids_match_task_ids_without_changing_response(self):
+        for number in range(1, 11):
+            with self.subTest(number=number):
+                self.request.reset_mock()
+                response = {"results": [{"name": str(number), "score": .5, "bbox": [1, 2, 20, 30]}]}
+                self.request.return_value = response
+                result = self.service.recognize(self.frame, self.rec)
+                self.assertTrue(result["accepted"])
+                self.assertEqual(result["identity"], f"suspect_{number:02d}")
+                self.assertEqual(response["results"][0]["name"], str(number))
+                self.assertEqual(self.request.call_count, 1)
+
+    def test_numeric_aliases_keep_low_and_unknown_faces_rejected(self):
+        for label, score in [("1", .49), ("0", .9), ("11", .9), ("01", .9), (1, .9)]:
+            with self.subTest(label=label):
+                self.request.reset_mock()
+                self.request.return_value = {"results": [{"name": label, "score": score}]}
+                self.assertFalse(self.service.recognize(self.frame, self.rec)["accepted"])
+                self.assertEqual(self.request.call_count, 1)
 
     def test_unknown_or_low_face_never_falls_back_to_knife(self):
         for label, score in [("Unknown", .7), ("suspect_01", .49)]:
@@ -369,7 +405,7 @@ class ControllerIntegrationTest(unittest.TestCase):
                                     event=lambda *a, **k: None, records=records, executor=executor)
         control.begin(TARGET, 0, .5, .05)
         records.discover(TARGET)
-        control.phase, control.task_pose = "task", (.635, 0, 0)
+        control.phase = "task"
         history.add(KEY, 1, .635, .635, 0, 0)
         return control, records, history, sent
 
@@ -419,8 +455,8 @@ class ControllerIntegrationTest(unittest.TestCase):
             saved = json.loads(Path(str(prefix)+".culverts.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["culverts"][KEY[0]]["status"], "partial")
             svg = Path(str(prefix)+".culverts.svg").read_text(encoding="utf-8")
-            self.assertIn("knife_01", svg)
-            self.assertIn("unconfirmed", svg)
+            self.assertIn("刀具1号", svg)
+            self.assertIn("未确认", svg)
             self.assertFalse(records.graph.edges[KEY[0]].tunnel)
 
 

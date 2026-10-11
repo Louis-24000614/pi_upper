@@ -11,6 +11,7 @@
 #define UART_LINK_SESS_H_
 
 #include <cstdint>
+#include <deque>
 
 #include "link/clock.h"
 #include "link/port.h"
@@ -31,6 +32,17 @@ enum class MotionMode {
   kIdle,
   kVelocity,
   kAction,
+};
+
+enum class RequestCompletionCode { kAck, kTimeout, kLinkLost, kCancelled };
+
+/// Only emitted for a live request; cached telemetry ACKs are not completions.
+struct RequestCompletion {
+  uint64_t serial = 0;
+  uint32_t boot_id = 0;
+  MsgType request_type = MsgType::kHelloReq;
+  RequestCompletionCode code = RequestCompletionCode::kAck;
+  AckResult result = AckResult::kOk;
 };
 
 struct Telemetry {
@@ -110,9 +122,18 @@ class Session {
   bool RequestMotionAction(uint8_t action, uint8_t quarter_turns = 0, uint16_t speed_mmps = 0,
                            uint32_t distance_mm = 0);
 
-  /// 请求下位机通过 UART4 播放预录音频，当前 speech_id 为 1～12。
+  /// 请求下位机通过 UART4 播放预录音频，当前 speech_id 为 1～32。
   /// 该命令不要求运动处于 ARMED，但需要已经完成 HELLO 建链，并等待 ACK。
   bool RequestSpeech(uint8_t speech_id);
+
+  /// Capture the stopped MCU heading as its discrete action reference (0x15).
+  bool RequestHeadingReference();
+  bool supports_heading_reference() const;
+  bool speech_request_pending() const { return speech_pending_; }
+  bool speech_channel_blocked() const { return speech_blocked_; }
+  bool management_request_pending() const { return pending_request_type_ != 0; }
+  uint64_t last_request_serial() const { return request_serial_; }
+  bool PopRequestCompletion(RequestCompletion* out);
 
   void Shutdown();
 
@@ -124,7 +145,7 @@ class Session {
   const SessionConfig& config() const { return config_; }
   uint32_t boot_id() const { return boot_id_; }
   uint8_t peer_protocol_version() const { return peer_protocol_version_; }
-  bool request_pending() const { return pending_request_type_ != 0; }
+  bool request_pending() const { return pending_request_type_ != 0 || speech_pending_; }
 
   /// 最近一次 ARM_REQUEST 的 ACK 为 OK。
   bool config_valid() const { return config_valid_; }
@@ -145,6 +166,8 @@ class Session {
   void OnMotionResult(const uint8_t* payload, size_t len);
   bool SendRequest(MsgType type, const uint8_t* payload, size_t payload_len);
   void DropSession();
+  void CompleteManagement(RequestCompletionCode code, AckResult result = AckResult::kOk);
+  void CompleteSpeech(RequestCompletionCode code, AckResult result = AckResult::kOk);
   void PumpCommand(uint64_t now_ms);
   void SendCmdVel(float linear, float angular, uint64_t now_ms);
   void EnterIdleMotion();
@@ -170,6 +193,14 @@ class Session {
 
   uint8_t pending_request_type_ = 0;
   uint64_t pending_request_ms_ = 0;
+  uint64_t pending_request_serial_ = 0;
+  uint64_t request_serial_ = 0;
+  bool speech_pending_ = false;
+  bool speech_blocked_ = false;
+  bool heading_blocked_ = false;
+  uint64_t speech_request_ms_ = 0;
+  uint64_t speech_request_serial_ = 0;
+  std::deque<RequestCompletion> completions_;
 
   float target_linear_ = 0.0f;
   float target_angular_ = 0.0f;

@@ -1,0 +1,23 @@
+[Unit]
+Description=Pi Upper face recognition HTTP service
+After=local-fs.target network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/pi_upper
+Environment=HOME=/home/orangepi
+Environment=DB_PATH=/home/orangepi/pi_upper/vision/arcface-lite/face_db.npz
+Environment=FACE_THRESHOLD=0.45
+ExecStart=/home/orangepi/pi_upper/vision/arcface-lite/.venv/bin/python -u -B /home/orangepi/pi_upper/vision/arcface-lite/server.py --host 127.0.0.1 --port 20004
+ExecStartPost=/usr/bin/python3 -B /home/orangepi/pi_upper/tools/wait_inspection_health.py --service face --timeout 90
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=100
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

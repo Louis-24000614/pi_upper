@@ -45,7 +45,7 @@ const char* AckName(uart::AckResult result) {
 }
 
 void PrintUsage() {
-  std::cerr << "用法: uart_speak <1-12> [--device /dev/ttyS6] [--baud 921600]\n";
+  std::cerr << "用法: uart_speak <1-32> [--device /dev/ttyS6] [--baud 921600]\n";
 }
 
 }  // namespace
@@ -64,8 +64,8 @@ int main(int argc, char** argv) {
       baud = static_cast<unsigned>(std::stoul(argv[++i]));
     } else if (!arg.empty() && arg[0] != '-' && !have_id) {
       const unsigned value = static_cast<unsigned>(std::stoul(arg));
-      if (value < 1 || value > 12) {
-        std::cerr << "音频编号只能是 1 到 12\n";
+      if (value < 1 || value > 32) {
+        std::cerr << "音频编号只能是 1 到 32\n";
         return 2;
       }
       audio_id = static_cast<uint8_t>(value);
@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
   session.Start();
 
   bool sent = false;
-  uint32_t timeouts_before = 0;
+  uint64_t speech_serial = 0;
   const uint64_t t0 = clock.NowMs();
   int exit_code = 0;
 
@@ -106,35 +106,37 @@ int main(int argc, char** argv) {
     const uint64_t now = clock.NowMs();
 
     if (!sent && session.link_state() == uart::LinkState::kConnected && !session.request_pending()) {
-      timeouts_before = session.diagnostics().ack_timeouts;
       if (!session.RequestSpeech(audio_id)) {
         std::cerr << "语音指令被拒绝\n";
         exit_code = 1;
         break;
       }
       sent = true;
+      speech_serial = session.last_request_serial();
       std::cerr << "SPEAK " << static_cast<int>(audio_id) << "\n";
     }
 
-    if (sent && !session.request_pending()) {
-      const uart::Telemetry& telemetry = session.telemetry();
-      if (telemetry.has_ack &&
-          telemetry.last_ack.request_type == static_cast<uint8_t>(uart::MsgType::kSpeakAudio)) {
-        const uart::AckResult result = telemetry.last_ack.result;
+    uart::RequestCompletion completion;
+    bool finished = false;
+    while (session.PopRequestCompletion(&completion)) {
+      if (!sent || completion.serial != speech_serial ||
+          completion.request_type != uart::MsgType::kSpeakAudio) continue;
+      if (completion.code == uart::RequestCompletionCode::kAck) {
+        const uart::AckResult result = completion.result;
         if (result == uart::AckResult::kOk) {
           std::cout << "ACK_OK\n";
         } else {
           std::cerr << AckName(result) << "\n";
           exit_code = 1;
         }
-        break;
-      }
-      if (session.diagnostics().ack_timeouts > timeouts_before) {
-        std::cerr << "等待 ACK 超时\n";
+      } else {
+        std::cerr << (completion.code == uart::RequestCompletionCode::kTimeout
+                          ? "等待 ACK 超时\n" : "等待 ACK 时链路丢失\n");
         exit_code = 1;
-        break;
       }
+      finished = true;
     }
+    if (finished) break;
 
     if (!sent && now - t0 > 5000) {
       std::cerr << "等待建链超时\n";

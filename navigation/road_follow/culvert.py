@@ -17,7 +17,8 @@ class CulvertConfig:
     max_heading_rad: float = 0.10
     confirm_frames: int = 3
     position_spread_m: float = 0.05
-    max_frame_age_s: float = 0.20
+    # 兼容旧配置字段；导航帧龄上限已取消，不再读取此字段进行控制。
+    max_frame_age_s: float | None = None
     odom_timeout_s: float = 0.50
     stop_margin_m: float = 0.01
     stop_error_m: float = 0.05
@@ -41,6 +42,8 @@ class CulvertConfig:
         config = cls(**mapping)
         for name in allowed:
             value = getattr(config, name)
+            if name == "max_frame_age_s" and value is None:
+                continue
             if name == "entry_distance_bias_m":
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ValueError("涵洞参数 entry_distance_bias_m 必须是有限数")
@@ -157,7 +160,6 @@ class CulvertController:
         self.clear = 0
         self.last_reacquire_s = None
         self.fault_reason = None
-        self.task_pose = None
 
     @property
     def owns(self):
@@ -181,7 +183,7 @@ class CulvertController:
         self._transition("entering", now, target_s_m=target.target_s_m)
         return True
 
-    def fault(self, reason, now):
+    def fault(self, reason, now, **details):
         if self.phase != "fault":
             # STOP is allowed regardless of the former control mode.
             self.send("stop")
@@ -190,7 +192,7 @@ class CulvertController:
                 self.executor.cancel(reason)
             if self.target:
                 self.records.fail(self.target.edge_id, reason)
-            self._transition("fault", now, reason=reason)
+            self._transition("fault", now, reason=reason, **details)
 
     def cancel_for_obstacle(self, now):
         if hasattr(self.executor, "cancel"):
@@ -246,7 +248,6 @@ class CulvertController:
                 if not target.entrance_s_m < current_s < target.exit_s_m or abs(current_s - target.target_s_m) > cfg.stop_error_m:
                     self.fault("stop_position_error", now)
                 else:
-                    self.task_pose = self.history.samples[-1][2:5]
                     try:
                         self.executor.start(now, target)
                     except Exception as exc:
@@ -257,33 +258,27 @@ class CulvertController:
             elif now - self.stop_ack_s >= cfg.settle_timeout_s:
                 self.fault("settle_timeout", now)
         elif self.phase == "task":
-            x, y, yaw = self.history.samples[-1][2:5]
-            ox, oy, oyaw = self.task_pose
-            yaw_delta = math.atan2(math.sin(yaw - oyaw), math.cos(yaw - oyaw))
-            if math.hypot(x - ox, y - oy) > cfg.stable_position_m or abs(yaw_delta) > cfg.stable_yaw_rad:
-                self.fault("moved_during_task", now)
-            else:
-                try:
-                    result = self.executor.step(now)
-                except Exception as exc:
-                    self.event("culvert_task_error", error=str(exc))
-                    result = "failed"
-                if result == "failed":
-                    self.fault("task_failed", now)
-                elif result == "done":
-                    if abs(current_s - target.target_s_m) > cfg.stop_error_m:
-                        self.fault("stop_position_error", now)
+            try:
+                result = self.executor.step(now)
+            except Exception as exc:
+                self.event("culvert_task_error", error=str(exc))
+                result = "failed"
+            if result == "failed":
+                self.fault("task_failed", now)
+            elif result == "done":
+                if abs(current_s - target.target_s_m) > cfg.stop_error_m:
+                    self.fault("stop_position_error", now)
+                else:
+                    inspection = getattr(self.executor, "result", None)
+                    if inspection is not None:
+                        self.records.complete_inspection(target.edge_id, current_s-target.target_s_m, inspection)
                     else:
-                        inspection = getattr(self.executor, "result", None)
-                        if inspection is not None:
-                            self.records.complete_inspection(target.edge_id, current_s-target.target_s_m, inspection)
-                        else:
-                            self.records.complete(target.edge_id, current_s-target.target_s_m)
-                        self.deadline_s = now + cfg.reacquire_timeout_s
-                        self.last_reacquire_s = frame_s
-                        self._transition("reacquire", now)
-                elif result != "running":
-                    self.fault("invalid_task_result", now)
+                        self.records.complete(target.edge_id, current_s-target.target_s_m)
+                    self.deadline_s = now + cfg.reacquire_timeout_s
+                    self.last_reacquire_s = frame_s
+                    self._transition("reacquire", now)
+            elif result != "running":
+                self.fault("invalid_task_result", now)
         elif self.phase == "reacquire":
             if frame_s is not None and (self.last_reacquire_s is None or frame_s > self.last_reacquire_s):
                 self.last_reacquire_s = frame_s

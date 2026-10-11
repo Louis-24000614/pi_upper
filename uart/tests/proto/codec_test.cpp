@@ -99,6 +99,15 @@ void TestSpeakAudioLayout() {
   SpeakAudio back;
   CHECK(DecodeSpeakAudio(buf, sizeof(buf), &back));
   CHECK(back.audio_id == 8);
+  for (uint8_t id : {uint8_t(12), uint8_t(13), uint8_t(22), uint8_t(23), uint8_t(32)}) {
+    msg.audio_id = id;
+    CHECK(EncodeSpeakAudio(msg, buf, sizeof(buf)) == 1);
+    CHECK(DecodeSpeakAudio(buf, sizeof(buf), &back) && back.audio_id == id);
+  }
+  msg.audio_id = 33;
+  buf[0] = 33;
+  CHECK(EncodeSpeakAudio(msg, buf, sizeof(buf)) == 0);
+  CHECK(!DecodeSpeakAudio(buf, sizeof(buf), &back));
   msg.audio_id = 0;
   buf[0] = 0;
   CHECK(EncodeSpeakAudio(msg, buf, sizeof(buf)) == 0);

@@ -14,6 +14,6 @@ foreach(unit crc8 frame codec)
   uart_add_test(proto ${unit} uart_proto)
 endforeach()
 
-foreach(unit port sess)
+foreach(unit port sess speech_queue)
   uart_add_test(link ${unit} uart_link)
 endforeach()

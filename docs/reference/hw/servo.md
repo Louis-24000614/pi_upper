@@ -33,6 +33,28 @@ PWM2_M1/PWM6_M0；未找到可用的 PWM14_M0 芯片。配置保留的 pwmchip2 
 
 运行用户需要对 sysfs 节点有写权限。驱动配置极性为 `normal`。
 
+2026-10-09 在 10.211.30.33 上已核实：`pwm14-m0` overlay 生效，
+`pwmchip2` 对应 `febf0020.pwm`，live DT 指向 `pwm14m0-pins`，引脚为 `GPIO3_C2`。
+用户已现场确认 500000 ns / 2500000 ns 两端正常且安全；周期为 20000000 ns。
+侧视是 60 fps 的 RYS USB Camera，使用 by-id 的 video-index0 固定链接（当前 `/dev/video0`）；
+导航 `/dev/nav_camera` 指向 DHZJ Camera（当前 `/dev/video2`）。当前板配置使用
+`build-turn/servo/servo_cli`，支持 `--stdin`；仅编译舵机目标，不重建 UART。
+
+新导出通道的 period=0 时，内核拒绝先写 enable=0；驱动现先建立有效周期再配置。
+现使用 pi-upper-pwm-prepare.service 在开机后核对 live DT 的 PWM14_M0 phandle，
+找到唯一对应芯片；缺少通道时导出通道 0，再把 period、duty_cycle、polarity、enable
+四个节点的所有者设置为 orangepi（0644）。不更改 export/unexport 的权限，不给其他
+芯片授权，不写周期、极性、脉宽或 enable，不启用舵机。错误或歧义路由会失败并记日志。
+
+核对后建立 /run/pi-upper-pwm14m0 固定链接，config/servo.yaml 使用该路径；目前指向
+pwmchip2/febf0020.pwm，重启时重新查找，不按编号猜测。没有修改系统 overlay。
+根权限脚本的安装副本为 /usr/local/lib/pi-upper/prepare_pwm14m0.py，root 所有；仓库
+脚本修改后须重新运行安装器以更新副本。系统重启后自动恢复四个节点的写权限。
+
+安装方法与诊断见 [识别服务开机启动](../perception/culvert-inspection.md#开机自启动)。
+正式识别启动时仍会设置初始端点，实际机械到位由现场观察确认；开机准备服务不启动导航。
+
+
 ## 角度与脉宽
 
 周期 20 ms（50 Hz）。默认线性映射，可在 YAML 里改端点：

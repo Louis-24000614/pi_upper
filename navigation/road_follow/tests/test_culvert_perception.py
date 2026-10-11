@@ -79,10 +79,10 @@ class CulvertPerceptionTest(unittest.TestCase):
         self.assertEqual(self.observe(.8,signature=123).reason,"duplicate_image")
         self.assertEqual(len(self.perception.positions),1)
 
-    def test_expired_result_after_yolo_does_not_add_votes(self):
+    def test_slow_result_after_yolo_adds_vote_with_aligned_odom(self):
         self.observe(.7)
-        self.assertEqual(self.observe(.8,now=1.01).reason,"stale_frame")
-        self.assertEqual(len(self.perception.positions),0)
+        self.assertEqual(self.observe(.8,now=1.01).reason,"tracking")
+        self.assertEqual(len(self.perception.positions),2)
 
     def test_no_timestamp_bracket_is_not_extrapolated(self):
         self.history.reset((self.edge.id,"a","b"))

@@ -147,7 +147,7 @@ class LatestSegmentStream(OrderedSegmentStream):
                for sequence, source in self._inflight.values()):
             return None
         # 结果端仍受每个 context 一份结果的背压约束，排序不能引入无界缓存。
-        # 等待会增加帧龄；原入口在消费前继续执行 200ms 过期检查，过期不更新导航。
+        # 等待可能增加帧龄；导航没有固定帧龄上限，代际和结果顺序检查仍保留。
         return index
 
     def read(self, capture, on_capture=None):

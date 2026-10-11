@@ -20,8 +20,8 @@ from agent.route_agent import RouteAgent
 class ArrivalPolicyTest(unittest.TestCase):
     def setUp(self):
         self.graph = load_topology()
-        self.cfg = JunctionTurnConfig(branch_observe_min_distance_m=0.18)
-        self.patrol_cfg = RfidArrivalConfig()
+        self.cfg = JunctionTurnConfig(heading_anchor_enabled=False, branch_observe_min_distance_m=0.18)
+        self.patrol_cfg = RfidArrivalConfig(heading_anchor_enabled=False)
         self.state = JunctionTurn()
         self.patrol_state = RfidArrival()
         self.notes = queue.Queue()

@@ -162,6 +162,9 @@ class Recognizer:
                 raise ValueError("人脸结果格式无效")
             candidate = max(faces, key=lambda f: float(f.get("score", -1)))
             label, score = candidate.get("name"), candidate.get("score")
+            # 既有人脸库使用 "1"～"10"；任务记录统一使用 suspect_01～suspect_10。
+            if isinstance(label, str) and label in {str(n) for n in range(1, 11)}:
+                label = f"suspect_{int(label):02d}"
             if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
                 score = None
             valid = len(faces) == 1 and isinstance(label, str) and label.startswith("suspect_") and label in {f"suspect_{n:02d}" for n in range(1, 11)}

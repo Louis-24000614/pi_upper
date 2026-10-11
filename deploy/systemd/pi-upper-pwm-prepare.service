@@ -1,0 +1,16 @@
+[Unit]
+Description=Prepare verified PWM14_M0 channel and orangepi write permissions
+After=local-fs.target systemd-udev-trigger.service
+StartLimitIntervalSec=120
+StartLimitBurst=12
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /usr/local/lib/pi-upper/prepare_pwm14m0.py
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target
