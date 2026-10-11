@@ -61,15 +61,15 @@ class ArrivalPolicyTest(unittest.TestCase):
     def test_directed_override_and_map_side_rotate_with_incoming_edge(self):
         incoming = self.policy()
         self.assertEqual(incoming.mode, "visual_odom")
-        self.assertEqual(incoming.handoff_progress_m, 0.55)
-        self.assertAlmostEqual(incoming.final_forward_m, 0.42)
+        self.assertEqual(incoming.handoff_progress_m, 0.57)
+        self.assertAlmostEqual(incoming.final_forward_m, 0.40)
         self.assertEqual(incoming.guard_progress_m, 0.92)
         self.assertEqual(incoming.align_timeout_s, 3.0)
         self.assertEqual(incoming.align_stable_frames, 8)
         self.assertEqual(incoming.expected_openings, ("forward", "left", "right"))
         reverse = self.policy("2_2", "1_2", 0.97)
         self.assertEqual(reverse.mode, "visual_end")
-        self.assertAlmostEqual(reverse.final_forward_m, 0.42)
+        self.assertAlmostEqual(reverse.final_forward_m, 0.40)
         self.assertAlmostEqual(reverse.guard_progress_m, 0.92)
         self.assertEqual(reverse.align_timeout_s, 3.0)
         self.assertEqual(reverse.expected_openings, ("right",))
@@ -93,8 +93,8 @@ class ArrivalPolicyTest(unittest.TestCase):
         through = self.policy("2_1", "3_1", 0.97)
         self.assertEqual(through.mode, "visual_odom")
         self.assertEqual(through.expected_openings, ("forward", "left"))
-        self.assertAlmostEqual(through.handoff_progress_m, 0.55)
-        self.assertAlmostEqual(through.final_forward_m, 0.42)
+        self.assertAlmostEqual(through.handoff_progress_m, 0.57)
+        self.assertAlmostEqual(through.final_forward_m, 0.40)
         self.assertAlmostEqual(through.guard_progress_m, 0.92)
         self.assertEqual(through.align_stable_frames, 8)
         dead_end = self.policy("3_2", "3_1", 1.0)
@@ -104,7 +104,7 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.graph.arrival_overrides[("2_1", "3_1")] = ArrivalSettings(mode="visual_end")
         self.assertEqual(self.policy("2_1", "3_1", 1.0).mode, "visual_end")
 
-    def test_every_standard_grid_edge_uses_55cm_handoff(self):
+    def test_every_standard_grid_edge_uses_57cm_handoff(self):
         for edge in self.graph.edges.values():
             if abs(edge.length_m - 0.97) > 1e-6:
                 continue
@@ -114,8 +114,9 @@ class ArrivalPolicyTest(unittest.TestCase):
             for source, target in directions:
                 with self.subTest(edge=edge.id, source=source, target=target):
                     policy = self.policy(source, target, edge.length_m)
-                    self.assertAlmostEqual(policy.handoff_progress_m, 0.55)
-                    self.assertAlmostEqual(policy.final_forward_m, 0.42)
+                    self.assertAlmostEqual(policy.handoff_progress_m, 0.57)
+                    self.assertAlmostEqual(policy.final_forward_m, 0.40)
+                    self.assertAlmostEqual(policy.edge_length_m, 0.97)
 
     def test_through_patrol_hands_off_at_edge_length_while_the_band_stays_high(self):
         policy = self.policy("2_1", "3_1", 0.97)
@@ -188,24 +189,24 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertEqual(trigger, "")
         self.assertLess(cmd.omega_radps, 0.0)
 
-    def test_corner_switches_from_visual_to_imu_at_55cm(self):
+    def test_corner_switches_from_visual_to_imu_at_57cm(self):
         policy = self.policy("2_2", "2_1", 0.97)
         cmd, trigger = self.step(
-            policy, 0.54, patrol=True, yaw_rad=0.40,
+            policy, 0.56, patrol=True, yaw_rad=0.40,
             lane_heading_rad=0.03,
         )
         self.assertEqual((self.patrol_state.phase, cmd.reason), ("follow", "follow"))
         self.assertEqual(trigger, "")
 
         cmd, trigger = self.step(
-            policy, 0.55, patrol=True, yaw_rad=0.40,
+            policy, 0.57, patrol=True, yaw_rad=0.40,
             lane_heading_rad=0.03,
         )
         self.assertEqual((self.patrol_state.phase, cmd.reason), ("heading_hold", "heading_hold"))
         self.assertEqual(trigger, "early_imu")
-        self.assertAlmostEqual(self.patrol_state.hold_start_m, 0.55)
+        self.assertAlmostEqual(self.patrol_state.hold_start_m, 0.57)
         self.assertAlmostEqual(self.patrol_state.hold_yaw_rad, 0.43)
-        self.assertEqual(self.patrol_state.active_step_mm, 420)
+        self.assertEqual(self.patrol_state.active_step_mm, 400)
 
         self.step(policy, 0.96, patrol=True, yaw_rad=0.43)
         self.assertEqual(self.patrol_state.phase, "heading_hold")
@@ -217,21 +218,21 @@ class ArrivalPolicyTest(unittest.TestCase):
         for _ in range(2):
             self.step(policy, 0.50)
         self.assertTrue(self.state.branch_latched)
-        self.step(policy, 0.55)
+        self.step(policy, 0.57)
         self.assertEqual(self.sent, [])
-        cmd, trigger = self.step(policy, 0.55)
+        cmd, trigger = self.step(policy, 0.57)
         self.assertEqual(self.sent, [])
         self.assertEqual(trigger, "odom_handoff")
         self.assertEqual(self.state.phase, "heading_hold")
-        self.assertEqual(self.state.hold_start_m, 0.55)
+        self.assertEqual(self.state.hold_start_m, 0.57)
         cmd, _ = self.step(policy, 0.90, command=VelocityCommand(0.08, 0.4, "follow"))
         self.assertEqual(self.state.phase, "heading_hold")
         self.assertEqual(cmd.omega_radps, 0.0)
-        self.assertEqual(self.state.hold_start_m, 0.55)
+        self.assertEqual(self.state.hold_start_m, 0.57)
         cmd, _ = self.step(policy, 0.90, odom_valid=False)
         self.assertEqual(self.state.phase, "heading_hold")
         self.assertEqual(cmd.reason, "stop_odom_stale")
-        self.assertEqual(self.state.hold_start_m, 0.55)
+        self.assertEqual(self.state.hold_start_m, 0.57)
         self.step(policy, 0.97)
         self.assertEqual(self.state.phase, "arrived")
 

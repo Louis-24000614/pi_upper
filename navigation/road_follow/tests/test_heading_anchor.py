@@ -234,7 +234,12 @@ class LegacyHeadingCompatibilityTest(unittest.TestCase):
                 self.assertAlmostEqual(active.hold_start_m, policy.handoff_progress_m)
                 self.assertLess(step(1.2, yaw=2.4).omega_radps, 0)
                 self.assertEqual(sent, [])
-                command = step(1.3, progress=policy.handoff_progress_m + policy.final_forward_m)
+                completion_m = (
+                    policy.edge_length_m
+                    if patrol and policy.imu_full_edge
+                    else policy.handoff_progress_m + policy.final_forward_m
+                )
+                command = step(1.3, progress=completion_m)
                 self.assertEqual(active.phase, "arrived")
                 self.assertEqual(command.v_mps, 0)
                 self.assertEqual(sent, [])
