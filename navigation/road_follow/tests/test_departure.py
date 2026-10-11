@@ -20,6 +20,11 @@ NODES = {
     "3_3": (2.00, 2.00),
     "2_2": (1.20, 2.80),
     "4_2": (1.20, 1.20),
+    "3_4": (2.80, 2.00),
+    "4_4": (2.80, 1.20),
+    "4_3": (2.00, 1.20),
+    "4_5": (3.60, 1.20),
+    "5_4": (2.80, 0.40),
 }
 
 
@@ -146,6 +151,59 @@ class DepartureTest(unittest.TestCase):
         self.assertEqual(state.phase, "stopping")
         self.assertEqual(state.departure, "backup")
         self.assertEqual(sent, ["stop"])
+
+    def test_reverse_arrival_uses_heading_instead_of_travel_direction(self) -> None:
+        for target, expected in (("4_3", "left"), ("4_5", "right"), ("3_4", "straight")):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    departure_maneuver(
+                        NODES, "3_4", "4_4", target, reverse_arrival=True
+                    ),
+                    expected,
+                )
+
+    def test_reverse_arrival_does_not_start_another_backup_from_zero_progress(self) -> None:
+        with self.assertRaisesRegex(ValueError, "仍朝车尾"):
+            departure_maneuver(
+                NODES, "3_4", "4_4", "5_4", reverse_arrival=True
+            )
+
+    def test_reverse_arrival_faults_on_invalid_route_geometry(self) -> None:
+        for target, nodes in (
+            ("missing", NODES),
+            ("4_3", NODES | {"3_4": NODES["4_4"]}),
+            ("4_3", NODES | {"4_3": NODES["4_4"]}),
+            ("5_4", NODES),
+        ):
+            with self.subTest(target=target, nodes=nodes):
+                agent = SimpleNamespace(
+                    state=SimpleNamespace(from_node="3_4", to_node="4_4"),
+                    node_reached=lambda node_id: FollowEdge("next", node_id, target),
+                )
+                sent = []
+                state = handoff_arrival(
+                    JunctionTurn(phase="arrived"), agent, nodes,
+                    lambda line: sent.append(line) or True, reverse_arrival=True,
+                )
+                self.assertEqual(state.phase, "fault")
+                self.assertEqual(state.departure, "none")
+                self.assertEqual(sent, [])
+
+    def test_reverse_arrival_without_expected_nodes_does_not_advance_agent(self) -> None:
+        from unittest.mock import Mock
+
+        for from_node, to_node in ((None, "4_4"), ("3_4", None)):
+            with self.subTest(from_node=from_node, to_node=to_node):
+                agent = SimpleNamespace(
+                    state=SimpleNamespace(from_node=from_node, to_node=to_node),
+                    node_reached=Mock(),
+                )
+                state = handoff_arrival(
+                    JunctionTurn(phase="arrived"), agent, NODES,
+                    lambda line: True, reverse_arrival=True,
+                )
+                self.assertEqual(state.phase, "fault")
+                agent.node_reached.assert_not_called()
 
     def test_mission_complete_does_not_turn(self) -> None:
         sent: list[str] = []

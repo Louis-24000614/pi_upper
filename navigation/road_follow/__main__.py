@@ -847,25 +847,31 @@ def _run(args, parser) -> int:
                             _event("倒车", "失败：车辆已经位于路段入口")
                         else:
                             finished_at = route_agent.state.to_node if route_agent is not None else None
-                            finished = (
-                                route_agent.node_reached(finished_at)
-                                if route_agent is not None and finished_at
-                                else None
-                            )
                             progress.reset()
                             backup = Backup()
-                            if type(finished).__name__ == "Stop":
+                            if route_agent is None:
                                 junction_turn.phase = "fault"
                                 junction_turn.departure = "none"
-                                command = VelocityCommand(0.0, 0.0, "stop_action_fail")
                             else:
-                                junction_turn.phase = "follow"
-                                junction_turn.suppress_cue = True
-                                junction_turn.departure = "none"
-                                command = visual_command
+                                # 倒车未掉头：按反向入边对应的车头方向交接，
+                                # 仍须停车、停稳、转向并重新识路后才能正向循迹。
+                                junction_turn.phase = "arrived"
+                                junction_turn = handoff_arrival(
+                                    junction_turn,
+                                    route_agent,
+                                    node_xy,
+                                    lambda line: write_velocity(bridge, line),
+                                    junction_turn_cfg.stop_settle_s,
+                                    reverse_arrival=True,
+                                )
+                            command = _velocity_for_departure(
+                                junction_turn, visual_command
+                            )
                             _event(
                                 "倒车",
-                                f"完成；下一动作={type(finished).__name__ if finished else '无'}",
+                                f"完成；到达={finished_at or '未知'}；"
+                                f"下一出发={DIRECTION_NAMES.get(junction_turn.departure, junction_turn.departure)}；"
+                                f"状态={_phase_name(junction_turn.phase)}",
                             )
                 if previous_phase != "follow" and junction_turn.phase == "follow":
                     progress.reset()
