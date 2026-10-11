@@ -69,7 +69,7 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertEqual(incoming.expected_openings, ("forward", "left", "right"))
         reverse = self.policy("2_2", "1_2", 0.97)
         self.assertEqual(reverse.mode, "visual_end")
-        self.assertAlmostEqual(reverse.final_forward_m, 0.17)
+        self.assertAlmostEqual(reverse.final_forward_m, 0.47)
         self.assertAlmostEqual(reverse.guard_progress_m, 0.92)
         self.assertEqual(reverse.align_timeout_s, 3.0)
         self.assertEqual(reverse.expected_openings, ("right",))
@@ -93,8 +93,8 @@ class ArrivalPolicyTest(unittest.TestCase):
         through = self.policy("2_1", "3_1", 0.97)
         self.assertEqual(through.mode, "visual_odom")
         self.assertEqual(through.expected_openings, ("forward", "left"))
-        self.assertAlmostEqual(through.handoff_progress_m, 0.80)
-        self.assertAlmostEqual(through.final_forward_m, 0.17)
+        self.assertAlmostEqual(through.handoff_progress_m, 0.50)
+        self.assertAlmostEqual(through.final_forward_m, 0.47)
         self.assertAlmostEqual(through.guard_progress_m, 0.92)
         self.assertEqual(through.align_stable_frames, 8)
         dead_end = self.policy("3_2", "3_1", 1.0)
@@ -103,6 +103,19 @@ class ArrivalPolicyTest(unittest.TestCase):
 
         self.graph.arrival_overrides[("2_1", "3_1")] = ArrivalSettings(mode="visual_end")
         self.assertEqual(self.policy("2_1", "3_1", 1.0).mode, "visual_end")
+
+    def test_every_standard_grid_edge_uses_half_meter_handoff(self):
+        for edge in self.graph.edges.values():
+            if abs(edge.length_m - 0.97) > 1e-6:
+                continue
+            directions = [(edge.u, edge.v)]
+            if edge.bidirectional:
+                directions.append((edge.v, edge.u))
+            for source, target in directions:
+                with self.subTest(edge=edge.id, source=source, target=target):
+                    policy = self.policy(source, target, edge.length_m)
+                    self.assertAlmostEqual(policy.handoff_progress_m, 0.50)
+                    self.assertAlmostEqual(policy.final_forward_m, 0.47)
 
     def test_through_patrol_hands_off_at_edge_length_while_the_band_stays_high(self):
         policy = self.policy("2_1", "3_1", 0.97)

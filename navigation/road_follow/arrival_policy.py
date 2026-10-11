@@ -19,10 +19,11 @@ if TYPE_CHECKING:
     from road_follow.rfid_arrival import RfidArrivalConfig
 
 
-# 格网边视觉仍交接到 0.80 m，摆正更久后再走剩余 0.17 m。短边不使用这组数。
+# 标准 0.97 m 格网边统一在 0.50 m 交接，锁住航向后按剩余里程走约 0.47 m。
+# 短边不使用这组数。
 _GRID_LENGTH_M = 0.97
-_GRID_HANDOFF_M = 0.80
-_GRID_FINAL_M = 0.17
+_GRID_HANDOFF_M = 0.50
+_GRID_FINAL_M = 0.47
 _GRID_ALIGN_TIMEOUT_S = 3.0
 _GRID_ALIGN_STABLE_FRAMES = 8
 _IMU_FULL_EDGES = frozenset({("0_J", "1_2")})
