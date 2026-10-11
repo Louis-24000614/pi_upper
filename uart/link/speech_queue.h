@@ -14,8 +14,8 @@ struct SpeechItem {
   uint8_t audio_id = 0;
 };
 
-/// ACK releases a request, while measured track duration releases the speaker.
-/// Without a complete duration table only the existing UID path is available.
+/// UID and inspection requests share a FIFO; ACK releases the next request.
+/// Legacy duration settings are accepted but do not delay speech.
 class SpeechQueue {
  public:
   static constexpr size_t kCapacity = 64;
@@ -37,7 +37,6 @@ class SpeechQueue {
             (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == ':'))
         return reject("bad_event_id");
     }
-    if (item.audio_id > 12 && !durations_ready()) return reject("duration_unconfigured");
     if (queue_.size() + (inflight_ ? 1U : 0U) >= kCapacity) return reject("queue_full");
     if (inflight_ && current_.event_id == item.event_id) return reject("duplicate_event");
     for (const auto& pending : queue_)
@@ -45,15 +44,14 @@ class SpeechQueue {
     queue_.push_back(item);
     return true;
   }
-  const SpeechItem* Next(uint64_t now_ms) const {
-    if (inflight_ || queue_.empty() || now_ms < occupied_until_ms_) return nullptr;
+  const SpeechItem* Next(uint64_t /*now_ms*/) const {
+    if (inflight_ || queue_.empty()) return nullptr;
     return &queue_.front();
   }
-  void MarkSent(uint64_t now_ms) {
+  void MarkSent(uint64_t /*now_ms*/) {
     current_ = queue_.front();
     queue_.pop_front();
     inflight_ = true;
-    occupied_until_ms_ = durations_ready() ? now_ms + durations_[current_.audio_id - 1] : now_ms;
   }
   bool Finish(SpeechItem* out) {
     if (!inflight_) return false;
@@ -75,7 +73,6 @@ class SpeechQueue {
   std::deque<SpeechItem> queue_;
   SpeechItem current_;
   bool inflight_ = false;
-  uint64_t occupied_until_ms_ = 0;
 };
 
 }  // namespace uart

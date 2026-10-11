@@ -79,7 +79,6 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.assertEqual(self.graph.blocked,set())
 
     def test_runtime_binds_confirmed_speech_callback_and_handles_its_own_receipt(self):
-        from road_follow.speech import SpeechConfig
         executor = NS(web=None, close=lambda: None)
         prefix = Path(self.folder.name)/"speech_binding"
         with patch("road_follow.inspection.create_inspection", return_value=executor) as factory:
@@ -87,8 +86,7 @@ class CulvertRuntimeTest(unittest.TestCase):
                 self.mapping, self.runtime.config, self.runtime.calibration,
                 nav_config=self.runtime.nav_config, agent=self.agent,
                 send=lambda line: self.sent.append(line) or True, event=lambda *_: None,
-                root=ROOT, prefix=prefix, inspection_settings=NS(),
-                speech_config=SpeechConfig((1000,) * 32))
+                root=ROOT, prefix=prefix, inspection_settings=NS())
         self.addCleanup(runtime.close)
         callback = factory.call_args.kwargs["notify"]
         self.assertTrue(factory.call_args.kwargs["speech_enabled"])

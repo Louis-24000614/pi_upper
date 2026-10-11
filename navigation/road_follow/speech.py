@@ -12,6 +12,7 @@ _KINDS = {"SPEECH_QUEUED", "SPEECH_REJECT", "SPEECH_SENT", "SPEECH_RESULT"}
 
 @dataclass(frozen=True)
 class SpeechConfig:
+    """兼容原有时长配置；播报不依赖时长，也不等待播放结束。"""
     durations_ms: tuple = (None,) * 32
 
     def __post_init__(self):
@@ -41,11 +42,7 @@ class SpeechConfig:
         return not self.missing_ids
 
     def bridge_args(self):
-        # 部分表不改变原 UID 流程；完整表才切入统一、按实际时长排程的模式。
-        if not self.ready:
-            return []
-        return [arg for n, ms in enumerate(self.durations_ms, 1)
-                for arg in ("--speech-hold-ms", f"{n}:{ms}")]
+        return []
 
 
 def inspection_audio_id(record):
@@ -87,7 +84,7 @@ class InspectionSpeech:
 
     @property
     def enabled(self):
-        return self.config.ready
+        return True
 
     def request(self, record):
         if not isinstance(record, dict) or record.get("status") != "confirmed":
@@ -105,10 +102,6 @@ class InspectionSpeech:
         event_id = "inspect-" + hashlib.sha256(token).hexdigest()
         details = {"event_id": event_id, "audio_id": audio_id, "session_id": self.session_id,
                    "edge_id": edge_id, "side": side, "identity": record["identity"]}
-        if not self.enabled:
-            self.event("inspection_speech", **details, state="blocked", reason="missing_durations",
-                       missing_ids=list(self.config.missing_ids))
-            return False
         self.requests[event_id] = {**details, "state": "submitted"}
         try:
             submitted = self.send(f"speech {event_id} {audio_id}")

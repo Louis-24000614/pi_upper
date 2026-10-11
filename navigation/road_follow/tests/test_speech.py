@@ -24,21 +24,19 @@ class SpeechConfigTest(unittest.TestCase):
         path.write_text(json.dumps({"version": 1, "durations_ms": values}), encoding="utf-8")
         return path
 
-    def test_delivery_config_has_no_guessed_durations_and_keeps_legacy_uid_args(self):
+    def test_delivery_config_does_not_add_playback_wait_arguments(self):
         config = SpeechConfig.load(ROOT / "config/speech.json")
         self.assertFalse(config.ready)
         self.assertEqual(config.missing_ids, tuple(range(1, 33)))
         self.assertEqual(config.bridge_args(), [])
 
-    def test_complete_measured_table_generates_each_bridge_argument(self):
+    def test_complete_table_does_not_add_playback_wait_arguments(self):
         values = {str(n): 1000 + n for n in range(1, 33)}
         config = SpeechConfig.load(self.config_file(values))
         self.assertTrue(config.ready)
-        self.assertEqual(config.bridge_args()[:4], ["--speech-hold-ms", "1:1001", "--speech-hold-ms", "2:1002"])
-        self.assertEqual(config.bridge_args()[-2:], ["--speech-hold-ms", "32:1032"])
-        self.assertEqual(len(config.bridge_args()), 64)
+        self.assertEqual(config.bridge_args(), [])
 
-    def test_partial_table_cannot_enable_recognition_or_change_uid_mode(self):
+    def test_partial_table_does_not_add_playback_wait_arguments(self):
         values = {str(n): 1000 for n in range(1, 33)}
         values["8"] = None
         config = SpeechConfig.load(self.config_file(values))
@@ -62,7 +60,7 @@ class InspectionSpeechTest(unittest.TestCase):
         self.speech = self.make_speech("task-one")
 
     def make_speech(self, session, config=None, sender=None):
-        return InspectionSpeech(config or SpeechConfig((1000,) * 32),
+        return InspectionSpeech(config or SpeechConfig(),
                                 sender or (lambda line: self.sent.append(line) or True),
                                 lambda kind, **values: self.events.append({"event": kind, **values}),
                                 session)
@@ -96,14 +94,19 @@ class InspectionSpeechTest(unittest.TestCase):
         self.assertNotEqual(self.event_id(), first_id)
         self.assertTrue(all(line.startswith("speech inspect-") for line in self.sent))
 
-    def test_missing_durations_are_explicit_and_do_not_submit_or_retry(self):
-        blocked = self.make_speech("task-missing", SpeechConfig())
-        self.assertFalse(blocked.request(record()))
-        self.assertFalse(blocked.request(record()))
-        self.assertEqual(self.sent, [])
-        self.assertEqual(len(self.events), 1)
-        self.assertEqual(self.events[0]["reason"], "missing_durations")
-        self.assertEqual(self.events[0]["missing_ids"], list(range(1, 33)))
+    def test_missing_or_partial_durations_allow_all_confirmed_identities(self):
+        for values in ((None,) * 32, (1000,) + (None,) * 31):
+            self.sent.clear()
+            self.events.clear()
+            speech = self.make_speech("task-missing", SpeechConfig(values))
+            self.assertTrue(speech.enabled)
+            for kind in ("suspect", "knife"):
+                for number in range(1, 11):
+                    item = record(kind, number, edge=f"{kind}_{number}")
+                    self.assertTrue(speech.request(item))
+                    self.assertFalse(speech.request(item))
+            self.assertEqual([int(line.split()[-1]) for line in self.sent], list(range(13, 33)))
+            self.assertTrue(all(event["state"] == "submitted" for event in self.events))
 
     def test_bridge_acceptance_is_not_playback_completion(self):
         self.speech.request(record())

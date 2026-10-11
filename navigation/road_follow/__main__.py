@@ -453,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--culvert-inspect", action="store_true", help="显式启用涵洞两侧识别和 PWM；替换 5 秒占位任务")
     parser.add_argument("--inspection-config", type=Path, default=ROOT / "config" / "culvert_inspection.json")
     parser.add_argument("--speech-config", type=Path, default=ROOT / "config" / "speech.json",
-                        help="32 条音轨的已测占音时长；缺项时阻止新识别播报")
+                        help="兼容原有语音配置；时长缺项不阻止播报，也不按时长等待")
     parser.add_argument("--inspection-web", action="store_true", help="导航期间推流侧视相机并允许网页持久化调参")
     parser.add_argument("--uart-bin", type=Path, default=None)
     parser.add_argument("--frames", type=int, default=0, help="跑满 N 帧后退出；0 表示一直跑")
@@ -593,8 +593,6 @@ def _run(args, parser) -> int:
     if turn_side is not None:
         _event("航向校正", "已启用路口参考同步，旧固件将拒绝启动" if anchor_enabled
                else "未启用中途参考校正，沿用原路口流程，不更新下位机动作航向参考")
-    if args.culvert_inspect and not speech_config.ready:
-        _event("播报", f"识别播报已阻止：缺少已测音轨时长 {','.join(map(str, speech_config.missing_ids))}；UID 原流程保留")
     capture_cfg = cfg.get("capture", {}) or {}
     uart_cfg = cfg.get("uart", {}) or {}
     device = str(capture_cfg.get("device", "/dev/video0"))
