@@ -24,3 +24,6 @@ models/knife/*
 # Road-seg collection for YOLO-seg training (see data/road/README.md)
 data/road/*
 !data/road/README.md
+
+# 本机的代理协作约定不属于部署资产，避免被快照意外提交。
+AGENTS.md
