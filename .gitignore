@@ -19,3 +19,5 @@ models/knife/*
 # Road-seg collection for YOLO-seg training (see data/road/README.md)
 data/road/*
 !data/road/README.md
+
+AGENTS.md

@@ -6,8 +6,8 @@ model:
   path: models/obstacle/trainV2_train-2_yolo11_1.rknn
   sha256: 97c8f8b99b5474a92e75380d98e303ed5ab9a0032e50e49ac821564afa086483
   task: detect
-  # 道路分割占用 NPU 0。障碍检测用 1 号核，避免两路抢同一核。
-  core_mask: "1"
+  # 检测配置填核编号 "0"；加载器转成位掩码 1。SEG 使用核 1、2。
+  core_mask: "0"
   input:
     name: images
     size: 640
