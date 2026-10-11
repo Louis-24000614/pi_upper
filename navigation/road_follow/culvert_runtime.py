@@ -213,14 +213,34 @@ class CulvertRuntime:
                    lateral_m=observation.lateral_m, progress_m=progress.s_m)
         return observation
 
+    def _obstacle_after_locked_culvert(self, bbox, key):
+        """框消失后，只接受本帧当前边投影证明在已锁定涵洞出口之后的障碍。"""
+        target = self.controller.target
+        if target is None or key != (target.edge_id, target.from_node, target.to_node):
+            return False
+        edge = self.agent.graph.edges[key[0]]
+        for detail in self.last_obstacle_details:
+            if (detail.get("reason") != "current_edge" or detail.get("class_id") not in self.hard_ids
+                    or tuple(detail.get("bbox") or ()) != tuple(bbox)):
+                continue
+            projected = detail.get("target") or {}
+            if key != (projected.get("edge_id"), projected.get("from_node"), projected.get("to_node")):
+                continue
+            offset = projected.get("canonical_offset_m")
+            if not isinstance(offset, (int, float)) or not math.isfinite(offset) or not 0 <= offset <= edge.length_m:
+                continue
+            along = offset if key[1] == edge.u else edge.length_m-offset
+            return math.isfinite(target.exit_s_m) and along > target.exit_s_m
+        return False
+
     def obstacle_preempts(self, observation, culvert_observation, *, now,
                           hard_detections=(), image_shape=None, hard_config=None):
-        """只比较本帧已通过当前边/车道检查的框；y2 更大表示更近。"""
+        """比较当前框底边；涵洞框消失后用已锁定目标与本帧障碍投影判断顺序。"""
         key = self._sync_edge()
         pending = self.pending_obstacle
+        if self.controller.phase == "fault":
+            return False  # 涵洞失败仍保持停车，不能自动倒车掩盖故障。
         if pending is not None:
-            if self.controller.phase == "fault":
-                return False  # 涵洞失败仍保持停车，不能自动倒车掩盖故障。
             if self.controller.phase == "reacquire" or (not self.controller.owns and self.records.handled(key[0])):
                 self.event("culvert_obstacle_released", reason="task_done", bbox=pending["bbox"])
                 return True
@@ -228,19 +248,30 @@ class CulvertRuntime:
             return False
 
         boxes = [observation.bbox] if observation is not None and observation.bbox is not None else []
+        current_boxes = list(boxes) if observation is not None and observation.just_confirmed else []
         if hard_config is not None and image_shape is not None:
             for item in hard_detections:
                 # 与原障碍确认使用相同的面积、置信度和走廊条件。
                 if HardBlockageJudge(hard_config).update([item], image_shape).candidate:
-                    boxes.append((item.x1, item.y1, item.x2, item.y2))
+                    box = (item.x1, item.y1, item.x2, item.y2)
+                    boxes.append(box)
+                    current_boxes.append(box)
         if pending is not None:
             boxes.append(pending["bbox"])
         obstacle_box = max(boxes, key=lambda box: box[3]) if boxes else None
         culvert_box = (culvert_observation.bbox if culvert_observation is not None
                        and culvert_observation.reason in ("tracking", "confirmed") else None)
 
-        if pending is not None and self.controller.owns and culvert_box is None:
-            return False  # 进入后框可能被遮挡；已确认的后方障碍保留到任务结束。
+        if self.controller.phase in ("entering", "stopping", "settling", "task") and culvert_box is None:
+            if not current_boxes:
+                return pending is None  # 已保存的后方障碍消失时仍保留到任务结束。
+            if all(self._obstacle_after_locked_culvert(box, key) for box in current_boxes):
+                if pending is None:
+                    self.pending_obstacle = {"edge":key, "bbox":obstacle_box, "since_s":now}
+                    self.event("culvert_obstacle_deferred", obstacle_bbox=obstacle_box,
+                               reason="behind_locked_culvert", exit_s_m=self.controller.target.exit_s_m)
+                return False
+            return True  # 新障碍更近或位置不明，保留原障碍接管。
         if pending is not None and not self.controller.owns and now-pending["since_s"] >= self.config.odom_timeout_s:
             self.event("culvert_obstacle_released", reason="confirmation_timeout")
             return True

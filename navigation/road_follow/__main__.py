@@ -971,6 +971,7 @@ def _run(args, parser) -> int:
             elif turn_side is not None and bridge is not None:
                 recovery_owns = False
                 detections = []
+                culvert_observation = None
                 if obstacle_recovery is not None and route_agent is not None:
                     current_key = (route_agent.state.current_edge, route_agent.state.from_node, route_agent.state.to_node)
                     if current_key != obstacle_edge_key:
@@ -987,6 +988,8 @@ def _run(args, parser) -> int:
                         armed = armed or culvert_runtime.controller.owns or culvert_eligible(
                             entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival)
                     confirmed = False
+                    observation = None
+                    hard_detections = []
                     if armed and detector is not None and obstacle_judge is not None:
                         detections, _elapsed_ms = detector.detect(frame)
                         if culvert_runtime is not None:
@@ -1026,6 +1029,19 @@ def _run(args, parser) -> int:
                                 f"连续={observation.stable_frames} 帧，"
                                 f"路段进度={progress.s_m:.2f} m",
                             )
+                    if culvert_runtime is not None and obstacle_recovery.phase == "idle":
+                        eligible = culvert_eligible(entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival)
+                        if (observation is not None and observation.hard_blocked) or culvert_runtime.pending_obstacle is not None:
+                            if eligible or culvert_runtime.controller.owns:
+                                culvert_observation = culvert_runtime.observe_culvert(
+                                    detections=detections, frame=frame, mask=mask, captured_s=captured_s,
+                                    sequence=result.sequence if segment_stream is not None else frames,
+                                    source=result.source if segment_stream is not None else 0,
+                                    now=time.monotonic(), progress=progress)
+                            confirmed = culvert_runtime.obstacle_preempts(observation, culvert_observation,
+                                now=time.monotonic(), hard_detections=hard_detections,
+                                image_shape=frame.shape, hard_config=obstacle_judge.config if obstacle_judge else None)
+                            armed = armed or confirmed
                     if obstacle_recovery.phase != "idle" or confirmed:
                         if confirmed and culvert_runtime is not None:
                             culvert_runtime.cancel_for_obstacle(time.monotonic(), action_notes)
@@ -1108,7 +1124,8 @@ def _run(args, parser) -> int:
                         source=result.source if segment_stream is not None else 0,
                         now=time.monotonic(), progress=progress, command=command,
                         eligible=culvert_eligible(entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival),
-                        notes=action_notes, navigation_diagnostics=follow_diag, inference_s=infer_s)
+                        notes=action_notes, navigation_diagnostics=follow_diag, inference_s=infer_s,
+                        culvert_observation=culvert_observation)
                     command = culvert_outcome.command
                     if was_inspecting and culvert_runtime.controller.phase == "reacquire":
                         # 识别结束后丢弃旧分割任务，再用新画面重新取路。
