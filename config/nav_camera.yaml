@@ -56,7 +56,7 @@ follow:
   # 正常视觉循迹稍微降速，给分割和转向纠偏留出更多反应时间。
   cruise_mps: 0.08
   turn_mps: 0.05
-  lookahead_m: 0.30
+  lookahead_m: 0.25
   turn_abs_x_m: 0.08
   min_points: 8
   # 墙角分割常只剩 250～380 px，400 会把还能看到的路判成没路。
@@ -66,7 +66,7 @@ follow:
   x_bias_m: 0.00
   # 增强视觉纠偏；仍受 max_abs_omega 限制。
   steering_gain: 2.0
-  # 固定 30 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
+  # 固定 25 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
   min_lookahead_m: 0.24
   near_mps: 0.05
 
@@ -169,7 +169,7 @@ lane_heading:
   min_live_depth_m: 0.18
 
 # 路口接近转向（追踪器确认非直路后锁存，直路连续 straight_clear_frames 帧解除）：
-# 转向点列先过正前方窄带，固定 0.30 m 预瞄点不再落进侧向开口；
+# 转向点列先过正前方窄带，固定 0.25 m 预瞄点不再落进侧向开口；
 # 走廊尽头短于固定预瞄时改按近距预瞄低速前进（min_lookahead_m / min_points
 # 仅作用于该锁存路径，普通循迹配置不受影响）。
 junction_approach:
