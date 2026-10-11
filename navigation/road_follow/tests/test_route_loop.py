@@ -62,6 +62,9 @@ class RouteLoopTest(unittest.TestCase):
                 bridge.stdout = iter(())
                 camera = Mock()
                 camera.read.return_value = (True, np.zeros((2, 2, 3), dtype=np.uint8))
+                # 终态验证只需要无障碍的道路；真实检测器会加载板端 RKNN，须一并替换。
+                detector = Mock(config={})
+                detector.detect.return_value = ([], 0.0)
                 diag = FollowDiagnostics(2000, 2000, 80, 80, 80, False, 0.2, 1.0, True, 0)
                 reading = JunctionRead(KIND_STRAIGHT, True, False, False, 0, 0.2)
 
@@ -81,6 +84,7 @@ class RouteLoopTest(unittest.TestCase):
 
                     mock("needs_frequency_guard", return_value=False)
                     mock("RoadSegmenter", new=_Segment)
+                    stack.enter_context(patch("vision.obstacle.detect.ObstacleDetector", return_value=detector))
                     mock("BevProjector.project", return_value=(Mock(), np.zeros((2, 2), dtype=np.uint8)))
                     mock("_open_camera", return_value=camera)
                     mock("_load_config", return_value={"capture": {"width": 2, "height": 2}})

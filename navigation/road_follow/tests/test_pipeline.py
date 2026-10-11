@@ -53,6 +53,30 @@ def _image_from_bev(bev_mask: np.ndarray, cfg: dict) -> np.ndarray:
 
 
 class PipelineTest(unittest.TestCase):
+    def test_thin_lane_fallback_excludes_connected_branch(self) -> None:
+        # 窄主路触发兜底时仍须延续主路，不能重新用整行中位数追向连接支路。
+        cfg = _cfg()
+        cfg["follow"]["lookahead_m"] = 0.40
+        ipm = make_ipm(cfg, (720, 1280))
+        for side in (-1, 1):
+            with self.subTest(side=side):
+                bev_mask = np.zeros((ipm.bev.height_px, ipm.bev.width_px), np.uint8)
+                bev_mask[:, 40:60] = 255
+                for v in range(ipm.bev.height_px):
+                    _, y = ipm.bev.bev_px_to_ground(0, v)
+                    if 0.35 <= y <= 0.55:
+                        bev_mask[v, 30:40] = 255 if side < 0 else 0
+                        bev_mask[v, 60:70] = 255 if side > 0 else 0
+                before = bev_mask.copy()
+                cmd, diag = command_from_mask_with_diagnostics(
+                    np.zeros((720, 1280), np.uint8), cfg, CenterlineSmoother(),
+                    projection=(ipm, bev_mask),
+                )
+                self.assertTrue(diag.used_fallback)
+                self.assertEqual(cmd.reason, "follow")
+                self.assertLess(abs(cmd.omega_radps), 0.02)
+                np.testing.assert_array_equal(bev_mask, before)
+
     def test_straight_road_cruises(self) -> None:
         cfg = _cfg()
         ipm = make_ipm(cfg, (720, 1280))

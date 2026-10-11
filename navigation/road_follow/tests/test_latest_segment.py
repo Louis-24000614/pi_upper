@@ -310,8 +310,8 @@ class LatestMainGateTest(unittest.TestCase):
                     '--record-video',str(Path(folder)/'new.avi'),'--async-record-video']),0)
         self.assertEqual(events, ['write','close'])
 
-    def test_latest_path_keeps_expiry_and_action_mutex(self):
-        # 同一入口回归切到 latest 工厂：过期帧不更新导航，也不覆盖有限动作。
+    def test_latest_path_accepts_slow_frames_and_keeps_action_mutex(self):
+        # 全局时效门已取消；latest 入口仍须保持有限动作与速度指令互斥。
         import road_follow.__main__ as entry
         original_main = entry.main
         with patch.object(entry, 'LatestSegmentStream') as factory:
@@ -320,10 +320,10 @@ class LatestMainGateTest(unittest.TestCase):
             with patch.object(entry, 'main', side_effect=lambda argv:
                               original_main(argv+['--latest-frame'])):
                 case = gate_tests.MainFrameGateTest()
-                self.assertEqual(case.check_main(), ['0.000 0.000\n','0.100 0.200\n','0 0\n'])
+                self.assertEqual(case.check_main(), ['0.100 0.200\n','0.100 0.200\n','0 0\n'])
                 self.assertEqual(case.check_main(True), ['0 0\n'])
 
-    def test_capture_order_keeps_expiry_and_action_mutex(self):
+    def test_capture_order_accepts_slow_frames_and_keeps_action_mutex(self):
         import road_follow.__main__ as entry
         original_main = entry.main
         with patch.object(entry, 'LatestSegmentStream') as factory:
@@ -331,7 +331,7 @@ class LatestMainGateTest(unittest.TestCase):
             with patch.object(entry, 'main', side_effect=lambda argv: original_main(
                     argv+['--latest-frame','--latest-result-order','capture'])):
                 case = gate_tests.MainFrameGateTest()
-                self.assertEqual(case.check_main(), ['0.000 0.000\n','0.100 0.200\n','0 0\n'])
+                self.assertEqual(case.check_main(), ['0.100 0.200\n','0.100 0.200\n','0 0\n'])
                 self.assertEqual(case.check_main(True), ['0 0\n'])
 
 
