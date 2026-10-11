@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -89,9 +89,8 @@ def command_from_mask_with_diagnostics(
     mask_road_pixels = _road_pixels(mask_gray)
     road_pixels = _road_pixels(gray)
     gains = follow if follow is not None else follow_config_from_mapping(cfg)
-    prior_points = extract_centerline_with_width_prior(
-        bev_mask, ipm.bev, road_prior_from_mapping(cfg)
-    )
+    prior = road_prior_from_mapping(cfg)
+    prior_points = extract_centerline_with_width_prior(bev_mask, ipm.bev, prior)
     used_fallback = len(prior_points) < gains.min_points
     if lazy_raw and not used_fallback:
         # 普通中心线没有参与控制时，诊断只需要“合法行数”，无须每行计算中位数。
@@ -102,7 +101,13 @@ def command_from_mask_with_diagnostics(
     else:
         raw_points = extract_centerline(bev_mask, ipm.bev)
         raw_count = len(raw_points)
-    points = raw_points if used_fallback else prior_points
+    if used_fallback:
+        # 窄路仍可兜底，但不能退回整行中位数，把旁侧区域重新混入控制。
+        # 保留普通中心线的诊断点数；控制点由相同的主路追踪器选择。
+        fallback_prior = replace(prior, min_width_m=3 * ipm.bev.m_per_px, min_pixels=3)
+        points = extract_centerline_with_width_prior(bev_mask, ipm.bev, fallback_prior)
+    else:
+        points = prior_points
     points = smoother.update(points)
     ys = [float(y) for _, y in points]
     lookahead_covered = _covers_lookahead(ys, gains.lookahead_m)
