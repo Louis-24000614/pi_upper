@@ -120,11 +120,11 @@ class RfidArrivalTest(unittest.TestCase):
         state, command = self.step(
             state, yaw_rad=0.40, lane_heading_rad=-0.60,
             forward_depth_m=0.10, early_heading_lock=True,
-            progress_m=0.50, remaining_edge_m=0.47,
+            progress_m=0.55, remaining_edge_m=0.42,
         )
         self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
         self.assertAlmostEqual(state.hold_yaw_rad, 0.50, places=2)
-        self.assertEqual(state.active_step_mm, 470)
+        self.assertEqual(state.active_step_mm, 420)
         self.assertGreater(command.omega_radps, 0.0)
 
     def test_corner_alignment_timeout_stops_instead_of_creeping(self) -> None:
@@ -139,19 +139,19 @@ class RfidArrivalTest(unittest.TestCase):
         self.assertEqual(command.reason, "stop_align_timeout")
         self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
 
-    def test_corner_without_stable_samples_uses_current_heading_at_half_meter(self) -> None:
+    def test_corner_without_stable_samples_uses_current_heading_at_55cm(self) -> None:
         state = RfidArrival()
         state, command = self.step(
             state, yaw_rad=0.40, lane_heading_rad=0.03,
             forward_depth_m=0.10, early_heading_lock=True,
-            progress_m=0.50, remaining_edge_m=0.47,
+            progress_m=0.55, remaining_edge_m=0.42,
         )
         self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
         self.assertAlmostEqual(state.hold_yaw_rad, 0.43)
-        self.assertEqual(state.active_step_mm, 470)
+        self.assertEqual(state.active_step_mm, 420)
         self.assertAlmostEqual(command.v_mps, 0.05)
 
-    def test_corner_ignores_an_early_visual_end_before_half_meter(self) -> None:
+    def test_corner_ignores_an_early_visual_end_before_55cm(self) -> None:
         state = RfidArrival(edge_latched=True, road_end_missing_frames=2)
         state, command = self.step(
             state, forward_band_ratio=0.0, yaw_rad=0.40,

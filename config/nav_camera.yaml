@@ -138,12 +138,12 @@ rfid_turn:
   # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
   # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
-  # 驶入 2_1/2_4/5_1/5_4 的 0.97 m 直边：前 0.50 m 视觉循迹，
-  # 到点后锁住绝对航向，剩余约 0.47 m 由 IMU 航向保持走完。
+  # 驶入 2_1/2_4/5_1/5_4 的 0.97 m 直边：前 0.55 m 视觉循迹，
+  # 到点后锁住绝对航向，剩余约 0.42 m 由 IMU 航向保持走完。
   early_lock_min_depth_m: 0.30
   early_lock_frames: 3
   early_lock_max_spread_rad: 0.10
-  early_lock_handoff_m: 0.50
+  early_lock_handoff_m: 0.55
 
 temporal:
   # 帧间中心线 X 的 EMA；70% 采用新帧，使纠偏在约 2 帧内完成主要响应，
