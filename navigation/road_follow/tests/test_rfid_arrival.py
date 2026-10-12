@@ -120,11 +120,11 @@ class RfidArrivalTest(unittest.TestCase):
         state, command = self.step(
             state, yaw_rad=0.40, lane_heading_rad=-0.60,
             forward_depth_m=0.10, early_heading_lock=True,
-            progress_m=0.68, remaining_edge_m=0.29,
+            progress_m=0.68, remaining_edge_m=0.31,
         )
         self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
         self.assertAlmostEqual(state.hold_yaw_rad, 0.50, places=2)
-        self.assertEqual(state.active_step_mm, 290)
+        self.assertEqual(state.active_step_mm, 310)
         self.assertGreater(command.omega_radps, 0.0)
 
     def test_heading_samples_ignore_early_turn_exit_and_keep_updating(self) -> None:
@@ -170,7 +170,7 @@ class RfidArrivalTest(unittest.TestCase):
         state, command = self.step(
             state, yaw_rad=0.40, lane_heading_rad=0.03,
             forward_depth_m=0.10, early_heading_lock=True,
-            progress_m=0.68, remaining_edge_m=0.29, now_s=1.0,
+            progress_m=0.68, remaining_edge_m=0.31, now_s=1.0,
         )
         self.assertEqual((state.phase, command.reason), (
             "heading_lock_stop", "stop_heading_lock_wait",
@@ -182,7 +182,7 @@ class RfidArrivalTest(unittest.TestCase):
 
         state, command = self.step(
             state, yaw_rad=0.40, early_heading_lock=True,
-            progress_m=0.68, remaining_edge_m=0.29, now_s=2.4,
+            progress_m=0.68, remaining_edge_m=0.31, now_s=2.4,
         )
         self.assertEqual((state.phase, command.reason), (
             "fault", "stop_heading_lock_invalid",
@@ -216,12 +216,12 @@ class RfidArrivalTest(unittest.TestCase):
         for index in range(self.cfg.align_stable_frames):
             state, command = self.step(
                 state, yaw_rad=0.11, progress_m=0.68,
-                remaining_edge_m=0.29, early_heading_lock=True,
+                remaining_edge_m=0.31, early_heading_lock=True,
                 now_s=2.5 + index * 0.03,
             )
         self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
         self.assertAlmostEqual(state.hold_yaw_rad, 0.11, places=2)
-        self.assertEqual(state.active_step_mm, 290)
+        self.assertEqual(state.active_step_mm, 310)
 
     def test_corner_ignores_an_early_visual_end_before_68cm(self) -> None:
         state = RfidArrival(edge_latched=True, road_end_missing_frames=2)

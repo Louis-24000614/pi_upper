@@ -24,11 +24,11 @@ if TYPE_CHECKING:
     from road_follow.rfid_arrival import RfidArrivalConfig
 
 
-# 标准 0.97 m 格网边统一在 0.68 m 交接，锁住航向后补齐约 0.29 m。
+# 标准 0.99 m 格网边统一在 0.68 m 交接，锁住航向后补齐约 0.31 m。
 # 短边不使用这组数。
-_GRID_LENGTH_M = 0.97
+_GRID_LENGTH_M = 0.99
 _GRID_HANDOFF_M = 0.68
-_GRID_FINAL_M = 0.29
+_GRID_FINAL_M = 0.31
 _GRID_ARRIVAL_M = _GRID_HANDOFF_M + _GRID_FINAL_M
 _GRID_ALIGN_TIMEOUT_S = 3.0
 _GRID_ALIGN_STABLE_FRAMES = 8
@@ -337,7 +337,7 @@ def step_route_arrival(
                 "left",
             )
             cue = JunctionCue(True, side, policy.final_forward_m, "odom_handoff")
-            # 按实际交接位置补齐到拓扑边末端，不能再走固定 0.29 m。
+            # 按实际交接位置补齐到拓扑边末端，不能再走固定 0.31 m。
             remaining_m = max(
                 junction_cfg.min_forward_mm / 1000.0,
                 policy.edge_length_m - progress_m,
