@@ -180,11 +180,17 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
         self.assertFalse(outcome.send_velocity)
 
-    def test_default_does_not_ignore_road_loss(self):
+    def test_parked_task_keeps_recognition_when_navigation_road_is_lost(self):
         self.parked_task()
+        steps=[]
+        self.runtime.controller.executor=NS(step=lambda now:steps.append(now) or "running")
         self.command=VelocityCommand(0,0,"stop_road")
-        self.parked_update()
-        self.assertEqual(self.runtime.controller.fault_reason,"vision_unsafe")
+        outcome=self.parked_update()
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.assertEqual(self.runtime.controller.phase,"task")
+        self.assertEqual(steps,[1.3])
+        self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+        self.assertFalse(outcome.send_velocity)
         events=[json.loads(line) for line in Path(self.runtime.log.name).read_text(encoding="utf-8").splitlines()]
         last=next(e for e in reversed(events) if e["event"]=="culvert_control")
         self.assertEqual(last["input_command"]["reason"],"stop_road")
@@ -231,7 +237,35 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.parked_update(now=1.4,captured=1.1)
         self.assertIsNone(self.runtime.controller.fault_reason)
         self.parked_update(now=1.5,captured=1.6)
-        self.assertEqual(self.runtime.controller.fault_reason,"vision_unsafe")
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.assertEqual(self.runtime.controller.phase,"reacquire")
+        self.assertEqual(self.runtime.controller.clear,0)
+        self.assertEqual(self.runtime.controller.last_reacquire_s,1.1)
+        self.command=VelocityCommand(0,0,"stop_lookahead")
+        outcome=self.parked_update(now=60,captured=60)
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.assertEqual(self.runtime.controller.phase,"reacquire")
+        self.assertFalse(outcome.resumed)
+        self.command=VelocityCommand(.08,0,"follow")
+        for t in (60.1,60.2):
+            self.assertFalse(self.parked_update(now=t,captured=t).resumed)
+        outcome=self.parked_update(now=60.3,captured=60.3)
+        self.assertTrue(outcome.resumed)
+        self.assertEqual(self.runtime.controller.phase,"idle")
+
+    def test_future_completion_frame_does_not_block_normal_road_recovery(self):
+        self.parked_task()
+        self.runtime.controller.executor=NS(step=lambda now:"done")
+        outcome=self.parked_update(now=1.3,captured=1000)
+        self.assertEqual(self.runtime.controller.phase,"reacquire")
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.assertFalse(outcome.send_velocity)
+        self.assertIsNone(self.runtime.controller.last_reacquire_s)
+        for t in (1.4,1.5):
+            self.assertFalse(self.parked_update(now=t,captured=t).resumed)
+        outcome=self.parked_update(now=1.6,captured=1.6)
+        self.assertTrue(outcome.resumed)
+        self.assertEqual(self.runtime.controller.phase,"idle")
 
     def test_only_owner_consumes_stop_notes(self):
         self.notes.put("STOP_DONE")

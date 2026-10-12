@@ -428,12 +428,26 @@ class ControllerIntegrationTest(unittest.TestCase):
         self.assertTrue(outcome.resumed)
         self.assertFalse(control.begin(TARGET, 2, .5, .05))
 
-    def test_safety_fault_still_stops_and_cancels_recognition(self):
+    def test_navigation_vision_loss_keeps_stopped_recognition_running(self):
+        executor = Mock()
+        executor.step.return_value = "running"
+        control, records, _, sent = self.control(executor)
+        outcome = self.step(control, visual=False)
+        self.assertEqual(control.phase, "task")
+        self.assertIsNone(control.fault_reason)
+        executor.cancel.assert_not_called()
+        executor.step.assert_called_once_with(1)
+        self.assertEqual(sent, [])
+        self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+        self.assertFalse(outcome.send_velocity)
+        self.assertFalse(records.handled(KEY[0]))
+
+    def test_odom_fault_still_stops_and_cancels_recognition(self):
         executor = Mock()
         control, records, _, sent = self.control(executor)
-        self.step(control, visual=False)
+        self.step(control, now=2)
         self.assertEqual(control.phase, "fault")
-        executor.cancel.assert_called_once_with("vision_unsafe")
+        executor.cancel.assert_called_once_with("odom_stale")
         executor.step.assert_not_called()
         self.assertEqual(sent, ["stop"])
         self.assertFalse(records.handled(KEY[0]))

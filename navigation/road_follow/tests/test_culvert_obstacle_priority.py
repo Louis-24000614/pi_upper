@@ -198,11 +198,28 @@ class CulvertObstaclePriorityTest(unittest.TestCase):
         self.assertEqual(self.recovery.phase,"holding")
         self.assertEqual(self.runtime.records.entries[self.runtime.edge_key()[0]]["failure_reason"],"hard_obstacle")
 
-    def test_culvert_fault_with_pending_obstacle_keeps_stop(self):
+    def test_visual_loss_with_pending_obstacle_keeps_culvert_then_resumes(self):
         self.defer()
         self.command=VelocityCommand(0,0,"stop_road")
+        preempts,outcome=self.tick(1.0,culvert=False)
+        self.assertFalse(preempts)
+        self.assertIsNone(self.runtime.controller.fault_reason)
+        self.assertEqual(self.runtime.controller.phase,"entering")
+        self.assertEqual(outcome.command.v_mps,0)
+        self.assertIsNotNone(self.runtime.pending_obstacle)
+        self.assertEqual(self.recovery.phase,"idle")
+        self.command=self.fixture.command
+        preempts,outcome=self.tick(1.1,culvert=False)
+        self.assertFalse(preempts)
+        self.assertEqual(self.runtime.controller.phase,"entering")
+        self.assertAlmostEqual(outcome.command.v_mps,.05)
+        self.assertEqual(self.recovery.phase,"idle")
+
+    def test_culvert_fault_with_pending_obstacle_keeps_stop(self):
+        self.defer()
+        self.runtime.controller.fault("odom_stale",.95)
         self.tick(1.0,culvert=False)
-        self.assertEqual(self.runtime.controller.fault_reason,"vision_unsafe")
+        self.assertEqual(self.runtime.controller.fault_reason,"odom_stale")
         preempts,outcome=self.tick(1.1,culvert=False)
         self.assertFalse(preempts)
         self.assertEqual(outcome.command.v_mps,0)
@@ -323,7 +340,7 @@ class CulvertObstaclePriorityTest(unittest.TestCase):
 
     def test_fault_without_pending_obstacle_is_not_cancelled_by_late_confirmation(self):
         self.lock_without_obstacle()
-        self.runtime.controller.fault("vision_unsafe", 1.0)
+        self.runtime.controller.fault("odom_stale", 1.0)
         box = (self.far.x1, self.far.y1, self.far.x2, self.far.y2)
         self.assertFalse(self.runtime.obstacle_preempts(NS(just_confirmed=True, bbox=box), None, now=1.2))
         self.assertEqual(self.runtime.controller.phase, "fault")
