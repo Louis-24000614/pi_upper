@@ -227,7 +227,11 @@ class LegacyHeadingCompatibilityTest(unittest.TestCase):
                         forward_depth_m=.45, now_s=now)
                     return command
 
-                samples = 4 if policy.early_heading_lock else 3
+                if policy.early_heading_lock:
+                    # 标准边在 0.57 m 前的直路段积累可靠航向；到点才开始交接。
+                    for i in range(pcfg.early_lock_frames):
+                        self.assertGreater(step(.7 + i*.03, progress=.40).v_mps, 0)
+                samples = 2 if policy.early_heading_lock else 3
                 for i in range(samples):
                     self.assertGreater(step(1 + i*.03).v_mps, 0)
                 active = pstate if patrol else state

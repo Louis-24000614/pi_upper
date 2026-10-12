@@ -321,6 +321,9 @@ def step_junction_turn(
     if state.phase == "odom_wait":
         return state, VelocityCommand(0.0, 0.0, "stop_odom_junction_wait")
 
+    if state.phase in ("heading_lock_stop", "heading_lock_stopped"):
+        return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+
     def advance_anchor():
         state.phase, result, ready = step_heading_anchor(
             state.anchor, state.phase, lane_heading_rad=lane_heading_rad,
@@ -528,6 +531,13 @@ def _consume_notes(
                 state.stop_started_s = now_s
             elif note == "STOP_FAIL":
                 state.phase = "fault"
+        elif state.phase == "heading_lock_stop":
+            if note == "STOP_DONE":
+                state.phase = "heading_lock_stopped"
+                state.stop_started_s = now_s
+            elif note == "STOP_FAIL":
+                state.phase = "fault"
+                state.fault_reason = "stop_action_fail"
 
 
 def _resume_departure(state: JunctionTurn, send) -> None:

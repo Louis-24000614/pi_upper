@@ -40,13 +40,12 @@ class RfidArrivalConfig:
     forward_strip_abs_x_m: float = 0.12
     heading_anchor_enabled: bool = False
     early_lock_sample_start_m: float = 0.35
-    early_lock_min_depth_m: float = 0.30
+    early_lock_min_depth_m: float = 0.18
     early_lock_frames: int = 3
     early_lock_max_spread_rad: float = 0.10
     early_lock_handoff_m: float = 0.57
-    early_lock_latest_m: float = 0.60
+    early_lock_stop_settle_s: float = 0.30
     early_lock_fallback_min_m: float = 0.45
-    early_lock_grace_mps: float = 0.05
     early_lock_blocked_frames: int = 3
 
 
@@ -71,8 +70,10 @@ class RfidArrival:
     hold_start_m: float | None = None
     hold_yaw_rad: float | None = None
     heading_candidates: list[float] = field(default_factory=list)
+    heading_history: list[float] = field(default_factory=list)
     locked_heading_yaw_rad: float | None = None
     heading_lock_frozen: bool = False
+    heading_stop_started_s: float = 0.0
     early_lock_blocked_count: int = 0
     imu_full_edge: bool = False
     fault_reason: str = ""
@@ -100,7 +101,7 @@ def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
             0.0, float(raw.get("early_lock_sample_start_m", 0.35))
         ),
         early_lock_min_depth_m=max(
-            0.0, float(raw.get("early_lock_min_depth_m", 0.30))
+            0.0, float(raw.get("early_lock_min_depth_m", 0.18))
         ),
         early_lock_frames=max(1, int(raw.get("early_lock_frames", 3))),
         early_lock_max_spread_rad=max(
@@ -109,14 +110,11 @@ def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
         early_lock_handoff_m=max(
             0.0, float(raw.get("early_lock_handoff_m", 0.57))
         ),
-        early_lock_latest_m=max(
-            0.0, float(raw.get("early_lock_latest_m", 0.60))
+        early_lock_stop_settle_s=max(
+            0.0, float(raw.get("early_lock_stop_settle_s", 0.30))
         ),
         early_lock_fallback_min_m=max(
             0.0, float(raw.get("early_lock_fallback_min_m", 0.45))
-        ),
-        early_lock_grace_mps=max(
-            0.0, float(raw.get("early_lock_grace_mps", 0.05))
         ),
         early_lock_blocked_frames=max(
             1, int(raw.get("early_lock_blocked_frames", 3))
@@ -145,7 +143,6 @@ def step_rfid_arrival(
     imu_full_edge: bool = False,
     early_heading_lock: bool = False,
     handoff_start_m: float | None = None,
-    handoff_latest_m: float | None = None,
     near_x_m: float | None = None,
     lane_heading_rad: float | None = None,
     yaw_rad: float | None = None,
@@ -174,6 +171,35 @@ def step_rfid_arrival(
     if state.phase == "arrived":
         return state, VelocityCommand(0.0, 0.0, "rfid_arrived")
 
+    if state.phase == "heading_lock_stop":
+        if "STOP_FAIL" in received:
+            state.phase = "fault"
+            state.fault_reason = "stop_action_fail"
+            return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+        if "STOP_DONE" in received:
+            state.phase = "heading_lock_stopped"
+            state.heading_stop_started_s = current_s
+        return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+    if state.phase == "heading_lock_stopped":
+        if current_s - state.heading_stop_started_s < cfg.early_lock_stop_settle_s:
+            return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+        target = recover_visual_heading_from_history(state, cfg)
+        if target is None or not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
+            state.phase = "fault"
+            state.fault_reason = "stop_heading_lock_invalid"
+            return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+        if arrival_mode == "visual_odom" and not state.edge_latched:
+            state.phase = "fault"
+            state.fault_reason = "stop_junction_unconfirmed"
+            return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+        state.locked_heading_yaw_rad = target
+        state.heading_lock_frozen = True
+        state.phase = "align"
+        state.align_started_s = current_s
+        state.align_stable = 0
+        state.anchor = HeadingAnchorGate(started_s=current_s)
+        return state, VelocityCommand(0.0, 0.0, "align")
+
     _update_edge_latch(
         state,
         cfg,
@@ -195,10 +221,6 @@ def step_rfid_arrival(
         handoff_start = (
             cfg.early_lock_handoff_m
             if handoff_start_m is None else max(0.0, float(handoff_start_m))
-        )
-        handoff_latest = (
-            cfg.early_lock_latest_m
-            if handoff_latest_m is None else max(handoff_start, float(handoff_latest_m))
         )
         vision_blocked = visual.reason in (
             "stop_road", "stop_centerline", "stop_lookahead", "stop_forward_strip",
@@ -224,15 +246,13 @@ def step_rfid_arrival(
                 confirmed
                 and state.odom_handoff_frames >= max(1, odom_stable_frames)
             )
-        if measured is not None and measured + 1e-6 >= handoff_latest:
-            if state.locked_heading_yaw_rad is None:
+        if at_handoff and state.locked_heading_yaw_rad is None:
+            if not send("stop"):
                 state.phase = "fault"
-                state.fault_reason = "stop_heading_lock_invalid"
+                state.fault_reason = "stop_action_fail"
                 return state, VelocityCommand(0.0, 0.0, state.fault_reason)
-            if not confirmed:
-                state.phase = "fault"
-                state.fault_reason = "stop_junction_unconfirmed"
-                return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+            state.phase = "heading_lock_stop"
+            return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
         if state.locked_heading_yaw_rad is not None and (
             (at_handoff and confirmed) or blocked_fallback
         ):
@@ -244,15 +264,7 @@ def step_rfid_arrival(
                 target_yaw_rad=target,
             )
         if at_handoff:
-            if not visual_safe or vision_blocked:
-                state.phase = "fault"
-                state.fault_reason = "stop_heading_lock_invalid"
-                return state, VelocityCommand(0.0, 0.0, state.fault_reason)
-            return state, VelocityCommand(
-                min(visual.v_mps, cfg.early_lock_grace_mps),
-                visual.omega_radps,
-                "follow_near",
-            )
+            return state, visual
 
     if state.phase == "follow" and imu_full_edge:
         if not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
@@ -505,6 +517,8 @@ def update_visual_heading_lock(
         return
     state.heading_candidates.append(_wrap_angle(float(yaw_rad) + float(lane_heading_rad)))
     del state.heading_candidates[:-max(1, cfg.early_lock_frames)]
+    state.heading_history.append(state.heading_candidates[-1])
+    del state.heading_history[:-12]
     if len(state.heading_candidates) < max(1, cfg.early_lock_frames):
         return
     mean = _angular_mean(state.heading_candidates)
@@ -513,6 +527,28 @@ def update_visual_heading_lock(
     spread = max(abs(_wrap_angle(value - mean)) for value in state.heading_candidates)
     if spread <= cfg.early_lock_max_spread_rad:
         state.locked_heading_yaw_rad = mean
+
+
+def recover_visual_heading_from_history(
+    state: RfidArrival, cfg: RfidArrivalConfig,
+) -> float | None:
+    """停车后只检查此前直路样本；不使用停车时的当前 yaw 或画面。"""
+    samples = state.heading_history
+    required = max(1, cfg.early_lock_frames)
+    if len(samples) < required:
+        return None
+    tolerance = max(cfg.early_lock_max_spread_rad, 0.12)
+    best: list[float] = []
+    for center in samples:
+        inliers = [
+            value for value in samples
+            if abs(_wrap_angle(value - center)) <= tolerance
+        ]
+        if len(inliers) > len(best):
+            best = inliers
+    if len(best) < max(required, math.ceil(len(samples) * 0.6)):
+        return None
+    return _angular_mean(best)
 
 
 def _update_edge_latch(

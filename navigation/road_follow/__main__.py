@@ -110,8 +110,9 @@ COMMAND_NAMES = {
     "stop_align_timeout": "停车：提前锁定航向后摆正超时",
     "stop_bad_turn_distance": "停车：转弯前进距离不安全",
     "stop_odom_junction_wait": "停车：里程计到达预计路口但视觉未确认",
-    "stop_heading_lock_invalid": "停车：0.60 m 前未获得可靠视觉航向",
-    "stop_junction_unconfirmed": "停车：0.60 m 前未确认地图支路",
+    "stop_heading_lock_invalid": "停车：前段视觉航向样本不可靠",
+    "stop_heading_lock_wait": "停车：用前段视觉方向恢复航向",
+    "stop_junction_unconfirmed": "停车：未确认地图支路",
     "stop_arrival_guard": "停车：超过到点保护位置，交接未完成",
     "stop_odom_stale": "停车：缺少有效的新里程计数据",
     "stop_rfid": "停车：检测到 RFID",
@@ -398,9 +399,9 @@ def _finite_action_active(
     """有限动作期间不能插入 CMD_VEL。视觉倒车本身就是负速度，必须继续下发。"""
     recovery_phase = "idle" if recovery is None else recovery.phase
     return (entrance.phase in ("forward", "stopping_wait", "stopping", "turning")
-            or junction_turn.phase in ("forward", "stopping", "stopped", "turning")
+            or junction_turn.phase in ("forward", "stopping", "stopped", "turning", "heading_lock_stop")
             or rfid_turn.phase in ("searching", "stopping_wait", "turning")
-            or rfid_arrival.phase in ("blind_forward", "stopping_wait")
+            or rfid_arrival.phase in ("blind_forward", "stopping_wait", "heading_lock_stop")
             or recovery_phase in ("holding", "stopping", "stopped", "turning"))
 
 
@@ -1144,7 +1145,9 @@ def _run(args, parser) -> int:
                         junctions = JunctionTracker()
                         lane_heading_history.clear()
                         rfid_arrival.heading_candidates.clear()
+                        rfid_arrival.heading_history.clear()
                         rfid_arrival.locked_heading_yaw_rad = None
+                        rfid_arrival.heading_lock_frozen = False
                 if not recovery_owns:
                     previous_phase = junction_turn.phase
                     visual_command = command
@@ -1249,7 +1252,15 @@ def _run(args, parser) -> int:
                             or command.reason != last_arrival_reason
                         ):
                             _event(
-                                "安全停车" if trigger in ("guard", "odom_stale") else "到点交接",
+                                (
+                                    "安全停车"
+                                    if trigger in (
+                                        "guard", "odom_stale", "heading_lock_stop",
+                                        "heading_lock_invalid", "junction_unconfirmed",
+                                    )
+                                    else "航向恢复" if trigger == "heading_lock_recovered"
+                                    else "到点交接"
+                                ),
                                 f"目标={target.id}，策略={arrival_policy.mode}，"
                                 f"原因={trigger}，进度={progress.s_m:.2f} m，"
                                 f"检测带={junction.forward_band_ratio:.2f}",

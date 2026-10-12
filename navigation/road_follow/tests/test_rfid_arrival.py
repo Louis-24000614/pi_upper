@@ -165,24 +165,63 @@ class RfidArrivalTest(unittest.TestCase):
         self.assertEqual(command.reason, "stop_align_timeout")
         self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
 
-    def test_missing_heading_uses_grace_window_then_stops_at_60cm(self) -> None:
+    def test_missing_heading_stops_at_57cm_then_faults_without_history(self) -> None:
         state = RfidArrival()
         state, command = self.step(
             state, yaw_rad=0.40, lane_heading_rad=0.03,
             forward_depth_m=0.10, early_heading_lock=True,
-            progress_m=0.57, remaining_edge_m=0.40,
+            progress_m=0.57, remaining_edge_m=0.40, now_s=1.0,
         )
-        self.assertEqual((state.phase, command.reason), ("follow", "follow_near"))
-        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual((state.phase, command.reason), (
+            "heading_lock_stop", "stop_heading_lock_wait",
+        ))
+        self.assertEqual(self.sent[-1], "stop")
+        self.notes.put("STOP_DONE")
+        state, command = self.step(state, now_s=2.0)
+        self.assertEqual(command.reason, "stop_heading_lock_wait")
 
         state, command = self.step(
-            state, yaw_rad=0.40, lane_heading_rad=0.03,
-            forward_depth_m=0.10, early_heading_lock=True,
-            progress_m=0.60, remaining_edge_m=0.37,
+            state, yaw_rad=0.40, early_heading_lock=True,
+            progress_m=0.57, remaining_edge_m=0.40, now_s=2.4,
         )
         self.assertEqual((state.phase, command.reason), (
             "fault", "stop_heading_lock_invalid",
         ))
+
+    def test_missing_live_lock_recovers_pre_stop_samples_for_alignment(self) -> None:
+        state = RfidArrival()
+        for progress, heading in ((0.40, 0.0), (0.45, 0.11), (0.50, 0.22)):
+            state, _ = self.step(
+                state, yaw_rad=0.0, lane_heading_rad=heading,
+                forward_depth_m=0.20, early_heading_lock=True,
+                progress_m=progress,
+            )
+        self.assertIsNone(state.locked_heading_yaw_rad)
+        state, command = self.step(
+            state, yaw_rad=0.0, visual_safe=False,
+            early_heading_lock=True, progress_m=0.57, now_s=1.0,
+        )
+        self.assertEqual((state.phase, command.reason), (
+            "heading_lock_stop", "stop_heading_lock_wait",
+        ))
+        self.notes.put("STOP_DONE")
+        state, _ = self.step(state, now_s=2.0)
+        state, command = self.step(
+            state, yaw_rad=0.0, progress_m=0.57,
+            early_heading_lock=True, now_s=2.4,
+        )
+        self.assertEqual((state.phase, command.reason), ("align", "align"))
+        self.assertAlmostEqual(state.locked_heading_yaw_rad, 0.11, places=2)
+        self.assertTrue(state.heading_lock_frozen)
+        for index in range(self.cfg.align_stable_frames):
+            state, command = self.step(
+                state, yaw_rad=0.11, progress_m=0.57,
+                remaining_edge_m=0.40, early_heading_lock=True,
+                now_s=2.5 + index * 0.03,
+            )
+        self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
+        self.assertAlmostEqual(state.hold_yaw_rad, 0.11, places=2)
+        self.assertEqual(state.active_step_mm, 400)
 
     def test_corner_ignores_an_early_visual_end_before_57cm(self) -> None:
         state = RfidArrival(edge_latched=True, road_end_missing_frames=2)
