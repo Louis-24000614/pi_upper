@@ -223,10 +223,12 @@ class LegacyHeadingCompatibilityTest(unittest.TestCase):
                         reading=reading, opening=reading.kind, command=VelocityCommand(.08, 0, "follow"),
                         progress_m=progress, odom_valid=True, notes=notes,
                         send=lambda line: sent.append(line) or True, junction_cfg=jcfg, patrol_cfg=pcfg,
-                        lane_heading_rad=0, yaw_rad=yaw, visual_safe=True, now_s=now)
+                        lane_heading_rad=0, yaw_rad=yaw, visual_safe=True,
+                        forward_depth_m=.45, now_s=now)
                     return command
 
-                for i in range(3):
+                samples = 4 if policy.early_heading_lock else 3
+                for i in range(samples):
                     self.assertGreater(step(1 + i*.03).v_mps, 0)
                 active = pstate if patrol else state
                 self.assertEqual(active.phase, "heading_hold")

@@ -11,7 +11,7 @@ from road_follow.control import VelocityCommand, is_visual_follow
 from road_follow.junction_turn import (
     JunctionCue, road_end_turn_cue, step_junction_turn,
 )
-from road_follow.rfid_arrival import step_rfid_arrival
+from road_follow.rfid_arrival import step_rfid_arrival, update_visual_heading_lock
 
 if TYPE_CHECKING:
     from navigation.topo_proto.graph import TopologyGraph
@@ -23,13 +23,13 @@ if TYPE_CHECKING:
 # 短边不使用这组数。
 _GRID_LENGTH_M = 0.97
 _GRID_HANDOFF_M = 0.57
+_GRID_HANDOFF_LATEST_M = 0.60
 _GRID_FINAL_M = 0.40
 _GRID_ARRIVAL_M = _GRID_HANDOFF_M + _GRID_FINAL_M
 _GRID_ALIGN_TIMEOUT_S = 3.0
 _GRID_ALIGN_STABLE_FRAMES = 8
 _IMU_FULL_EDGES = frozenset({("0_J", "1_2")})
 _IMU_FULL_EDGE_EXTRA_M = 0.07
-_EARLY_HEADING_TARGETS = frozenset({"2_1", "2_4", "5_1", "5_4"})
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,7 @@ class ArrivalPolicy:
     handoff_progress_m: float
     final_forward_m: float
     guard_progress_m: float
+    latest_handoff_m: float
     expected_openings: tuple[str, ...]
     align_timeout_s: float
     align_stable_frames: int
@@ -129,10 +130,11 @@ def resolve_arrival_policy(
     )
     return ArrivalPolicy(
         from_node, to_node, mode, handoff, final, guard,
+        _GRID_HANDOFF_LATEST_M if grid else handoff,
         tuple(side for side in ("forward", "left", "right") if side in directions),
         align_timeout_s, align_stable_frames,
         imu_full_edge,
-        to_node in _EARLY_HEADING_TARGETS,
+        grid,
         arrival_distance_m,
     )
 
@@ -191,6 +193,30 @@ def step_route_arrival(
             return state, patrol_state, VelocityCommand(0.0, 0.0, "stop_odom_stale"), "odom_stale"
 
     side_cue = expected_side_cue(policy, reading, opening)
+
+    # 标准格网边在干净直路段持续更新绝对道路航向。普通路口仍由原来的
+    # JunctionTurn 保存支路证据；RfidArrival 仅作为本边的航向锁存状态。
+    if (
+        policy.early_heading_lock and not patrol
+        and state.phase in ("follow", "approach", "align", "anchor_wait")
+    ):
+        update_visual_heading_lock(
+            patrol_state,
+            patrol_cfg,
+            visual=command,
+            visual_safe=visual_safe,
+            odom_valid=odom_valid,
+            yaw_rad=yaw_rad,
+            lane_heading_rad=lane_heading_rad,
+            forward_depth_m=forward_depth_m,
+            progress_m=progress_m,
+        )
+        vision_blocked = command.reason in (
+            "stop_road", "stop_centerline", "stop_lookahead", "stop_forward_strip",
+        )
+        patrol_state.early_lock_blocked_count = (
+            patrol_state.early_lock_blocked_count + 1 if vision_blocked else 0
+        )
     if (
         approaching and state.suppress_cue and not policy.imu_full_edge
         and not trusted_odom_handoff
@@ -239,12 +265,14 @@ def step_route_arrival(
             forward_depth_m=forward_depth_m,
             imu_full_edge=policy.imu_full_edge,
             early_heading_lock=policy.early_heading_lock,
+            handoff_start_m=policy.handoff_progress_m,
+            handoff_latest_m=policy.latest_handoff_m,
         )
         if before in ("follow", "align", "anchor_wait") and patrol_state.phase == "heading_hold":
             if policy.imu_full_edge:
                 source = "imu_full_edge"
             elif policy.early_heading_lock:
-                source = "early_imu"
+                source = "grid_imu"
             else:
                 source = policy.mode
         else:
@@ -260,10 +288,44 @@ def step_route_arrival(
         cfg = replace(cfg, turn_forward_m=state.forward_mm / 1000.0)
     cue = side_cue
     if policy.mode == "visual_odom":
+        if (
+            policy.early_heading_lock
+            and state.phase in ("follow", "approach")
+            and progress_m + 1e-6 >= policy.latest_handoff_m
+            and not trusted_odom_handoff
+        ):
+            if patrol_state.locked_heading_yaw_rad is None:
+                state.phase = "fault"
+                state.fault_reason = "stop_heading_lock_invalid"
+                return state, patrol_state, VelocityCommand(
+                    0.0, 0.0, state.fault_reason
+                ), "heading_lock_invalid"
+            if not state.branch_latched and not trusted_odom_handoff:
+                state.phase = "fault"
+                state.fault_reason = "stop_junction_unconfirmed"
+                return state, patrol_state, VelocityCommand(
+                    0.0, 0.0, state.fault_reason
+                ), "junction_unconfirmed"
+        blocked_handoff = (
+            policy.early_heading_lock
+            and patrol_state.locked_heading_yaw_rad is not None
+            and patrol_state.early_lock_blocked_count
+            >= patrol_cfg.early_lock_blocked_frames
+            and progress_m + 1e-6 >= patrol_cfg.early_lock_fallback_min_m
+        )
         normal_handoff = (
-            state.branch_latched and odom_valid and is_visual_follow(command)
-            and progress_m + 1e-6 >= policy.handoff_progress_m
-            and progress_m < policy.guard_progress_m
+            state.branch_latched and odom_valid
+            and (
+                (
+                    is_visual_follow(command)
+                    and progress_m + 1e-6 >= policy.handoff_progress_m
+                )
+                or blocked_handoff
+            )
+            and (
+                not policy.early_heading_lock
+                or patrol_state.locked_heading_yaw_rad is not None
+            )
         )
         trusted_handoff = (
             trusted_odom_handoff and odom_valid and is_visual_follow(command)
@@ -278,8 +340,7 @@ def step_route_arrival(
                 "left",
             )
             cue = JunctionCue(True, side, policy.final_forward_m, "odom_handoff")
-            # 涵洞恢复等情况可能晚于标准交接点，只补齐到拓扑边末端，不能
-            # 从恢复位置重新走完整个 0.40 m。
+            # 按实际交接位置补齐到拓扑边末端，不能从晚交接位置再走固定 0.40 m。
             remaining_m = max(
                 junction_cfg.min_forward_mm / 1000.0,
                 policy.edge_length_m - progress_m,
@@ -296,13 +357,36 @@ def step_route_arrival(
         if end_cue.detected:
             cue = end_cue
     before = state.phase
+    target_yaw_rad = (
+        patrol_state.locked_heading_yaw_rad
+        if policy.early_heading_lock else None
+    )
+    alignment_heading_rad = lane_heading_rad
+    if (
+        target_yaw_rad is not None
+        and yaw_rad is not None and math.isfinite(yaw_rad)
+    ):
+        alignment_heading_rad = math.atan2(
+            math.sin(target_yaw_rad - yaw_rad),
+            math.cos(target_yaw_rad - yaw_rad),
+        )
     state, command = step_junction_turn(
         state, cue, command, notes, send, cfg, near_x_m=near_x_m,
         progress_m=progress_m, odom_valid=odom_valid,
-        lane_heading_rad=lane_heading_rad, yaw_rad=yaw_rad,
+        lane_heading_rad=alignment_heading_rad, yaw_rad=yaw_rad,
+        target_yaw_rad=target_yaw_rad,
         frame_captured_s=frame_captured_s, odom_received_s=odom_received_s,
         anchor_notes=anchor_notes, now_s=now_s, visual_safe=visual_safe,
     )
+    if (
+        cue.source == "odom_handoff"
+        and normal_handoff
+        and policy.early_heading_lock
+        and before in ("follow", "approach")
+        and state.phase in ("align", "anchor_wait", "heading_hold")
+    ):
+        # 真正进入交接状态时冻结；确认帧期间仍可更新视觉候选航向。
+        patrol_state.heading_lock_frozen = True
     if before in ("follow", "approach", "align", "anchor_wait") and state.phase == "heading_hold":
         source = "culvert_odom_handoff" if trusted_odom_handoff else cue.source
     else:

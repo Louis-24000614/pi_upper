@@ -138,13 +138,19 @@ rfid_turn:
   # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
   # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
-  # 驶入 2_1/2_4/5_1/5_4 的标准直边：正常前 0.57 m 视觉循迹，
-  # 到点后锁住绝对航向再走 0.40 m。若提前丢失道路但已锁存可靠航向，
-  # 连续 3 帧视觉停车后直接切换，并按当前里程补齐到 0.97 m。
+  # 所有 0.97 m 标准边：前段视觉循迹并持续更新绝对道路航向，
+  # 0.57 m 开始交接，最迟 0.60 m；后段按当前里程补齐到 0.97 m。
+  # 若提前丢失道路，只有已接近交接区且已有可靠航向才允许切换 IMU。
+  early_lock_sample_start_m: 0.35
   early_lock_min_depth_m: 0.30
   early_lock_frames: 3
   early_lock_max_spread_rad: 0.10
   early_lock_handoff_m: 0.57
+  # 0.57 m 时航向尚未稳定但视觉仍可靠，可低速继续采样；最晚 0.60 m 必须交接或停车。
+  early_lock_latest_m: 0.60
+  # 视觉提前丢失时，只有已接近交接区且已有可靠航向才允许切换 IMU。
+  early_lock_fallback_min_m: 0.45
+  early_lock_grace_mps: 0.05
   early_lock_blocked_frames: 3
 
 temporal:

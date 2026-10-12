@@ -110,6 +110,8 @@ COMMAND_NAMES = {
     "stop_align_timeout": "停车：提前锁定航向后摆正超时",
     "stop_bad_turn_distance": "停车：转弯前进距离不安全",
     "stop_odom_junction_wait": "停车：里程计到达预计路口但视觉未确认",
+    "stop_heading_lock_invalid": "停车：0.60 m 前未获得可靠视觉航向",
+    "stop_junction_unconfirmed": "停车：0.60 m 前未确认地图支路",
     "stop_arrival_guard": "停车：超过到点保护位置，交接未完成",
     "stop_odom_stale": "停车：缺少有效的新里程计数据",
     "stop_rfid": "停车：检测到 RFID",
@@ -1180,6 +1182,7 @@ def _run(args, parser) -> int:
                     if target is not None and arrival_policy is not None:
                         previous_rfid_phase = rfid_arrival.phase
                         locked_heading_before = rfid_arrival.locked_heading_yaw_rad
+                        heading_frozen_before = rfid_arrival.heading_lock_frozen
                         follow_cfg = cfg.get("follow", {}) or {}
                         visual_safe = (
                             command.reason != "stop_camera"
@@ -1223,10 +1226,22 @@ def _run(args, parser) -> int:
                             and rfid_arrival.locked_heading_yaw_rad is not None
                         ):
                             _event(
-                                "航向锁存",
+                                "航向候选建立",
                                 f"目标={target.id}；绝对航向="
                                 f"{rfid_arrival.locked_heading_yaw_rad:+.3f} rad；"
                                 f"进度={progress.s_m:.2f} m",
+                            )
+                        if (
+                            not heading_frozen_before
+                            and rfid_arrival.heading_lock_frozen
+                            and rfid_arrival.locked_heading_yaw_rad is not None
+                        ):
+                            _event(
+                                "交接航向冻结",
+                                f"目标={target.id}；绝对航向="
+                                f"{rfid_arrival.locked_heading_yaw_rad:+.3f} rad；"
+                                f"交接进度={progress.s_m:.2f} m；"
+                                f"剩余={max(0.0, arrival_policy.edge_length_m - progress.s_m):.2f} m",
                             )
                         if trigger and (
                             trigger not in ("guard", "odom_stale")
