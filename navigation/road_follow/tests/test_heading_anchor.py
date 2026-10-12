@@ -228,7 +228,7 @@ class LegacyHeadingCompatibilityTest(unittest.TestCase):
                     return command
 
                 if policy.early_heading_lock:
-                    # 标准边在 0.57 m 前的直路段积累可靠航向；到点才开始交接。
+                    # 标准边在 0.65 m 前的直路段积累可靠航向；到点才开始交接。
                     for i in range(pcfg.early_lock_frames):
                         self.assertGreater(step(.7 + i*.03, progress=.40).v_mps, 0)
                 samples = 2 if policy.early_heading_lock else 3

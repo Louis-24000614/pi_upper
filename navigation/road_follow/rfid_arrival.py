@@ -43,7 +43,7 @@ class RfidArrivalConfig:
     early_lock_min_depth_m: float = 0.18
     early_lock_frames: int = 3
     early_lock_max_spread_rad: float = 0.10
-    early_lock_handoff_m: float = 0.57
+    early_lock_handoff_m: float = 0.65
     early_lock_stop_settle_s: float = 0.30
     early_lock_fallback_min_m: float = 0.45
     early_lock_blocked_frames: int = 3
@@ -108,7 +108,7 @@ def rfid_arrival_config_from_mapping(cfg: dict) -> RfidArrivalConfig:
             0.0, float(raw.get("early_lock_max_spread_rad", 0.10))
         ),
         early_lock_handoff_m=max(
-            0.0, float(raw.get("early_lock_handoff_m", 0.57))
+            0.0, float(raw.get("early_lock_handoff_m", 0.65))
         ),
         early_lock_stop_settle_s=max(
             0.0, float(raw.get("early_lock_stop_settle_s", 0.30))
@@ -376,7 +376,7 @@ def step_rfid_arrival(
     if early_heading_lock and arrival_mode == "visual_end":
         measured = _measured_progress(progress_m, odom_valid)
         if measured is not None and measured + 1e-6 < cfg.early_lock_handoff_m:
-            # 这些角点按固定的 0.57 m / 余程分段；提前出现的“路尽头”只当作
+            # 这些角点按固定的 0.65 m / 余程分段；提前出现的“路尽头”只当作
             # 视觉波动，不能让车辆提前停车或进入墙边摆正流程。
             state.road_end_missing_frames = 0
             early_before_handoff = True
