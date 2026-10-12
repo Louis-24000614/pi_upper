@@ -17,7 +17,7 @@ from road_follow.segment import RoadSegmenter, letterbox
 from road_follow.recording import VideoRecorder
 from road_follow.async_recording import AsyncVideoRecorder
 from road_follow.control import VelocityCommand
-from road_follow.__main__ import SLOW_S
+from experiments.seg_fps.constants import MEASUREMENT_BUDGET_S
 from road_follow.cpu_threads import cpu_thread_budget
 from experiments.seg_fps.frames import VideoFrames, ResultGate
 from experiments.seg_fps.navigation import Navigation
@@ -37,6 +37,8 @@ VARIANTS = {
 
 def run(args) -> dict:
     correct, reuse_bev, buffers, threaded, latest = VARIANTS[args.variant]
+    # 老的实验调用者可能未提供预热次数；保持原快照的 5 次默认值。
+    warmup_iterations = int(getattr(args, "warmup", 5))
     cfg = yaml.safe_load(args.config.read_text())
     navigation = Navigation(cfg, reuse_bev, lazy_raw=args.variant == "lazy")
     masks = [int(x) for x in args.cores.split(",")]
@@ -97,7 +99,7 @@ def run(args) -> dict:
             def warmup(segment=segment, index=index):
                 session = segment._load()
                 samples = []
-                for step in range(args.warmup):
+                for step in range(warmup_iterations):
                     tensor = pure_pools[index][step % len(pure_pool)]
                     began = time.monotonic()
                     session.inference(inputs=[tensor], data_format=["nhwc"])
@@ -180,7 +182,7 @@ def run(args) -> dict:
             consumed = time.monotonic()
             row = {"id": identity, "start_s": began-start, "end_s": finished-start,
                    **timings, "worker_ms": (finished-began)*1000}
-            row["worker_slow"] = row["worker_ms"] > SLOW_S*1000
+            row["worker_slow"] = row["worker_ms"] > MEASUREMENT_BUDGET_S*1000
             if frame is not None:
                 row.update(frame_id=frame.sequence, video_s=frame.video_s,
                            source=frame.source, publish_s=frame.published_s-start,
@@ -194,8 +196,9 @@ def run(args) -> dict:
                 if args.mode == "full":
                     nav_start = time.monotonic()
                     command, diag, opening, junction = navigation.process(mask)
-                    # 与正式入口相同：分割超过原有预算仍生成停车意图，不改安全阈值。
-                    if row["worker_ms"] > SLOW_S*1000:
+                    # 保留历史离线对照的慢帧停车模拟，便于与既有报告比较；
+                    # 正式导航已移除该时效门，这里不向 UART 或车辆下发控制。
+                    if row["worker_ms"] > MEASUREMENT_BUDGET_S*1000:
                         command = VelocityCommand(0.0, 0.0, "stop_slow")
                         row["slow_stop"] = True
                     row["nav_ms"] = (time.monotonic()-nav_start)*1000
@@ -252,7 +255,7 @@ def run(args) -> dict:
                 "record_dropped": getattr(recorder, "dropped", 0),
                 "slow_stop_count": counts["slow_stop"],
                 "worker_slow_count": counts["worker_slow"],
-                "warmup_iterations_per_context": args.warmup,
+                "warmup_iterations_per_context": warmup_iterations,
                 "warmup_call_ms": warmup_rows,
                 "resource_sample_interval_s": args.sample_interval,
                 "metrics_scope": "all completed frames" if not args.retained_rows

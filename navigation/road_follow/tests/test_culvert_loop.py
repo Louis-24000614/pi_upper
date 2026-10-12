@@ -31,6 +31,9 @@ class CulvertLoopTest(unittest.TestCase):
         bridge=Mock(); bridge.poll.return_value=None; bridge.stdout=iter(())
         camera=Mock(); camera.read.return_value=(True,np.zeros((2,2,3),np.uint8))
         runtime=Mock(); runtime.first_capture_s=None
+        runtime.pending_obstacle=None
+        runtime.observe_culvert.return_value=None
+        runtime.obstacle_preempts.side_effect=lambda observation,culvert,**kwargs: observation.just_confirmed if observation is not None else False
         runtime.controller.owns=True
         runtime.controller.phase="task"
         runtime.update.return_value=CulvertOutcome(VelocityCommand(0,0,"stop_culvert_task"),True,False)
@@ -60,7 +63,7 @@ class CulvertLoopTest(unittest.TestCase):
             runtime.update.side_effect=change_direction
         else:
             judge=Mock()
-        if not change_edge: judge.update.return_value=NS(just_confirmed=hard,score=.9,stable_frames=3)
+        if not change_edge: judge.update.return_value=NS(just_confirmed=hard,hard_blocked=hard,score=.9,stable_frames=3)
         def detect(_):
             if slow: time.sleep(.21)
             return (boxes if change_edge else []),0

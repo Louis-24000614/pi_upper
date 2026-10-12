@@ -11,7 +11,7 @@ from road_follow.control import VelocityCommand
 @dataclass(frozen=True)
 class CulvertConfig:
     length_m: float = 0.27
-    min_distance_m: float = 0.20
+    min_distance_m: float = 0.10
     max_distance_m: float = 0.60
     max_lateral_m: float = 0.10
     max_heading_rad: float = 0.10
@@ -174,12 +174,13 @@ class CulvertController:
             return False
         if not math.isfinite(near_speed) or near_speed <= 0:
             raise ValueError("涵洞进入速度必须大于零")
+        if self.records.discover(target) is False:
+            return False
         self.target = target
         self.started_s = now
         self.deadline_s = now + max(0, target.target_s_m - current_s) / near_speed + self.config.enter_extra_s
         self.stop_requested_s = self.stop_ack_s = None
         self.clear = 0
-        self.records.discover(target)
         self._transition("entering", now, target_s_m=target.target_s_m)
         return True
 
@@ -195,9 +196,11 @@ class CulvertController:
             self._transition("fault", now, reason=reason, **details)
 
     def cancel_for_obstacle(self, now):
-        if hasattr(self.executor, "cancel"):
+        completed = (self.target is not None and self.phase == "reacquire"
+                     and self.records.handled(self.target.edge_id))
+        if not completed and hasattr(self.executor, "cancel"):
             self.executor.cancel("hard_obstacle")
-        if self.target:
+        if self.target and not completed:
             self.records.fail(self.target.edge_id, "hard_obstacle")
         self.target = None
         self._transition("idle", now, reason="hard_obstacle")
@@ -221,14 +224,14 @@ class CulvertController:
         target = self.target
         if self.phase == "entering":
             remaining = target.target_s_m - current_s
-            if now >= self.deadline_s:
-                self.fault("enter_timeout", now)
-            elif remaining <= cfg.stop_margin_m:
+            if remaining <= cfg.stop_margin_m:
                 self.stop_requested_s = now
                 if self.send("stop"):
                     self._transition("stopping", now, remaining_m=remaining)
                 else:
                     self.fault("stop_submit_failed", now)
+            elif now >= self.deadline_s:
+                self.fault("enter_timeout", now)
             else:
                 # Lower speed and steering together to retain the same curvature.
                 speed = min(command.v_mps, near_speed)

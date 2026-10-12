@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import yaml
 from road_follow.parallel_segment import OrderedSegmentStream
-from road_follow.__main__ import SLOW_S
+from experiments.seg_fps.constants import MEASUREMENT_BUDGET_S
 from road_follow.cpu_threads import cpu_thread_budget
 from road_follow.heap_reclaim import HeapReclaimer
 from experiments.seg_fps.navigation import Navigation
@@ -69,7 +69,8 @@ def run(args, reclaimer):
     stream = OrderedSegmentStream(args.model, cores, correct_nms=True, reuse_buffers=True,
                                   backend=args.backend)
     navigation = Navigation(yaml.safe_load(args.config.read_text()), True)
-    gate = ResultGate(max_age_s=SLOW_S)
+    # 保留历史实验的帧龄筛选口径；正式导航的时效策略由正式入口独立决定。
+    gate = ResultGate(max_age_s=MEASUREMENT_BUDGET_S)
     rows, resources, errors = deque(maxlen=4096), [], []
     completed = accepted = worker_slow = last = progress_completed = progress_accepted = 0
     began = cpu_began = None
@@ -86,7 +87,7 @@ def run(args, reclaimer):
                 raise AssertionError("结果重复或乱序")
             last = result.sequence+1
             completed += 1
-            worker_slow += result.inference_s > SLOW_S
+            worker_slow += result.inference_s > MEASUREMENT_BUDGET_S
             packet = Frame(result.sequence, result.sequence/capture.fps,
                            result.captured_s, result.captured_s, result.source, result.image)
             fresh = gate.accept(packet, time.monotonic())

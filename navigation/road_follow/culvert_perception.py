@@ -10,6 +10,7 @@ from ipm_proto.ipm import BevConfig, CameraExtrinsics, Ipm
 from ipm_proto.prior import extract_centerline_with_width_prior, road_prior_from_mapping
 from road_follow.backup import near_lane_heading
 from road_follow.culvert import CulvertTarget
+from road_follow.placement_rules import placement_allowed
 
 
 class CulvertCalibration:
@@ -149,6 +150,9 @@ class CulvertPerception:
             self.key = key
         if already_done:
             return CulvertObservation("already_done")
+        if not placement_allowed(edge, "culvert"):
+            self.reset()
+            return CulvertObservation("outside_placement_area")
         if not math.isfinite(now-captured_s) or now < captured_s:
             self.positions.clear()
             return CulvertObservation("stale_frame")
@@ -184,8 +188,9 @@ class CulvertPerception:
             if item.score < self.min_score or (item.x2-item.x1)*(item.y2-item.y1)/(width*height) < self.min_area:
                 reason = "low_score_or_small_box"
                 continue
-            if not 0 < item.x1 < item.x2 < width-1 or not 0 < item.y1 < item.y2 < height-1:
-                reason = "clipped_entry"
+            # 允许框贴住画面边缘；保留坐标合法性、地面投影和车道校验。
+            if not 0 <= item.x1 < item.x2 <= width-1 or not 0 <= item.y1 < item.y2 <= height-1:
+                reason = "invalid_box"
                 continue
             feet = self.calibration.ipm.image_points_to_ground([(item.x1, item.y2), (item.x2, item.y2)])
             if not np.isfinite(feet).all():

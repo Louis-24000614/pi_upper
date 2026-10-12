@@ -36,6 +36,85 @@ def _largest_component(mask: np.ndarray) -> np.ndarray:
     return np.where(labels == index, 255, 0).astype(np.uint8)
 
 
+def _scene_grabcut(image: np.ndarray) -> np.ndarray | None:
+    """从纸张/地毯背景的实拍图中补回低对比度刀刃。
+
+    普通 PNG/JPEG 没有 alpha 时，白色刀刃常与白纸连成最大前景。先用
+    深色或高饱和度的刀柄作为确定前景，再在其扩展邻域内运行 GrabCut，
+    让刀刃边缘和浅色区域参与分割。该分支只用于现场三通道照片。
+    """
+    bgr = image[:, :, :3]
+    height, width = bgr.shape[:2]
+    if height < 32 or width < 32:
+        return None
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    saturation = hsv[:, :, 1]
+
+    # 纸张通常是低饱和、较亮区域；刀柄和刀身印刷纹理提供暗色或彩色种子。
+    dark_cut = min(165.0, float(np.percentile(gray, 38)))
+    sat_cut = max(35.0, float(np.percentile(saturation, 68)))
+    seed = np.where((gray <= dark_cut) | (saturation >= sat_cut), 255, 0).astype(np.uint8)
+    border = max(3, int(round(min(height, width) * 0.015)))
+    seed[:border] = 0
+    seed[-border:] = 0
+    seed[:, :border] = 0
+    seed[:, -border:] = 0
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    seed = cv2.morphologyEx(seed, cv2.MORPH_OPEN, kernel, iterations=1)
+    seed = cv2.morphologyEx(seed, cv2.MORPH_CLOSE, kernel, iterations=2)
+    components, labels, stats, centroids = cv2.connectedComponentsWithStats(seed, connectivity=8)
+    if components <= 1:
+        return None
+
+    # 选择不碰边、位于画面主体区域且面积合理的最大种子，排除地毯纹理。
+    best = None
+    max_seed_area = height * width * 0.20
+    for index in range(1, components):
+        x, y, w, h, area = (int(value) for value in stats[index])
+        if area < max(20, int(height * width * 0.0002)) or area > max_seed_area:
+            continue
+        if x <= border or y <= border or x + w >= width - border or y + h >= height - border:
+            continue
+        cx, cy = centroids[index]
+        center_weight = 1.0 - min(0.7, float(np.hypot((cx / width) - 0.5, (cy / height) - 0.5)))
+        score = area * center_weight
+        if best is None or score > best[0]:
+            best = (score, index, x, y, w, h)
+    if best is None:
+        return None
+
+    _, seed_index, x, y, w, h = best
+    # 把刀柄种子扩展到可能包含刀刃的区域，避免 GrabCut 只保留手柄。
+    scale = 3.2
+    cx, cy = x + w / 2.0, y + h / 2.0
+    box_w = min(width, max(w * scale, min(width, height) * 0.28))
+    box_h = min(height, max(h * scale, min(width, height) * 0.28))
+    x0 = max(0, int(round(cx - box_w / 2.0)))
+    y0 = max(0, int(round(cy - box_h / 2.0)))
+    x1 = min(width, int(round(cx + box_w / 2.0)))
+    y1 = min(height, int(round(cy + box_h / 2.0)))
+
+    grab_mask = np.full((height, width), cv2.GC_BGD, dtype=np.uint8)
+    grab_mask[y0:y1, x0:x1] = cv2.GC_PR_BGD
+    seed_pixels = labels == seed_index
+    grab_mask[seed_pixels] = cv2.GC_FGD
+    probable = cv2.dilate(seed, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17)), iterations=2)
+    probable &= (grab_mask != cv2.GC_BGD).astype(np.uint8) * 255
+    grab_mask[(probable > 0) & (grab_mask != cv2.GC_FGD)] = cv2.GC_PR_FGD
+    bg_model = np.zeros((1, 65), np.float64)
+    fg_model = np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(bgr, grab_mask, None, bg_model, fg_model, 3, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return None
+    result = np.where((grab_mask == cv2.GC_FGD) | (grab_mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
+    result = _largest_component(result)
+    ratio = float(np.count_nonzero(result)) / float(result.size)
+    return result if 0.005 <= ratio <= 0.45 else None
+
+
 def segment_foreground(image: np.ndarray) -> np.ndarray:
     """优先使用alpha，否则以边框Lab颜色估计简单背景下的刀具前景。"""
     if image.ndim != 3 or image.shape[2] not in (3, 4):
@@ -57,7 +136,14 @@ def segment_foreground(image: np.ndarray) -> np.ndarray:
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    return _largest_component(mask)
+    mask = _largest_component(mask)
+    # 白纸被并入前景，或局部框选只留下深色刀柄时，使用刀柄种子补回浅色刀刃。
+    mask_ratio = float(np.count_nonzero(mask)) / float(mask.size)
+    if mask_ratio < 0.10 or mask_ratio > 0.50:
+        recovered = _scene_grabcut(bgr)
+        if recovered is not None:
+            return recovered
+    return mask
 
 
 def _rotate_bound(image: np.ndarray, angle: float, interpolation: int) -> np.ndarray:

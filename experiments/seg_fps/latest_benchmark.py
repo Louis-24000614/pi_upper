@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 from road_follow.parallel_segment import OrderedSegmentStream
 from road_follow.latest_segment import LatestSegmentStream
-from road_follow.__main__ import SLOW_S
+from experiments.seg_fps.constants import MEASUREMENT_BUDGET_S
 from road_follow.cpu_threads import cpu_thread_budget
 from road_follow.heap_reclaim import HeapReclaimer
 from experiments.seg_fps.camera_replay import ClockedCapture
@@ -26,7 +26,8 @@ def run(args):
     stream_options = ({'result_order': 'capture'} if args.strategy == 'latest-ordered' else {})
     stream = stream_type(args.model, (1,2,4), correct_nms=True, reuse_buffers=True,
                          capture_timestamp=lambda: capture.captured_s, **stream_options)
-    gate = ResultGate(max_age_s=SLOW_S)
+    # 保留历史实验的帧龄筛选口径；正式导航的时效策略由正式入口独立决定。
+    gate = ResultGate(max_age_s=MEASUREMENT_BUDGET_S)
     navigation = Navigation(yaml.safe_load(args.config.read_text()), True)
     rows = deque(maxlen=args.retained_rows or None)
     resources, errors = [], []
@@ -75,7 +76,7 @@ def run(args):
                 break
             completed += 1
             accepted += fresh
-            worker_slow += result.inference_s > SLOW_S
+            worker_slow += result.inference_s > MEASUREMENT_BUDGET_S
             row['age_ms'] = (ended-result.captured_s)*1000
             rows.append(row)
             if ended >= next_sample:

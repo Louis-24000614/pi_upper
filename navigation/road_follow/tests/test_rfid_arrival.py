@@ -46,6 +46,10 @@ class RfidArrivalTest(unittest.TestCase):
         centerline_points=None,
         road_pixels=800,
         follow=None,
+        remaining_edge_m=None,
+        forward_depth_m=None,
+        imu_full_edge=False,
+        early_heading_lock=False,
     ):
         return step_rfid_arrival(
             state,
@@ -68,7 +72,186 @@ class RfidArrivalTest(unittest.TestCase):
             centerline_points=centerline_points,
             road_pixels=road_pixels,
             follow=follow,
+            remaining_edge_m=remaining_edge_m,
+            forward_depth_m=forward_depth_m,
+            imu_full_edge=imu_full_edge,
+            early_heading_lock=early_heading_lock,
         )
+
+    def test_start_short_edge_holds_turn_completed_yaw_for_whole_distance(self) -> None:
+        state, command = self.step(
+            RfidArrival(), progress_m=0.0, yaw_rad=0.75,
+            remaining_edge_m=0.47, imu_full_edge=True,
+        )
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertTrue(state.imu_full_edge)
+        self.assertAlmostEqual(state.hold_yaw_rad, 0.75)
+        self.assertEqual(state.active_step_mm, 470)
+        self.assertEqual(command.reason, "imu_edge_hold")
+        self.assertAlmostEqual(command.v_mps, 0.05)
+
+        state, command = self.step(
+            state, progress_m=0.20, yaw_rad=0.70,
+            remaining_edge_m=0.27, imu_full_edge=True,
+        )
+        self.assertEqual(command.reason, "imu_edge_hold")
+        self.assertGreater(command.omega_radps, 0.0)
+        state, command = self.step(state, progress_m=0.40, yaw_rad=0.75)
+        self.assertEqual((state.phase, command.reason), ("heading_hold", "imu_edge_hold"))
+        state, command = self.step(state, progress_m=0.46, yaw_rad=0.75)
+        self.assertEqual((state.phase, command.reason), ("heading_hold", "imu_edge_hold"))
+        state, command = self.step(state, progress_m=0.47, yaw_rad=0.75)
+        self.assertEqual((state.phase, command.reason), ("arrived", "rfid_arrived"))
+
+    def test_corner_locks_stable_absolute_heading_before_wall(self) -> None:
+        state = RfidArrival()
+        for yaw, relative in (
+            (0.40, 0.10), (0.41, 0.09), (0.39, 0.11),
+        ):
+            state, command = self.step(
+                state, yaw_rad=yaw, lane_heading_rad=relative,
+                forward_depth_m=0.45, early_heading_lock=True,
+                progress_m=0.40,
+            )
+            self.assertEqual(command.reason, "follow")
+        self.assertIsNotNone(state.locked_heading_yaw_rad)
+        self.assertAlmostEqual(state.locked_heading_yaw_rad, 0.50, places=2)
+
+        state, command = self.step(
+            state, yaw_rad=0.40, lane_heading_rad=-0.60,
+            forward_depth_m=0.10, early_heading_lock=True,
+            progress_m=0.68, remaining_edge_m=0.31,
+        )
+        self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
+        self.assertAlmostEqual(state.hold_yaw_rad, 0.50, places=2)
+        self.assertEqual(state.active_step_mm, 310)
+        self.assertGreater(command.omega_radps, 0.0)
+
+    def test_heading_samples_ignore_early_turn_exit_and_keep_updating(self) -> None:
+        state = RfidArrival()
+        for _ in range(3):
+            state, _ = self.step(
+                state, yaw_rad=0.20, lane_heading_rad=0.10,
+                forward_depth_m=0.45, early_heading_lock=True,
+                progress_m=0.20,
+            )
+        self.assertIsNone(state.locked_heading_yaw_rad)
+
+        for _ in range(3):
+            state, _ = self.step(
+                state, yaw_rad=0.40, lane_heading_rad=0.10,
+                forward_depth_m=0.45, early_heading_lock=True,
+                progress_m=0.40,
+            )
+        self.assertAlmostEqual(state.locked_heading_yaw_rad, 0.50, places=2)
+
+        for _ in range(3):
+            state, _ = self.step(
+                state, yaw_rad=0.45, lane_heading_rad=0.10,
+                forward_depth_m=0.45, early_heading_lock=True,
+                progress_m=0.50,
+            )
+        self.assertAlmostEqual(state.locked_heading_yaw_rad, 0.55, places=2)
+
+    def test_corner_alignment_timeout_stops_instead_of_creeping(self) -> None:
+        state = RfidArrival(
+            phase="align", align_started_s=5.0, locked_heading_yaw_rad=0.50,
+        )
+        state, command = self.step(
+            state, yaw_rad=0.0, lane_heading_rad=0.0,
+            early_heading_lock=True, now_s=6.6,
+        )
+        self.assertEqual(state.phase, "fault")
+        self.assertEqual(command.reason, "stop_align_timeout")
+        self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
+
+    def test_missing_heading_stops_at_68cm_then_faults_without_history(self) -> None:
+        state = RfidArrival()
+        state, command = self.step(
+            state, yaw_rad=0.40, lane_heading_rad=0.03,
+            forward_depth_m=0.10, early_heading_lock=True,
+            progress_m=0.68, remaining_edge_m=0.31, now_s=1.0,
+        )
+        self.assertEqual((state.phase, command.reason), (
+            "heading_lock_stop", "stop_heading_lock_wait",
+        ))
+        self.assertEqual(self.sent[-1], "stop")
+        self.notes.put("STOP_DONE")
+        state, command = self.step(state, now_s=2.0)
+        self.assertEqual(command.reason, "stop_heading_lock_wait")
+
+        state, command = self.step(
+            state, yaw_rad=0.40, early_heading_lock=True,
+            progress_m=0.68, remaining_edge_m=0.31, now_s=2.4,
+        )
+        self.assertEqual((state.phase, command.reason), (
+            "fault", "stop_heading_lock_invalid",
+        ))
+
+    def test_missing_live_lock_recovers_pre_stop_samples_for_alignment(self) -> None:
+        state = RfidArrival()
+        for progress, heading in ((0.40, 0.0), (0.45, 0.11), (0.50, 0.22)):
+            state, _ = self.step(
+                state, yaw_rad=0.0, lane_heading_rad=heading,
+                forward_depth_m=0.20, early_heading_lock=True,
+                progress_m=progress,
+            )
+        self.assertIsNone(state.locked_heading_yaw_rad)
+        state, command = self.step(
+            state, yaw_rad=0.0, visual_safe=False,
+            early_heading_lock=True, progress_m=0.68, now_s=1.0,
+        )
+        self.assertEqual((state.phase, command.reason), (
+            "heading_lock_stop", "stop_heading_lock_wait",
+        ))
+        self.notes.put("STOP_DONE")
+        state, _ = self.step(state, now_s=2.0)
+        state, command = self.step(
+            state, yaw_rad=0.0, progress_m=0.68,
+            early_heading_lock=True, now_s=2.4,
+        )
+        self.assertEqual((state.phase, command.reason), ("align", "align"))
+        self.assertAlmostEqual(state.locked_heading_yaw_rad, 0.11, places=2)
+        self.assertTrue(state.heading_lock_frozen)
+        for index in range(self.cfg.align_stable_frames):
+            state, command = self.step(
+                state, yaw_rad=0.11, progress_m=0.68,
+                remaining_edge_m=0.31, early_heading_lock=True,
+                now_s=2.5 + index * 0.03,
+            )
+        self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
+        self.assertAlmostEqual(state.hold_yaw_rad, 0.11, places=2)
+        self.assertEqual(state.active_step_mm, 310)
+
+    def test_corner_ignores_an_early_visual_end_before_68cm(self) -> None:
+        state = RfidArrival(edge_latched=True, road_end_missing_frames=2)
+        state, command = self.step(
+            state, forward_band_ratio=0.0, yaw_rad=0.40,
+            lane_heading_rad=0.03, forward_depth_m=0.10,
+            early_heading_lock=True, progress_m=0.30,
+            remaining_edge_m=0.67,
+        )
+        self.assertEqual((state.phase, command.reason), ("follow", "follow"))
+        self.assertEqual(state.road_end_missing_frames, 0)
+
+    def test_corner_uses_locked_heading_when_visual_follow_becomes_blocked(self) -> None:
+        state = RfidArrival(locked_heading_yaw_rad=0.50)
+        for _ in range(2):
+            state, command = self.step(
+                state, visual=self.blocked, yaw_rad=0.40,
+                early_heading_lock=True, progress_m=0.44,
+                remaining_edge_m=0.55,
+            )
+            self.assertEqual((state.phase, command.reason), ("follow", "stop_lookahead"))
+
+        state, command = self.step(
+            state, visual=self.blocked, yaw_rad=0.40,
+            early_heading_lock=True, progress_m=0.45,
+            remaining_edge_m=0.52,
+        )
+        self.assertEqual((state.phase, command.reason), ("heading_hold", "heading_hold"))
+        self.assertEqual(state.active_step_mm, 520)
+        self.assertAlmostEqual(state.hold_yaw_rad, 0.50)
 
     def test_saves_left_right_and_both_edge_directions(self) -> None:
         left = RfidArrival()
@@ -282,8 +465,10 @@ class RfidArrivalTest(unittest.TestCase):
         state, command = self.step(
             state, forward_band_ratio=0.29, lane_heading_rad=0.20, now_s=6.6
         )
-        self.assertEqual(state.phase, "fault")
-        self.assertEqual(command.reason, "stop_heading_anchor_align_timeout")
+        self.assertEqual(state.phase, "heading_hold")
+        self.assertEqual(command.reason, "heading_hold")
+        self.assertAlmostEqual(command.v_mps, 0.05)
+        self.assertEqual(command.omega_radps, 0.0)
         self.assertEqual(self.sent, [])
 
     def test_latched_visual_end_follows_the_forward_strip_not_the_opening(self) -> None:

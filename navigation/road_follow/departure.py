@@ -15,14 +15,18 @@ def departure_maneuver(
     arrived_from: str,
     arrived_at: str,
     depart_to: str,
+    *,
+    reverse_arrival: bool = False,
 ) -> str:
-    """坐标 x 向右、y 向上。正的叉积是左转。原路返回是倒车，不是 180°。"""
-    if depart_to == arrived_from:
+    """坐标 x 向右、y 向上；倒车到点时，车头与入边移动方向相反。"""
+    if depart_to == arrived_from and not reverse_arrival:
         return "backup"
     ax, ay = node_xy[arrived_from]
     bx, by = node_xy[arrived_at]
     cx, cy = node_xy[depart_to]
     ix, iy = bx - ax, by - ay
+    if reverse_arrival:
+        ix, iy = -ix, -iy
     ox, oy = cx - bx, cy - by
     if math.hypot(ix, iy) < 1e-6 or math.hypot(ox, oy) < 1e-6:
         raise ValueError("路口相邻节点重合，无法判断转向")
@@ -30,6 +34,8 @@ def departure_maneuver(
     if abs(angle) <= math.radians(45):
         return "straight"
     if abs(angle) >= math.radians(135):
+        if reverse_arrival:
+            raise ValueError("倒车到点后的下一条路仍朝车尾，不能作为正向出发")
         raise ValueError("下一条路与来路反向，但终点不是上一个节点")
     if angle > 0:
         return "left"
@@ -89,8 +95,10 @@ def handoff_arrival(
     node_xy: NodeXY,
     send,
     stop_settle_s: float = 2.0,
+    *,
+    reverse_arrival: bool = False,
 ) -> JunctionTurn:
-    """``FORWARD_DONE`` 之后上报当前目标节点，再按 Agent 的下一条边执行。"""
+    """到点后上报当前目标节点；按实际车头方向交接 Agent 的下一条边。"""
     if state.phase != "arrived":
         return state
     arrived_from = agent.state.from_node
@@ -108,7 +116,8 @@ def handoff_arrival(
             return state
         try:
             maneuver = departure_maneuver(
-                node_xy, arrived_from, arrived_at, command.to_node
+                node_xy, arrived_from, arrived_at, command.to_node,
+                reverse_arrival=reverse_arrival,
             )
         except (KeyError, ValueError):
             state.phase = "fault"

@@ -223,10 +223,16 @@ class LegacyHeadingCompatibilityTest(unittest.TestCase):
                         reading=reading, opening=reading.kind, command=VelocityCommand(.08, 0, "follow"),
                         progress_m=progress, odom_valid=True, notes=notes,
                         send=lambda line: sent.append(line) or True, junction_cfg=jcfg, patrol_cfg=pcfg,
-                        lane_heading_rad=0, yaw_rad=yaw, visual_safe=True, now_s=now)
+                        lane_heading_rad=0, yaw_rad=yaw, visual_safe=True,
+                        forward_depth_m=.45, now_s=now)
                     return command
 
-                for i in range(3):
+                if policy.early_heading_lock:
+                    # 标准边在 0.68 m 前的直路段积累可靠航向；到点才开始交接。
+                    for i in range(pcfg.early_lock_frames):
+                        self.assertGreater(step(.7 + i*.03, progress=.40).v_mps, 0)
+                samples = 2 if policy.early_heading_lock else 3
+                for i in range(samples):
                     self.assertGreater(step(1 + i*.03).v_mps, 0)
                 active = pstate if patrol else state
                 self.assertEqual(active.phase, "heading_hold")
@@ -234,7 +240,12 @@ class LegacyHeadingCompatibilityTest(unittest.TestCase):
                 self.assertAlmostEqual(active.hold_start_m, policy.handoff_progress_m)
                 self.assertLess(step(1.2, yaw=2.4).omega_radps, 0)
                 self.assertEqual(sent, [])
-                command = step(1.3, progress=policy.handoff_progress_m + policy.final_forward_m)
+                completion_m = (
+                    policy.edge_length_m
+                    if patrol and policy.imu_full_edge
+                    else policy.handoff_progress_m + policy.final_forward_m
+                )
+                command = step(1.3, progress=completion_m)
                 self.assertEqual(active.phase, "arrived")
                 self.assertEqual(command.v_mps, 0)
                 self.assertEqual(sent, [])

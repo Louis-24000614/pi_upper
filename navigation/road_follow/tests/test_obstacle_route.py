@@ -108,6 +108,9 @@ class ObstacleRouteTest(unittest.TestCase):
             stop_settle_s=kwargs.pop("stop_settle_s", 0.0),
             reverse_hold_s=kwargs.pop("reverse_hold_s", 0.0),
             reacquire_frames=kwargs.pop("reacquire_frames", 2),
+            yaw_rad=kwargs.pop("yaw_rad", progress.yaw_rad),
+            odom_valid=kwargs.pop("odom_valid", True),
+            frame_captured_s=kwargs.pop("frame_captured_s", None),
             **kwargs,
         )
 
@@ -359,7 +362,8 @@ class ObstacleRouteTest(unittest.TestCase):
         recovery, backup, _outcome = self.step(
             recovery, backup, agent, progress, armed=False, now_s=1.0
         )
-        for frame in range(3):
+        for frame, distance in enumerate((0,.08,.15)):
+            progress.s_m = .50 - distance
             recovery, backup, outcome = self.step(
                 recovery,
                 backup,
@@ -371,9 +375,58 @@ class ObstacleRouteTest(unittest.TestCase):
             )
         self.assertEqual(recovery.phase, "fault")
         self.assertEqual(outcome.command.v_mps, 0.0)
-        self.assertEqual(agent.failed, ("3_2__3_3", "stop_backup_road_lost"))
+        self.assertEqual(agent.failed, ("3_2__3_3", "stop_backup_no_vision_distance"))
+        self.assertEqual(outcome.command.reason,"stop_backup_no_vision_distance")
+        _, _, outcome = self.step(recovery,backup,agent,progress,armed=False,now_s=1.5)
+        self.assertEqual(outcome.command.reason,"stop_backup_no_vision_distance")
         self.assertNotIn("3_2__3_3", agent.state.covered_edges)
         self.assertEqual(self.sent, ["stop"])
+
+    def test_occluded_obstacle_reverses_then_recovers_vision_and_replans(self) -> None:
+        agent = FakeAgent("2_2")
+        progress = self._progress(.42)
+        recovery, backup, _ = self.step(
+            ObstacleRecovery(),Backup(),agent,progress,armed=True,confirmed=True,
+            near_x_m=None,now_s=1.0)
+        self.notes.put("STOP_DONE")
+        recovery, backup, outcome = self.step(
+            recovery,backup,agent,progress,armed=False,near_x_m=None,now_s=1.1)
+        self.assertEqual(outcome.command.reason,"stop_backup")
+        # Reproduce four missing-road control checks from the latest failed run.
+        for t in (1.2,1.3,1.4,1.5):
+            recovery, backup, outcome = self.step(
+                recovery,backup,agent,progress,armed=False,near_x_m=None,now_s=t)
+            self.assertEqual(recovery.phase,"backing")
+            self.assertEqual(outcome.command.reason,"heading_backup")
+            self.assertLess(outcome.command.v_mps,0)
+        for t, position in ((1.6,.40),(1.7,.39),(1.8,.38)):
+            progress.s_m=position
+            recovery, backup, outcome = self.step(
+                recovery,backup,agent,progress,armed=False,near_x_m=.02,
+                now_s=t,frame_captured_s=t)
+        self.assertEqual(outcome.command.reason,"visual_backup")
+        self.assertAlmostEqual(backup.no_vision_distance_m,.04)
+        progress.s_m=.10
+        recovery, backup, outcome=self.step(
+            recovery,backup,agent,progress,armed=False,now_s=1.9)
+        self.assertEqual(outcome.command.reason,"visual_backup")
+        progress.s_m=0
+        recovery, backup, outcome=self.step(
+            recovery,backup,agent,progress,armed=False,now_s=2.0)
+        self.assertEqual(recovery.phase,"stopping")
+        self.assertEqual(agent.state.to_node,"2_2")
+        self.assertEqual(self.sent,["stop","stop"])
+        self.assertIsNone(agent.failed)
+
+    def test_stale_odom_at_entry_does_not_start_a_turn(self) -> None:
+        agent=FakeAgent("2_2")
+        recovery, backup, outcome=self.step(
+            ObstacleRecovery(),Backup(),agent,self._progress(0),
+            armed=True,confirmed=True,odom_valid=False)
+        self.assertEqual(recovery.phase,"fault")
+        self.assertEqual(outcome.command.reason,"stop_backup_odom_stale")
+        self.assertEqual(agent.state.current_edge,"3_2__3_3")
+        self.assertEqual(self.sent,[])
 
     def test_departing_back_into_the_blocked_corridor_stops(self) -> None:
         agent = FakeAgent("3_3")

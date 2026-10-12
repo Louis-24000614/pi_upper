@@ -78,6 +78,7 @@ class ObstacleRecovery:
     reverse_hold_s: float = REVERSE_HOLD_S
     clear: int = 0
     reacquire_frames: int = 2
+    failure_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ def _stop(reason: str) -> ObstacleRouteOutcome:
 
 def _fail(recovery: ObstacleRecovery, reason: str) -> ObstacleRouteOutcome:
     recovery.phase = "fault"
+    recovery.failure_reason = reason
     return _stop(reason)
 
 
@@ -114,10 +116,13 @@ def step_obstacle_route(
     stop_settle_s: float = 2.0,
     reverse_hold_s: float = REVERSE_HOLD_S,
     reacquire_frames: int = 2,
+    yaw_rad: float | None = None,
+    odom_valid: bool = True,
+    frame_captured_s: float | None = None,
 ) -> tuple[ObstacleRecovery, Backup, ObstacleRouteOutcome]:
     """确认后先停车停稳，再倒到沿边进度为 0。新边进度要等转向结束才清零。"""
     if recovery.phase == "fault":
-        return recovery, backup, _stop("stop_action_fail")
+        return recovery, backup, _stop(recovery.failure_reason or "stop_action_fail")
     if recovery.phase == "done":
         return recovery, backup, _stop("done")
     if recovery.phase == "idle" and not (armed and confirmed):
@@ -135,6 +140,8 @@ def step_obstacle_route(
         recovery.reverse_hold_s = max(0.0, reverse_hold_s)
         recovery.reacquire_frames = max(1, reacquire_frames)
         cfg = backup_cfg or BackupConfig()
+        if not odom_valid or not math.isfinite(progress_s_m):
+            return _fail_backup(recovery, backup, agent, "stop_backup_odom_stale")
         if progress_s_m <= cfg.done_progress_m:
             return _begin_turn(recovery, backup, agent, node_xy, send)
         if not send("stop"):
@@ -155,11 +162,13 @@ def step_obstacle_route(
         return _start_reverse(
             recovery, backup, agent, node_xy, near_x_m, progress_s_m, command, now_s,
             backup_cfg, send,
+            yaw_rad, odom_valid, frame_captured_s,
         )
 
     if recovery.phase == "backing":
         backup, velocity = step_backup(
-            backup, False, near_x_m, progress_s_m, command, now_s, backup_cfg
+            backup, False, near_x_m, progress_s_m, command, now_s, backup_cfg,
+            yaw_rad=yaw_rad, odom_valid=odom_valid, frame_captured_s=frame_captured_s,
         )
         if backup.phase == "done":
             return _begin_turn(recovery, backup, agent, node_xy, send)
@@ -213,10 +222,14 @@ def _start_reverse(
     now_s: float,
     backup_cfg: BackupConfig | None,
     send,
+    yaw_rad: float | None,
+    odom_valid: bool,
+    frame_captured_s: float | None,
 ) -> tuple[ObstacleRecovery, Backup, ObstacleRouteOutcome]:
     """停稳结束后才开始计倒车时间和距离。"""
     backup, velocity = step_backup(
-        backup, True, near_x_m, progress_s_m, command, now_s, backup_cfg
+        backup, True, near_x_m, progress_s_m, command, now_s, backup_cfg,
+        yaw_rad=yaw_rad, odom_valid=odom_valid, frame_captured_s=frame_captured_s,
     )
     recovery.phase = "backing"
     if backup.phase == "done":
@@ -280,7 +293,7 @@ def _fail_backup(
 ) -> tuple[ObstacleRecovery, Backup, ObstacleRouteOutcome]:
     edge_id = agent.state.current_edge or ""
     agent.backup_failed(edge_id, reason)
-    return recovery, backup, _fail(recovery, "stop_backup_fault")
+    return recovery, backup, _fail(recovery, reason)
 
 
 def _consume_turn_notes(

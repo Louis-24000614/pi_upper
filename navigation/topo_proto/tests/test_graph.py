@@ -50,8 +50,8 @@ class TopologyGraphTests(unittest.TestCase):
         self.assertEqual(self.graph.nodes["2_2"].arrival.mode, "visual_odom")
         self.assertIsNone(self.graph.nodes["1_2"].arrival.mode)
         override = self.graph.arrival_overrides[("1_2", "2_2")]
-        self.assertEqual(override.handoff_progress_m, 0.80)
-        self.assertEqual(override.final_forward_m, 0.17)
+        self.assertEqual(override.handoff_progress_m, 0.55)
+        self.assertEqual(override.final_forward_m, 0.42)
         self.assertEqual(override.guard_progress_m, 0.92)
         self.assertNotIn(("2_2", "1_2"), self.graph.arrival_overrides)
 

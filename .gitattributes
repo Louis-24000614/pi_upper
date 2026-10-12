@@ -1,2 +1,3 @@
 # 发布资产按原始字节保存，防止Windows换行转换破坏模板SHA-256校验。
 models/knife/dinov3_448_fp16_v1/** -text
+models/obstacle/trainV2_train-7_yolo11_4.rknn -text

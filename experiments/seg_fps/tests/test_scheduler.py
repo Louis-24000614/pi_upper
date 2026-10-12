@@ -52,7 +52,8 @@ class SchedulerTest(unittest.TestCase):
             args = SimpleNamespace(video=video, config=config, model=root/"model.rknn",
                 output=root/"result.json", variant="buffers", cores="1,2,4", mode="seg",
                 backend="lite", realtime=True, speed=1, max_age=1, seconds=.4,
-                retained_rows=2, record="none", mixed_load=False)
+                retained_rows=2, record="none", mixed_load=False,
+                warmup=5, sample_interval=10)
             with patch.object(benchmark, "RoadSegmenter", Segment), patch.object(
                     benchmark, "snapshot", return_value={}):
                 try:

@@ -4,6 +4,8 @@ import math
 
 import numpy as np
 
+from road_follow.placement_rules import placement_allowed
+
 
 OBSTACLE_DEFAULTS = {
     "edge_end_margin_m": .05,
@@ -52,8 +54,8 @@ def locate_ahead(graph, edge_key, progress_m, distance_m):
 
 
 def filter_current_edge(detections, *, graph, edge_key, progress_m, ipm,
-                        image_shape, settings, lane_x_m=0.0):
-    """返回可参与当前边确认的框，以及可供日志和地图使用的逐框判定。"""
+                        image_shape, settings, lane_x_m=0.0, placement_kind="obstacle"):
+    """返回当前边候选和逐框判定；未知目标停车保护可传 placement_kind=None。"""
     accepted, details = [], []
     edge = graph.edges[edge_key[0]]
     progress_valid = progress_m is not None and math.isfinite(progress_m)
@@ -87,7 +89,11 @@ def filter_current_edge(detections, *, graph, edge_key, progress_m, ipm,
                     reason = "outside_current_lane"
                 else:
                     detail["target"] = locate_ahead(graph, edge_key, progress_m, distance)
-                    if distance > remaining:
+                    target = detail["target"]
+                    if placement_kind is not None and target is not None and not placement_allowed(
+                            graph.edges.get(target["edge_id"]), placement_kind):
+                        reason = "outside_placement_area"
+                    elif distance > remaining:
                         reason = "beyond_current_edge"
                     elif distance > remaining-settings["edge_end_margin_m"]:
                         reason = "near_edge_boundary"

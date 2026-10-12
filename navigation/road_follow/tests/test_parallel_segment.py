@@ -130,15 +130,16 @@ class MainFrameGateTest(unittest.TestCase):
                     "--npu-contexts", "3", "--frames", "1" if active else "2",
                     "--drive", "--uart-bin", str(uart)])
                 self.assertEqual(result, 0)
-                self.assertEqual(nav.call_count, 0 if active else 1)
+                # 已取消全局 200 ms 时效门；慢帧仍更新视觉，有限动作只屏蔽速度下发。
+                self.assertEqual(nav.call_count, 1 if active else 2)
         self.assertTrue(stream.closed)
         return sink.lines
 
-    def test_expired_frame_does_not_advance_navigation_and_sends_zero(self):
-        self.assertEqual(self.check_main(), ["0.000 0.000\n", "0.100 0.200\n", "0 0\n"])
+    def test_slow_frame_still_advances_navigation_without_age_stop(self):
+        self.assertEqual(self.check_main(), ["0.100 0.200\n", "0.100 0.200\n", "0 0\n"])
 
-    def test_expired_frame_does_not_interrupt_finite_action(self):
-        # 结束程序时仍有一次停车；运行中的过期帧不能插入 CMD_VEL 覆盖有限动作。
+    def test_slow_frame_does_not_interrupt_finite_action(self):
+        # 结束程序时仍有一次停车；慢帧参与视觉更新也不能用 CMD_VEL 覆盖有限动作。
         self.assertEqual(self.check_main(active=True), ["0 0\n"])
 
 

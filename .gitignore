@@ -11,6 +11,11 @@ __pycache__/
 models/*
 !models/README.md
 
+# 涵洞和障碍物联合识别的已确认模型随此版本交付。
+!models/obstacle/
+models/obstacle/*
+!models/obstacle/trainV2_train-7_yolo11_4.rknn
+
 # 刀具识别固定发布版本随仓库交付，其他模型仍按机器单独准备。
 !models/knife/
 models/knife/*
@@ -19,3 +24,6 @@ models/knife/*
 # Road-seg collection for YOLO-seg training (see data/road/README.md)
 data/road/*
 !data/road/README.md
+
+# 本机的代理协作约定不属于部署资产，避免被快照意外提交。
+AGENTS.md

@@ -36,10 +36,10 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.mapping=yaml.safe_load((ROOT/"config/culvert.yaml").read_text(encoding="utf-8"))
         self.mapping["calibration"]=CAL
-        self.graph=TopologyGraph({}, {"a":Node("a",0,0),"b":Node("b",1.2,0)},
-            {"a__b":Edge("a__b","a","b",1.2)})
-        self.agent=NS(graph=self.graph,state=NS(current_edge="a__b",from_node="a",to_node="b",
-            phase="following",current_node="a",route_index=3,covered_edges=set(),blocked_edges=set()))
+        self.graph=TopologyGraph({}, {"4_3":Node("4_3",0,0),"5_3":Node("5_3",1.2,0)},
+            {"4_3__5_3":Edge("4_3__5_3","4_3","5_3",1.2)})
+        self.agent=NS(graph=self.graph,state=NS(current_edge="4_3__5_3",from_node="4_3",to_node="5_3",
+            phase="following",current_node="4_3",route_index=3,covered_edges=set(),blocked_edges=set()))
         self.sent=[]
         self.runtime=CulvertRuntime(self.mapping,CulvertConfig.from_mapping(self.mapping["culvert"]),CulvertCalibration(CAL),
             nav_config={"follow":{"near_mps":.05},"road_prior":{"expected_width_m":.20,"min_width_m":.14,"max_width_m":.32}},agent=self.agent,
@@ -75,11 +75,10 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.assertTrue(result.owns)
         self.assertEqual(result.command.reason,"culvert_enter")
         self.assertEqual(self.agent.state.route_index,3)
-        self.assertEqual(self.agent.state.current_node,"a")
+        self.assertEqual(self.agent.state.current_node,"4_3")
         self.assertEqual(self.graph.blocked,set())
 
     def test_runtime_binds_confirmed_speech_callback_and_handles_its_own_receipt(self):
-        from road_follow.speech import SpeechConfig
         executor = NS(web=None, close=lambda: None)
         prefix = Path(self.folder.name)/"speech_binding"
         with patch("road_follow.inspection.create_inspection", return_value=executor) as factory:
@@ -87,19 +86,18 @@ class CulvertRuntimeTest(unittest.TestCase):
                 self.mapping, self.runtime.config, self.runtime.calibration,
                 nav_config=self.runtime.nav_config, agent=self.agent,
                 send=lambda line: self.sent.append(line) or True, event=lambda *_: None,
-                root=ROOT, prefix=prefix, inspection_settings=NS(),
-                speech_config=SpeechConfig((1000,) * 32))
+                root=ROOT, prefix=prefix, inspection_settings=NS())
         self.addCleanup(runtime.close)
         callback = factory.call_args.kwargs["notify"]
         self.assertTrue(factory.call_args.kwargs["speech_enabled"])
         self.assertTrue(callback(dict(status="confirmed", category="suspect",
-                                      identity="suspect_10", edge_id="a__b", direction="A")))
+                                      identity="suspect_10", edge_id="4_3__5_3", direction="A")))
         verb, event_id, audio_id = self.sent[-1].split()
         self.assertEqual((verb, audio_id), ("speech", "22"))
         self.assertTrue(runtime.handle_speech_note(f"SPEECH_RESULT {event_id} 22 ACK_OK"))
         self.assertEqual(runtime.speech.requests[event_id]["state"], "accepted_by_lower")
         self.assertFalse(callback(dict(status="unconfirmed", category="knife",
-                                       identity="knife_01", edge_id="a__b", direction="B")))
+                                       identity="knife_01", edge_id="4_3__5_3", direction="B")))
 
     def test_configured_bias_logs_raw_and_corrected_distance_and_completes_at_corrected_center(self):
         for t in (.7,.8,.9): self.update(t)
@@ -248,7 +246,7 @@ class CulvertRuntimeTest(unittest.TestCase):
         self.runtime.cancel_for_obstacle(1,self.notes)
         self.assertFalse(self.runtime.controller.owns)
         self.assertTrue(self.notes.empty())
-        self.assertFalse(self.runtime.records.done("a__b"))
+        self.assertFalse(self.runtime.records.done("4_3__5_3"))
 
     def test_resume_clears_old_vision_but_keeps_edge_progress_and_route(self):
         junction=JunctionTurn(phase="approach",side="left",branch_latched=True,departure="left")

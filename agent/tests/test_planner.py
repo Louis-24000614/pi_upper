@@ -27,9 +27,9 @@ class CoveragePlannerTests(unittest.TestCase):
         self.assertEqual(actual.length_m, expected.length_m)
         self.assertEqual(actual.unreachable_edges, expected.unreachable_edges)
         self.assertEqual(len(actual.edges), 33)
-        # 出发区三段保持 0.15 / 0.40 m，其余格网边为 0.97 m。
-        # 29 次格网通行各缩短 0.03 m：30.1 - 29 * 0.03 = 29.23。
-        self.assertAlmostEqual(actual.length_m, 29.23)
+        # 出发区三段保持 0.15 / 0.40 m，其余格网边为 0.99 m。
+        # 29 次格网通行各缩短 0.01 m：30.1 - 29 * 0.01 = 29.81。
+        self.assertAlmostEqual(actual.length_m, 29.81)
 
     def test_blocked_edge_is_not_reused(self) -> None:
         graph = load_topology()

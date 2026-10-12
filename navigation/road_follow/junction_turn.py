@@ -95,6 +95,7 @@ class JunctionTurn:
     align_stable: int = 0
     hold_start_m: float | None = None
     hold_yaw_rad: float | None = None
+    fault_reason: str = ""
     anchor: HeadingAnchorGate = field(default_factory=HeadingAnchorGate)
 
 
@@ -269,11 +270,12 @@ def _begin_heading_hold(
     odom_valid: bool,
     cfg: JunctionTurnConfig,
     yaw_rad: float | None = None,
+    target_yaw_rad: float | None = None,
 ) -> tuple[JunctionTurn, VelocityCommand]:
     """道路方向对齐后，记下当时航向，走完最后一段。"""
     state.phase = "heading_hold"
     state.hold_start_m = None
-    state.hold_yaw_rad = None
+    state.hold_yaw_rad = target_yaw_rad
     return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
 
@@ -290,6 +292,7 @@ def step_junction_turn(
     odom_valid: bool = True,
     lane_heading_rad: float | None = None,
     yaw_rad: float | None = None,
+    target_yaw_rad: float | None = None,
     frame_captured_s: float | None = None,
     odom_received_s: float | None = None,
     anchor_notes=None,
@@ -300,7 +303,10 @@ def step_junction_turn(
     _consume_notes(state, notes, send, current_s)
 
     if state.phase == "fault":
-        reason = "stop_heading_anchor_" + state.anchor.failure if state.anchor.failure else "stop_action_fail"
+        reason = state.fault_reason or (
+            "stop_heading_anchor_" + state.anchor.failure
+            if state.anchor.failure else "stop_action_fail"
+        )
         return state, VelocityCommand(0.0, 0.0, reason)
 
     if state.phase == "arrived":
@@ -315,6 +321,9 @@ def step_junction_turn(
     if state.phase == "odom_wait":
         return state, VelocityCommand(0.0, 0.0, "stop_odom_junction_wait")
 
+    if state.phase in ("heading_lock_stop", "heading_lock_stopped"):
+        return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+
     def advance_anchor():
         state.phase, result, ready = step_heading_anchor(
             state.anchor, state.phase, lane_heading_rad=lane_heading_rad,
@@ -325,7 +334,9 @@ def step_junction_turn(
             align_gain=cfg.align_gain, max_abs_omega=cfg.align_max_abs_omega,
         )
         if ready:
-            return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+            return _begin_heading_hold(
+                state, progress_m, odom_valid, cfg, yaw_rad, target_yaw_rad
+            )
         return state, result
 
     if cfg.heading_anchor_enabled and state.phase in ("align", "anchor_wait"):
@@ -392,14 +403,31 @@ def step_junction_turn(
                     and cue.source == "road_end"
                     and command.reason == "stop_lookahead"
                 )
+                or (
+                    state.branch_latched
+                    and cue.source == "odom_handoff"
+                    and target_yaw_rad is not None
+                    and command.reason in (
+                        "stop_road", "stop_centerline", "stop_lookahead",
+                        "stop_forward_strip",
+                    )
+                )
             )
             and distance_ok
         )
         state.arm = state.arm + 1 if in_window else 0
         required_frames = (
-            cfg.road_end_missing_frames
-            if cue.source == "road_end"
-            else cfg.stable_frames
+            1
+            if (
+                cue.source == "odom_handoff"
+                and target_yaw_rad is not None
+                and not is_visual_follow(command)
+            )
+            else (
+                cfg.road_end_missing_frames
+                if cue.source == "road_end"
+                else cfg.stable_frames
+            )
         )
         if state.arm < required_frames:
             return state, command
@@ -425,13 +453,15 @@ def step_junction_turn(
             return state, alignment_command(
                 float(lane_heading_rad), cfg.align_gain, cfg.align_max_abs_omega
             )
-        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+        return _begin_heading_hold(
+            state, progress_m, odom_valid, cfg, yaw_rad, target_yaw_rad
+        )
 
     if state.phase == "align":
         if current_s - state.align_started_s >= cfg.align_timeout_s:
-            state.phase = "fault"
-            state.anchor.failure = "align_timeout"
-            return state, VelocityCommand(0.0, 0.0, "stop_heading_anchor_align_timeout")
+            return _begin_heading_hold(
+                state, progress_m, odom_valid, cfg, yaw_rad, target_yaw_rad
+            )
         ready, state.align_stable = align_ready_to_creep(
             lane_heading_rad,
             state.align_started_s,
@@ -448,7 +478,9 @@ def step_junction_turn(
                 cfg.align_max_abs_omega,
                 cfg.align_max_abs_heading_rad,
             )
-        return _begin_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
+        return _begin_heading_hold(
+            state, progress_m, odom_valid, cfg, yaw_rad, target_yaw_rad
+        )
 
     if state.phase == "heading_hold":
         return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
@@ -499,6 +531,13 @@ def _consume_notes(
                 state.stop_started_s = now_s
             elif note == "STOP_FAIL":
                 state.phase = "fault"
+        elif state.phase == "heading_lock_stop":
+            if note == "STOP_DONE":
+                state.phase = "heading_lock_stopped"
+                state.stop_started_s = now_s
+            elif note == "STOP_FAIL":
+                state.phase = "fault"
+                state.fault_reason = "stop_action_fail"
 
 
 def _resume_departure(state: JunctionTurn, send) -> None:

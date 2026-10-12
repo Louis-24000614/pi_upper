@@ -11,9 +11,9 @@ from road_follow.culvert_map import CulvertRecords
 from topo_proto.graph import Edge, Node, TopologyGraph
 
 
-KEY = ("a__b", "a", "b")
-GRAPH = lambda: TopologyGraph({}, {"a":Node("a",0,0),"b":Node("b",1.2,0)},
-                              {KEY[0]:Edge(KEY[0],"a","b",1.2)})
+KEY = ("4_3__5_3", "4_3", "5_3")
+GRAPH = lambda: TopologyGraph({}, {"4_3":Node("4_3",0,0),"5_3":Node("5_3",1.2,0)},
+                              {KEY[0]:Edge(KEY[0],"4_3","5_3",1.2)})
 
 
 class CulvertControlTest(unittest.TestCase):
@@ -72,6 +72,47 @@ class CulvertControlTest(unittest.TestCase):
         self.sample(7.7)
         self.assertTrue(self.step(7.7).resumed)
         self.assertEqual(self.control.phase,"idle")
+
+    def test_arrival_takes_priority_at_or_after_enter_deadline(self):
+        for delay in (0, .1):
+            for remaining in (.009, 0, -.004):
+                with self.subTest(delay=delay,remaining=remaining):
+                    self.setUp(); self.start()
+                    now = self.control.deadline_s + delay
+                    position = self.target.target_s_m - remaining
+                    self.sample(now,position)
+                    outcome = self.step(now,position)
+                    self.assertEqual(self.control.phase,"stopping")
+                    self.assertIsNone(self.control.fault_reason)
+                    self.assertEqual(self.sent,["stop"])
+                    self.assertEqual(self.control.stop_requested_s,now)
+                    self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+                    self.assertFalse(outcome.send_velocity)
+                    self.assertFalse(self.records.done(KEY[0]))
+
+    def test_enter_timeout_still_faults_when_not_arrived(self):
+        self.start()
+        now = self.control.deadline_s
+        position = self.target.target_s_m - self.config.stop_margin_m - .001
+        self.sample(now,position)
+        outcome = self.step(now,position)
+        self.assertEqual(self.control.phase,"fault")
+        self.assertEqual(self.control.fault_reason,"enter_timeout")
+        self.assertEqual(self.sent,["stop"])
+        self.assertFalse(outcome.send_velocity)
+        self.assertFalse(self.records.done(KEY[0]))
+
+    def test_not_arrived_before_deadline_keeps_entering(self):
+        self.start()
+        now = self.control.deadline_s - .1
+        position = self.target.target_s_m - self.config.stop_margin_m - .001
+        self.sample(now,position)
+        outcome = self.step(now,position)
+        self.assertEqual(self.control.phase,"entering")
+        self.assertIsNone(self.control.fault_reason)
+        self.assertEqual(self.sent,[])
+        self.assertAlmostEqual(outcome.command.v_mps,.05)
+        self.assertTrue(outcome.send_velocity)
 
     def test_stop_failure_does_not_complete(self):
         self.start(); self.sample(.1); self.step(.1)
@@ -143,7 +184,7 @@ class CulvertControlTest(unittest.TestCase):
 
     def test_completed_edge_is_shared_by_both_directions_and_new_task_clears(self):
         self.records.discover(self.target); self.records.complete(KEY[0],.001)
-        reversed_target=CulvertTarget(KEY[0],"b","a",.5,.635,.77,.565,1)
+        reversed_target=CulvertTarget(KEY[0],"5_3","4_3",.5,.635,.77,.565,1)
         self.assertFalse(self.control.begin(reversed_target,1,.5,.05))
         self.assertFalse(CulvertRecords(GRAPH()).done(KEY[0]))
 
@@ -152,7 +193,7 @@ class CulvertControlTest(unittest.TestCase):
         self.assertAlmostEqual(self.history.progress_at(1.04),.202)
         self.assertIsNone(self.history.progress_at(.9))
         self.assertIsNone(self.history.progress_at(1.2))
-        self.history.reset(("x","b","c"))
+        self.history.reset(("x","5_3","c"))
         self.assertIsNone(self.history.progress_at(1.04))
 
     def test_round_trip_motion_cannot_be_mistaken_for_stability(self):
