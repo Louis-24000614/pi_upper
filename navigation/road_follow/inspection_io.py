@@ -88,8 +88,10 @@ class SideCamera:
             capture = self.factory(self.config["device"])
             if not capture.isOpened():
                 raise OSError("侧视相机打开失败")
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config["width"])
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config["height"])
+            capture.set(cv2.CAP_PROP_FPS, 25)
             while not self.stop.is_set():
                 epoch = self.hub.generation()
                 ok, image = capture.read()

@@ -56,19 +56,42 @@ follow:
   # 正常视觉循迹稍微降速，给分割和转向纠偏留出更多反应时间。
   cruise_mps: 0.08
   turn_mps: 0.05
-  lookahead_m: 0.25
+  lookahead_m: 0.20
   turn_abs_x_m: 0.08
-  min_points: 8
+  min_points: 4
   # 墙角分割常只剩 250～380 px，400 会把还能看到的路判成没路。
-  min_road_pixels: 200
+  min_road_pixels: 80
   max_abs_omega: 1.0
   # 实车录像中道路中心已经向左移，但原 +3 cm 偏置抵消了大部分左转纠偏。
   x_bias_m: 0.00
   # 增强视觉纠偏；仍受 max_abs_omega 限制。
   steering_gain: 2.0
   # 固定 25 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
-  min_lookahead_m: 0.24
+  min_lookahead_m: 0.12
   near_mps: 0.05
+
+# 拐弯口卡墙时的局部脱困。仅拓扑循迹启用，不封闭当前边、不改变规划节点。
+wall_escape:
+  enabled: true
+  # 横向偏差与纠偏角速度持续满足后才确认，避免正常弯道误触发。
+  confirm_s: 0.8
+  min_lateral_m: 0.12
+  severe_lateral_m: 0.18
+  min_abs_omega: 0.35
+  severe_abs_omega: 0.45
+  lateral_growth_m: 0.05
+  # 仅在前方可见深度很短时，把靠墙与纠偏饱和判为卡住。
+  max_forward_depth_m: 0.22
+  # 先倒车 12 cm，再按远离墙侧转 90° 探路。
+  reverse_distance_m: 0.12
+  reverse_speed_mps: 0.05
+  reverse_max_s: 4.0
+  stop_settle_ms: 500
+  reacquire_frames: 3
+  reacquire_timeout_s: 3.0
+  max_attempts_per_edge: 1
+  heading_hold_gain: 2.0
+  max_reverse_omega: 0.25
 
 # 同色过分割时的几何兜底（vision/ipm_proto）
 road_prior:

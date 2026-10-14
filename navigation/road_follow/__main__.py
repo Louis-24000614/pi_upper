@@ -51,6 +51,11 @@ from road_follow.obstacle_route import (
     detection_armed,
     step_obstacle_route,
 )
+from road_follow.wall_escape import (
+    WallEscape,
+    step_wall_escape,
+    wall_escape_config_from_mapping,
+)
 from road_follow.pipeline import BevProjector, command_from_mask_with_diagnostics, make_ipm
 from road_follow.recording import VideoRecorder
 from road_follow.async_recording import AsyncVideoRecorder
@@ -138,6 +143,18 @@ COMMAND_NAMES = {
     "stop_backup_timeout": "停车：倒车超时",
     "stop_backup_road_lost": "停车：倒车时道路丢失",
     "stop_backup_no_vision": "停车：倒车时暂时看不到道路",
+    "wall_escape_trigger": "卡墙脱困：确认卡住",
+    "wall_escape_stop_wait": "卡墙脱困：等待停车",
+    "wall_escape_stop_settle": "卡墙脱困：停车稳定",
+    "wall_escape_reverse": "卡墙脱困：短距离倒车",
+    "wall_escape_reverse_done": "卡墙脱困：倒车完成",
+    "wall_escape_turn_wait": "卡墙脱困：等待转向",
+    "wall_escape_turn_settle": "卡墙脱困：转向前稳定",
+    "wall_escape_turning": "卡墙脱困：大角度探路",
+    "wall_escape_reacquire": "卡墙脱困：重新识别道路",
+    "wall_escape_reacquired": "卡墙脱困：恢复原路段",
+    "stop_wall_escape": "停车：卡墙脱困动作失败",
+    "stop_wall_escape_reacquire": "停车：卡墙脱困后未重新识别道路",
     "backup_done": "倒车完成",
     "backup_done_at_entry": "停车：已经位于路段入口",
     "creep": "低速前探",
@@ -424,7 +441,7 @@ def _invalidate_turn_frames(before, states, stream, smoother):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="道路分割寻线，经串口速度环驱动")
     parser.add_argument("--config", type=Path, default=ROOT / "config" / "nav_camera.yaml")
-    parser.add_argument("--model", type=Path, default=ROOT / "models" / "road_yolo11n_seg.rknn")
+    parser.add_argument("--model", type=Path, default=ROOT / "models" / "road_yolo11n_seg_v7.rknn")
     # 已通过等价性和性能验证的组合成为默认值；旧正向参数保留兼容历史脚本，
     # 无须为了使用优化追加启动参数。负向选项仅用于定位问题或对照回放。
     parser.add_argument("--fps-opt", action=argparse.BooleanOptionalAction, default=True,
@@ -686,6 +703,8 @@ def _run(args, parser) -> int:
     junction_turn_cfg = junction_turn_config_from_mapping(cfg)
     backup = Backup()
     backup_cfg = BackupConfig()
+    wall_escape = WallEscape()
+    wall_escape_cfg = wall_escape_config_from_mapping(cfg)
     progress = EdgeProgress()
     route_agent = None
     node_xy: dict[str, tuple[float, float]] = {}
@@ -791,6 +810,17 @@ def _run(args, parser) -> int:
         if culvert_runtime is not None:
             culvert_runtime.reset_progress_origin()
 
+    def _restore_wall_escape_progress(s_m: float):
+        """恢复卡墙前可信进度，丢弃脱困期间的里程样本。"""
+        progress.rebase(s_m)
+        while True:
+            try:
+                odom_samples.get_nowait()
+            except queue.Empty:
+                break
+        if obstacle_judge is not None:
+            obstacle_judge.reset()
+
     def _record_frame(frame, captured_s):
         nonlocal recording_started
         if culvert_runtime is not None and culvert_runtime.first_capture_s is None:
@@ -834,7 +864,8 @@ def _run(args, parser) -> int:
                         sample = odom_samples.get_nowait()
                     except queue.Empty:
                         break
-                    progress.update(*sample)
+                    if wall_escape.phase == "idle":
+                        progress.update(*sample)
                     culvert_runtime.record_odom(sample, progress)
                 culvert_runtime.records.set_vehicle(culvert_runtime.edge_key(), progress.s_m, culvert_runtime.controller.phase)
                 while True:
@@ -979,19 +1010,27 @@ def _run(args, parser) -> int:
                         if obstacle_judge is not None:
                             obstacle_judge.reset()
                         obstacle_edge_key = current_key
-                    armed = detection_armed(
+                    obstacle_armed = detection_armed(
                         entrance_done=True,
                         agent_phase=route_agent.state.phase,
                         junction_phase=junction_turn.phase,
                         recovery_phase=obstacle_recovery.phase,
                     )
                     if culvert_runtime is not None:
-                        armed = armed or culvert_runtime.controller.owns or culvert_eligible(
+                        obstacle_armed = obstacle_armed or culvert_runtime.controller.owns or culvert_eligible(
                             entrance, route_agent, junction_turn, obstacle_recovery, rfid_arrival)
+                    wall_armed = (
+                        entrance.phase == "done"
+                        and route_agent.state.phase == "following"
+                        and junction_turn.phase == "follow"
+                        and obstacle_recovery.phase == "idle"
+                        and wall_escape.phase == "idle"
+                        and culvert_runtime is None
+                    )
                     confirmed = False
                     observation = None
                     hard_detections = []
-                    if armed and detector is not None and obstacle_judge is not None:
+                    if obstacle_armed and detector is not None and obstacle_judge is not None:
                         detections, _elapsed_ms = detector.detect(frame)
                         if culvert_runtime is not None:
                             hard_detections, _, _ = culvert_runtime.split(detections)
@@ -1003,7 +1042,8 @@ def _run(args, parser) -> int:
                                 sample = odom_samples.get_nowait()
                             except queue.Empty:
                                 break
-                            progress.update(*sample)
+                            if wall_escape.phase == "idle":
+                                progress.update(*sample)
                             if culvert_runtime is not None:
                                 culvert_runtime.record_odom(sample, progress)
                         from road_follow.obstacle_edge import filter_current_edge, OBSTACLE_DEFAULTS
@@ -1042,8 +1082,47 @@ def _run(args, parser) -> int:
                             confirmed = culvert_runtime.obstacle_preempts(observation, culvert_observation,
                                 now=time.monotonic(), hard_detections=hard_detections,
                                 image_shape=frame.shape, hard_config=obstacle_judge.config if obstacle_judge else None)
-                            armed = armed or confirmed
-                    if obstacle_recovery.phase != "idle" or confirmed:
+                            obstacle_armed = obstacle_armed or confirmed
+                    wall_before = wall_escape.phase
+                    wall_escape, wall_outcome = step_wall_escape(
+                        wall_escape,
+                        cfg=wall_escape_cfg,
+                        armed=wall_armed,
+                        edge_key=current_key,
+                        command=command,
+                        near_x_m=follow_diag.near_x_m,
+                        forward_depth_m=follow_diag.forward_depth_m,
+                        progress_m=progress.s_m,
+                        now_s=time.monotonic(),
+                        yaw_rad=progress.yaw_rad,
+                        visual_reacquired=(
+                            follow_diag.bev_road_pixels >= int((cfg.get("follow", {}) or {}).get("min_road_pixels", 200))
+                            and follow_diag.output_points >= int((cfg.get("follow", {}) or {}).get("min_points", 8))
+                        ),
+                        notes=action_notes,
+                        send=lambda line: write_velocity(bridge, line),
+                    )
+                    if wall_escape.phase != wall_before:
+                        _event(
+                            "脱困",
+                            f"{_phase_name(wall_before)} → {_phase_name(wall_escape.phase)}；"
+                            f"可信进度={wall_escape.trusted_progress_m:.2f} m；"
+                            f"转向={DIRECTION_NAMES.get(wall_escape.side, wall_escape.side)}",
+                        )
+                    if wall_escape.phase != "idle" or wall_outcome.owns:
+                        recovery_owns = True
+                        command = wall_outcome.command
+                        if wall_outcome.reset_smoother:
+                            smoother.reset()
+                            if segment_stream is not None:
+                                segment_stream.invalidate()
+                        if wall_outcome.restore_progress:
+                            _restore_wall_escape_progress(wall_escape.trusted_progress_m)
+                            _event(
+                                "路线",
+                                f"脱困成功，恢复卡墙前可信里程 {wall_escape.trusted_progress_m:.2f} m",
+                            )
+                    elif obstacle_recovery.phase != "idle" or confirmed:
                         if confirmed and culvert_runtime is not None:
                             culvert_runtime.cancel_for_obstacle(time.monotonic(), action_notes)
                         recovery_owns = True
@@ -1051,7 +1130,7 @@ def _run(args, parser) -> int:
                         obstacle_recovery, backup, outcome = step_obstacle_route(
                             obstacle_recovery,
                             backup,
-                            armed=armed,
+                            armed=obstacle_armed,
                             confirmed=confirmed,
                             agent=route_agent,
                             node_xy=node_xy,

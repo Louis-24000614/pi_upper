@@ -51,6 +51,14 @@ class EdgeProgress:
         self._y = None
         self.last_sample_s = None
 
+    def rebase(self, s_m: float) -> None:
+        """保留逻辑进度，但丢弃脱困期间的位移，下一帧重新建立里程原点。"""
+        self.s_m = max(0.0, float(s_m))
+        self.yaw_rad = None
+        self._x = None
+        self._y = None
+        self.last_sample_s = None
+
     def update(self, x_m: float, y_m: float, yaw_rad: float, received_s: float | None = None) -> float:
         """用本帧航向把平面位移投到走廊上。倒车时 s 减小，但不小于 0。"""
         if not all(math.isfinite(value) for value in (x_m, y_m, yaw_rad)):

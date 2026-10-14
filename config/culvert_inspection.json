@@ -9,14 +9,14 @@
     "face_threshold": 0.5,
     "knife_threshold": 0.5,
     "confirm_frames": 3,
-    "side_timeout_s": 10,
+    "side_timeout_s": 15,
     "sample_interval_s": 1.2,
     "request_timeout_s": 3.0,
     "roi": [
-      0,
-      0,
-      1,
-      0.75
+      0.0021,
+      0.1434,
+      0.9887,
+      0.8
     ]
   },
   "services": {

@@ -1,8 +1,8 @@
 # 仅 --culvert-stop 使用，同时识别障碍物与涵洞。新模型类别顺序由用户确认不变。
 model:
-  id: trainV2_train-7_yolo11_4
-  path: models/obstacle/trainV2_train-7_yolo11_4.rknn
-  sha256: 4aebd07bcb1658455580e7f8da698127ea399552cc8f85b4c5dac811097ef3fe
+  id: best
+  path: models/obstacle/best.rknn
+  sha256: 4217e7cf1728f0a77ed80c64b66b2ab139112ac44c2fd30304f0f2410739feb4
   verify_sha256: true
   task: detect
   core_mask: "0"  # 此处填核编号；加载器转成位掩码 1，SEG 使用核 1、2。
@@ -31,7 +31,7 @@ hard_block:
   min_track_iou: 0.20
 class_mapping:
   verified: true
-  model_sha256: 4aebd07bcb1658455580e7f8da698127ea399552cc8f85b4c5dac811097ef3fe
+  model_sha256: 4217e7cf1728f0a77ed80c64b66b2ab139112ac44c2fd30304f0f2410739feb4
   culvert_class_id: 3
   hard_block_class_ids: [0, 1, 2]
   # 旧录像证据属于旧模型；本次映射依据用户确认。
