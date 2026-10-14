@@ -178,6 +178,7 @@ DIRECTION_NAMES = {
     "right": "右转",
     "straight": "直行",
     "backup": "倒车",
+    "uturn": "180°掉头",
     "none": "未确定",
 }
 

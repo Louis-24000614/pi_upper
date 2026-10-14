@@ -35,7 +35,8 @@ def departure_maneuver(
         return "straight"
     if abs(angle) >= math.radians(135):
         if reverse_arrival:
-            raise ValueError("倒车到点后的下一条路仍朝车尾，不能作为正向出发")
+            # 倒车到点后，下一条边与当前车头相反时需要原地掉头。
+            return "uturn"
         raise ValueError("下一条路与来路反向，但终点不是上一个节点")
     if angle > 0:
         return "left"
@@ -77,9 +78,12 @@ def apply_departure(
         state.departure = "none"
         return state
     state.departure = maneuver
-    if maneuver in ("left", "right", "straight", "backup"):
+    if maneuver in ("left", "right", "straight", "backup", "uturn"):
         state.stop_settle_s = max(0.0, stop_settle_s)
-        state.side = maneuver if maneuver in ("left", "right") else "none"
+        state.side = maneuver if maneuver in ("left", "right") else (
+            "left" if maneuver == "uturn" else "none"
+        )
+        state.quarters_remaining = 2 if maneuver == "uturn" else 0
         if send("stop"):
             state.phase = "stopping"
         else:
