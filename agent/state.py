@@ -18,6 +18,7 @@ class AgentState:
     route_edges: tuple[str, ...] = ()
     route_index: int = 0
     unreachable_edges: tuple[str, ...] = ()
+    skipped_edges: tuple[str, ...] = ()
     phase: str = "idle"
     failure_reason: str | None = None
 

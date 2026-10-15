@@ -14,6 +14,7 @@ class CoveragePlan:
     edges: tuple[str, ...]
     length_m: float
     unreachable_edges: tuple[str, ...] = ()
+    skipped_edges: tuple[str, ...] = ()
 
 
 def _reachable_nodes(graph: TopologyGraph, start: str) -> set[str]:

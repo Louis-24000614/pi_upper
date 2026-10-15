@@ -391,7 +391,7 @@ def _stop_bridge(proc: subprocess.Popen | None) -> None:
         proc.kill()
 
 
-def _start_route():
+def _start_route(*, no_planned_reverse: bool = False):
     """加载拓扑并取出第一条 FollowEdge。转向不使用启动参数里的 left/right。"""
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -403,7 +403,7 @@ def _start_route():
         from navigation.topo_proto.graph import load_topology
 
     graph = load_topology()
-    agent = RouteAgent(graph)
+    agent = RouteAgent(graph, no_planned_reverse=no_planned_reverse)
     first = agent.start()
     node_xy = {node_id: (node.x, node.y) for node_id, node in graph.nodes.items()}
     return agent, node_xy, first
@@ -473,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heap-trim-interval", type=float, default=60 if sys.platform == 'linux' else 0,
                         help="Linux 默认每 60 秒 GC 并归还空闲堆页；0 关闭")
     parser.add_argument("--drive", action="store_true", help="打开串口并使能，按寻线速度行驶")
+    parser.add_argument("-d", "--no-planned-reverse", action="store_true",
+                        help="拓扑全局规划禁止正常巡航倒车，允许跳过道路；保留遇障倒车恢复；不加则沿用原规划")
     parser.add_argument("--culvert-stop", action="store_true", help="启用已标定的涵洞中央停车与本次任务去重")
     parser.add_argument("--culvert-estimated-camera", action="store_true",
                         help="涵洞试运行：使用 --config 中原相机高度、倾角及内参估算距离，精度尚未实测验证")
@@ -516,6 +518,10 @@ def main(argv: list[str] | None = None) -> int:
         help="障碍物连续出现后，用负速度和视觉纠偏倒回上一个路口",
     )
     args = parser.parse_args(argv)
+    if args.no_planned_reverse and not (
+        args.drive and (args.left_at_junction or args.turn_at_junction)
+    ):
+        parser.error("-d/--no-planned-reverse 需要 --drive 和拓扑任务 --turn-at-junction")
     args.inspection_settings = None
     if args.inspection_web and not args.culvert_inspect:
         parser.error("--inspection-web 必须与 --culvert-inspect 一起使用")
@@ -719,7 +725,7 @@ def _run(args, parser) -> int:
     node_xy: dict[str, tuple[float, float]] = {}
     if turn_side is not None and bridge is not None:
         try:
-            route_agent, node_xy, first = _start_route()
+            route_agent, node_xy, first = _start_route(no_planned_reverse=args.no_planned_reverse)
         except (KeyError, ValueError) as exc:
             _event("错误", f"拓扑任务加载失败：{exc}")
             _stop_bridge(bridge)
@@ -736,6 +742,8 @@ def _run(args, parser) -> int:
             elif segmenter is not None:
                 segmenter.close()
             return 1
+        _event("全局规划", "正常巡航不倒车；保留遇障恢复" if args.no_planned_reverse
+               else "原道路覆盖规划；允许规划性倒车")
         _event("路线", f"开始路段 {first.edge_id}：{first.from_node} → {first.to_node}")
     detector = None
     obstacle_judge = None

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from navigation.topo_proto.graph import TopologyGraph
 
+from .coverage.forward import forward_maneuver, plan_forward_remaining
 from .coverage.planner import CoveragePlan, plan_remaining
 from .state import AgentState
 
@@ -40,12 +41,17 @@ AgentCommand = FollowEdge | StartBackup | Stop | MissionComplete
 class RouteAgent:
     """持有唯一拓扑状态，并在确认事件到达后推进或重新规划。"""
 
-    def __init__(self, graph: TopologyGraph, home: str = "0_0") -> None:
+    def __init__(
+        self, graph: TopologyGraph, home: str = "0_0", *,
+        no_planned_reverse: bool = False,
+    ) -> None:
         if home not in graph.nodes:
             raise ValueError(f"未知出发区: {home}")
         if not all(edge.bidirectional for edge in graph.edges.values()):
             raise ValueError("当前道路覆盖 Agent 只支持双向道路")
         self.graph = graph
+        self.no_planned_reverse = no_planned_reverse
+        self._heading: tuple[str, str] | None = None
         self.all_edges = frozenset(graph.edges)
         self.state = AgentState(home=home, current_node=home)
 
@@ -69,6 +75,7 @@ class RouteAgent:
             return self._fail("封闭道路不能标记为已覆盖")
 
         state.covered_edges.add(state.current_edge)
+        self._heading = (state.from_node, node_id)
         state.current_node = node_id
         state.current_edge = None
         state.from_node = None
@@ -115,6 +122,9 @@ class RouteAgent:
         state.from_node = None
         state.to_node = None
         state.phase = "replanning"
+        # 仅遇障恢复允许重新选择首个出口；Navigation 会先完成恢复转向，
+        # 再沿新边前进。普通 NODE_REACHED 不释放驶入方向约束。
+        self._heading = None
         return self._replan()
 
     def backup_failed(self, edge_id: str, reason: str) -> AgentCommand:
@@ -128,12 +138,18 @@ class RouteAgent:
         state = self.state
         required = set(self.all_edges) - state.covered_edges - state.blocked_edges
         try:
-            plan = plan_remaining(
-                self.graph,
-                required,
-                current=state.current_node,
-                home=state.home,
-            )
+            if self.no_planned_reverse:
+                plan = plan_forward_remaining(
+                    self.graph, required, current=state.current_node,
+                    home=state.home, heading=self._heading,
+                )
+            else:
+                plan = plan_remaining(
+                    self.graph,
+                    required,
+                    current=state.current_node,
+                    home=state.home,
+                )
             plan = self._prefer_initial_exit(plan)
         except (ValueError, AssertionError) as exc:
             return self._fail(f"重新规划失败: {exc}")
@@ -167,6 +183,7 @@ class RouteAgent:
             edges=tuple(reversed(plan.edges)),
             length_m=plan.length_m,
             unreachable_edges=plan.unreachable_edges,
+            skipped_edges=plan.skipped_edges,
         )
 
     def _accept_plan(self, plan: CoveragePlan) -> AgentCommand:
@@ -177,6 +194,7 @@ class RouteAgent:
         state.route_edges = plan.edges
         state.route_index = 0
         state.unreachable_edges = plan.unreachable_edges
+        state.skipped_edges = plan.skipped_edges
         state.phase = "at_node"
         return self._dispatch_next()
 
@@ -185,7 +203,7 @@ class RouteAgent:
         if state.route_index >= len(state.route_edges):
             if state.current_node != state.home:
                 return self._fail("路线结束但车辆未回到出发区")
-            if state.unreachable_edges:
+            if state.unreachable_edges and not self.no_planned_reverse:
                 return self._fail(
                     "仍有不可达道路: " + ", ".join(state.unreachable_edges)
                 )
@@ -204,6 +222,10 @@ class RouteAgent:
             )
         if edge_id in state.blocked_edges:
             return self._fail(f"即将执行封闭道路: {edge_id}")
+        if self.no_planned_reverse and forward_maneuver(
+            self.graph, self._heading, from_node, to_node,
+        ) == "reverse":
+            return self._fail(f"仅前进规划拒绝普通反向路段: {from_node} -> {to_node}")
 
         state.current_edge = edge_id
         state.from_node = from_node
