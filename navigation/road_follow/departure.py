@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from road_follow.junction_turn import JunctionTurn
+from road_follow.backup import Backup, BackupConfig, step_backup
+from road_follow.control import VelocityCommand, align_settle_command
+from road_follow.junction_turn import JunctionTurn, JunctionTurnConfig
 
 NodeXY = Mapping[str, tuple[float, float]]
 
@@ -67,6 +69,55 @@ def handoff_entrance(agent, node_xy: NodeXY):
             f"出发区 {arrived_at} 的下一动作不是原地转弯: {maneuver}"
         )
     return maneuver, command
+
+
+def step_planned_backup(
+    state: Backup,
+    *,
+    lane_heading_rad: float | None,
+    frame_captured_s: float,
+    progress_s_m: float,
+    command: VelocityCommand,
+    now_s: float,
+    yaw_rad: float | None,
+    odom_valid: bool,
+    backup_cfg: BackupConfig,
+    align_cfg: JunctionTurnConfig,
+) -> tuple[Backup, VelocityCommand]:
+    """规划倒车先用当前视觉摆正，再锁住当时的 IMU 航向退回入口。"""
+    can_align = (
+        odom_valid and math.isfinite(progress_s_m)
+        and progress_s_m > backup_cfg.done_progress_m
+        and yaw_rad is not None and math.isfinite(yaw_rad)
+    )
+    if state.phase in ("idle", "align") and can_align:
+        if state.phase == "idle":
+            state.phase = "align"
+            state.clear_frames = 0
+            state.last_frame_s = None
+        if state.last_frame_s is not None and frame_captured_s <= state.last_frame_s:
+            return state, VelocityCommand(0.0, 0.0, "align")
+        state.last_frame_s = frame_captured_s
+        aligned = (
+            lane_heading_rad is not None
+            and math.isfinite(lane_heading_rad)
+            and abs(lane_heading_rad) <= align_cfg.align_max_abs_heading_rad
+        )
+        state.clear_frames = state.clear_frames + 1 if aligned else 0
+        if state.clear_frames < align_cfg.align_stable_frames:
+            return state, align_settle_command(
+                lane_heading_rad, align_cfg.align_gain,
+                align_cfg.align_max_abs_omega, align_cfg.align_max_abs_heading_rad,
+            )
+        state.phase = "idle"
+    elif state.phase == "align":
+        # 沿用原倒车的起点和 ODOM/IMU 检查，不在无效输入上继续摆正。
+        state.phase = "idle"
+
+    return step_backup(
+        state, state.phase == "idle", None, progress_s_m, command, now_s, backup_cfg,
+        yaw_rad=yaw_rad, odom_valid=odom_valid, heading_only=True,
+    )
 
 
 def apply_departure(

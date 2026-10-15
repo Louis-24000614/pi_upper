@@ -5,13 +5,16 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from road_follow.backup import Backup, BackupConfig
+from road_follow.control import VelocityCommand
 from road_follow.departure import (
     apply_departure,
     departure_maneuver,
     handoff_arrival,
     handoff_entrance,
+    step_planned_backup,
 )
-from road_follow.junction_turn import JunctionTurn
+from road_follow.junction_turn import JunctionTurn, JunctionTurnConfig
 
 
 NODES = {
@@ -201,6 +204,100 @@ class DepartureTest(unittest.TestCase):
         )
         self.assertEqual(state.phase, "fault")
         self.assertEqual(sent, [])
+
+
+class PlannedBackupTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = Backup()
+        self.backup_cfg = BackupConfig()
+        self.align_cfg = JunctionTurnConfig(align_stable_frames=3)
+
+    def step(self, heading=0.0, now=1.0, yaw=0.5, progress=0.6, captured=None, odom_valid=True):
+        self.state, command = step_planned_backup(
+            self.state, lane_heading_rad=heading,
+            frame_captured_s=now if captured is None else captured,
+            progress_s_m=progress, command=VelocityCommand(0.08, 0.0, "follow"),
+            now_s=now, yaw_rad=yaw, odom_valid=odom_valid,
+            backup_cfg=self.backup_cfg, align_cfg=self.align_cfg,
+        )
+        return command
+
+    def test_visual_alignment_turns_in_place_without_latching_imu(self):
+        for heading in (0.2, -0.2):
+            with self.subTest(heading=heading):
+                self.state = Backup()
+                command = self.step(heading=heading)
+                self.assertEqual(self.state.phase, "align")
+                self.assertIsNone(self.state.hold_yaw_rad)
+                self.assertEqual(command.v_mps, 0.0)
+                self.assertLess(command.omega_radps * heading, 0.0)
+                self.assertLessEqual(abs(command.omega_radps), self.align_cfg.align_max_abs_omega)
+
+    def test_locks_current_imu_only_after_alignment_then_reverses(self):
+        self.step(heading=0.2, now=1.0, yaw=0.5)
+        for now, yaw in ((20.0, 0.3), (20.1, 0.2)):
+            command = self.step(now=now, yaw=yaw)
+            self.assertEqual(command.v_mps, 0.0)
+            self.assertIsNone(self.state.hold_yaw_rad)
+        command = self.step(now=20.2, yaw=0.15, progress=0.58)
+        self.assertEqual(self.state.phase, "backing")
+        self.assertEqual(command.v_mps, 0.0)
+        self.assertAlmostEqual(self.state.hold_yaw_rad, 0.15)
+        self.assertAlmostEqual(self.state.started_s, 20.2)
+        self.assertAlmostEqual(self.state.start_progress_m, 0.58)
+        command = self.step(heading=-0.3, now=20.3, yaw=0.2, progress=0.57)
+        self.assertLess(command.v_mps, 0.0)
+        self.assertEqual(command.reason, "heading_backup")
+        self.assertLess(command.omega_radps, 0.0)
+        self.assertAlmostEqual(self.state.hold_yaw_rad, 0.15)
+        command = self.step(heading=None, now=20.4, yaw=0.15, progress=0.56)
+        self.assertLess(command.v_mps, 0.0)
+        self.assertEqual(command.omega_radps, 0.0)
+
+    def test_repeated_or_older_frame_does_not_complete_alignment(self):
+        self.step(now=1.0)
+        self.step(now=1.1, captured=1.0)
+        self.step(now=1.2, captured=0.9)
+        self.assertEqual(self.state.clear_frames, 1)
+        self.assertIsNone(self.state.hold_yaw_rad)
+        self.step(now=1.3)
+        self.assertEqual(self.state.phase, "align")
+        self.step(now=1.4)
+        self.assertEqual(self.state.phase, "backing")
+
+    def test_missing_or_unaligned_measurement_restarts_stable_count(self):
+        for heading in (None, float("nan"), float("inf"), 0.2):
+            with self.subTest(heading=heading):
+                self.state = Backup()
+                self.step(now=1.0)
+                self.step(now=1.1)
+                self.step(heading=heading, now=1.2)
+                self.assertEqual(self.state.clear_frames, 0)
+                self.assertIsNone(self.state.hold_yaw_rad)
+                self.step(now=1.3)
+                self.step(now=1.4)
+                self.assertEqual(self.state.phase, "align")
+                self.step(now=1.5, yaw=0.1)
+                self.assertEqual(self.state.phase, "backing")
+                self.assertAlmostEqual(self.state.hold_yaw_rad, 0.1)
+
+    def test_existing_backup_completion_and_fault_results_are_preserved(self):
+        for progress, valid, reason in (
+            (0.0, True, "backup_done_at_entry"),
+            (0.6, False, "stop_backup_odom_stale"),
+        ):
+            with self.subTest(reason=reason):
+                self.state = Backup()
+                command = self.step(progress=progress, odom_valid=valid)
+                self.assertEqual(command.reason, reason)
+                self.assertEqual(command.v_mps, 0.0)
+
+    def test_existing_odom_fault_still_applies_during_alignment(self):
+        self.step(heading=0.2)
+        command = self.step(heading=0.2, now=1.1, odom_valid=False)
+        self.assertEqual(self.state.phase, "fault")
+        self.assertEqual(command.reason, "stop_backup_odom_stale")
+        self.assertEqual((command.v_mps, command.omega_radps), (0.0, 0.0))
 
 
 if __name__ == "__main__":

@@ -39,8 +39,8 @@ class_mapping:
   evidence_seconds: {}
 culvert:
   length_m: 0.27
-  # 临时试验值：入口、中央、出口沿行驶方向统一提前 10 cm；尚未实车验收。
-  entry_distance_bias_m: -0.10
+  # 临时试验值：入口、中央、出口沿行驶方向统一提前 7 cm；尚未实车验收。
+  entry_distance_bias_m: -0.07
   min_distance_m: 0.10
   max_distance_m: 0.60
   max_lateral_m: 0.10

@@ -102,14 +102,14 @@ class CulvertRuntimeTest(unittest.TestCase):
     def test_configured_bias_logs_raw_and_corrected_distance_and_completes_at_corrected_center(self):
         for t in (.7,.8,.9): self.update(t)
         target=self.runtime.controller.target
-        self.assertAlmostEqual(self.runtime.config.entry_distance_bias_m,-.10)
-        self.assertAlmostEqual(target.target_s_m,.24+.35-.10+.135)
+        self.assertAlmostEqual(self.runtime.config.entry_distance_bias_m,-.07)
+        self.assertAlmostEqual(target.target_s_m,.24+.35-.07+.135)
         events=[json.loads(line) for line in
                 Path(self.runtime.log.name).read_text(encoding="utf-8").splitlines()]
         observation=next(e for e in events if e.get("reason")=="confirmed")
         self.assertAlmostEqual(observation["entry_distance_m"],.35)
-        self.assertAlmostEqual(observation["corrected_entry_distance_m"],.25)
-        self.assertAlmostEqual(observation["entry_distance_bias_m"],-.10)
+        self.assertAlmostEqual(observation["corrected_entry_distance_m"],.28)
+        self.assertAlmostEqual(observation["entry_distance_bias_m"],-.07)
         def parked_step(t):
             sample=(target.target_s_m,0,0,t)
             self.progress.s_m=target.target_s_m

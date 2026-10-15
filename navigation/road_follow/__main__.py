@@ -36,7 +36,7 @@ from road_follow.control import (
     heading_anchor_enabled_from_mapping,
     is_visual_follow,
 )
-from road_follow.departure import handoff_arrival, handoff_entrance
+from road_follow.departure import handoff_arrival, handoff_entrance, step_planned_backup
 from road_follow.entrance import (
     EntranceDeparture,
     entrance_config_from_mapping,
@@ -1404,18 +1404,18 @@ def _run(args, parser) -> int:
                         )
                     if junction_turn.phase == "backup":
                         backup_before = backup.phase
-                        # 规划原路返回：锁住倒车前航向，用 IMU 和里程计倒回入口。
-                        backup, command = step_backup(
+                        # 规划原路返回：先视觉摆正，再锁 IMU 航向倒回入口。
+                        backup, command = step_planned_backup(
                             backup,
-                            backup.phase == "idle",
-                            None,
-                            progress.s_m,
-                            command,
-                            time.monotonic(),
-                            backup_cfg,
+                            lane_heading_rad=follow_diag.lane_heading_rad,
+                            frame_captured_s=captured_s,
+                            progress_s_m=progress.s_m,
+                            command=command,
+                            now_s=time.monotonic(),
+                            backup_cfg=backup_cfg,
+                            align_cfg=junction_turn_cfg,
                             yaw_rad=progress.yaw_rad,
                             odom_valid=progress.is_fresh(time.monotonic()),
-                            heading_only=True,
                         )
                         if backup.phase == "done" and backup_before != "done":
                             if command.reason == "backup_done_at_entry":
@@ -1573,13 +1573,14 @@ def _run(args, parser) -> int:
                 if command.reason in ("align", "heading_hold") or junction_turn.phase in (
                     "align", "heading_hold", "anchor_wait",
                 ):
-                    lane_heading = align_lane_heading_rad
+                    planned_align = junction_turn.phase == "backup" and backup.phase == "align"
+                    lane_heading = follow_diag.lane_heading_rad if planned_align else align_lane_heading_rad
                     details.append(
                         "车道方向=未知"
                         if lane_heading is None
                         else (
                             f"车道方向={lane_heading:+.3f} rad"
-                            + ("" if lane_heading_live else "（携带）")
+                            + ("" if planned_align or lane_heading_live else "（携带）")
                         )
                     )
                     depth = follow_diag.forward_depth_m
