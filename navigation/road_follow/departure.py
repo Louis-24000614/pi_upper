@@ -83,8 +83,10 @@ def step_planned_backup(
     odom_valid: bool,
     backup_cfg: BackupConfig,
     align_cfg: JunctionTurnConfig,
+    near_x_m: float | None = None,
+    visual_steering_gain: float = 0.0,
 ) -> tuple[Backup, VelocityCommand]:
-    """规划倒车先用当前视觉摆正，再锁住当时的 IMU 航向退回入口。"""
+    """规划倒车先视觉摆正，再融合 IMU 航向、视觉横向和里程退回入口。"""
     can_align = (
         odom_valid and math.isfinite(progress_s_m)
         and progress_s_m > backup_cfg.done_progress_m
@@ -115,8 +117,10 @@ def step_planned_backup(
         state.phase = "idle"
 
     return step_backup(
-        state, state.phase == "idle", None, progress_s_m, command, now_s, backup_cfg,
-        yaw_rad=yaw_rad, odom_valid=odom_valid, heading_only=True,
+        state, state.phase == "idle", near_x_m, progress_s_m, command, now_s,
+        backup_cfg, yaw_rad=yaw_rad, odom_valid=odom_valid,
+        frame_captured_s=frame_captured_s, heading_only=True,
+        visual_steering_gain=visual_steering_gain,
     )
 
 

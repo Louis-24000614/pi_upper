@@ -222,7 +222,11 @@ def forward_lane_heading(
     return heading
 
 
-def reverse_omega(near_x_m: float, cfg: BackupConfig) -> float:
+def reverse_omega(
+    near_x_m: float,
+    cfg: BackupConfig,
+    steering_gain: float = 1.0,
+) -> float:
     """负线速度下的 Pure Pursuit 修正；符号与正向循迹相反。
 
     横向偏差小于死区时不修正：白底白沿下中心线几厘米的抖动不值得打轮。
@@ -232,7 +236,7 @@ def reverse_omega(near_x_m: float, cfg: BackupConfig) -> float:
     y = max(1e-3, abs(cfg.lookahead_y_m))
     denom = near_x_m * near_x_m + y * y
     speed = -abs(cfg.reverse_speed_mps)
-    omega = -speed * (2.0 * near_x_m) / denom
+    omega = -speed * (2.0 * near_x_m) / denom * max(0.0, float(steering_gain))
     limit = abs(cfg.max_abs_omega)
     return max(-limit, min(limit, omega))
 
@@ -264,8 +268,9 @@ def step_backup(
     odom_valid: bool = True,
     frame_captured_s: float | None = None,
     heading_only: bool = False,
+    visual_steering_gain: float = 0.0,
 ) -> tuple[Backup, VelocityCommand]:
-    """以负 CMD_VEL 倒回入口；规划返回锁住起始航向，不参与视觉纠偏。"""
+    """以负 CMD_VEL 倒回入口；规划返回融合 IMU 航向和视觉横向纠偏。"""
     cfg = cfg or BackupConfig()
 
     if state.phase == "fault":
@@ -323,14 +328,31 @@ def step_backup(
         if yaw_rad is None or not math.isfinite(yaw_rad):
             state.phase = "fault"
             return state, _stop("stop_backup_heading_invalid")
-        # 只使用倒车启动时锁住的航向，视觉丢失和侧向开口不改变倒车方向。
+        # IMU 负责航向保持；视觉只在当前帧新鲜时作为横向纠偏辅助，
+        # 视觉短暂丢失时退化为 IMU，不因单帧缺失停车。
         hold = heading_hold_command(
             -abs(cfg.reverse_speed_mps), yaw_rad, state.hold_yaw_rad,
             cfg.heading_hold_gain, cfg.max_abs_omega,
         )
+        omega = hold.omega_radps
+        visual_ok = (
+            visual_steering_gain > 0.0
+            and near_x_m is not None
+            and math.isfinite(near_x_m)
+            and frame_captured_s is not None
+            and math.isfinite(frame_captured_s)
+            and 0.0 <= now_s - frame_captured_s <= 0.20
+        )
+        if visual_ok:
+            omega += reverse_omega(
+                float(near_x_m), cfg, visual_steering_gain
+            )
+        limit = abs(cfg.max_abs_omega)
+        omega = max(-limit, min(limit, omega))
         return state, VelocityCommand(
-            hold.v_mps, _rate_limited_omega(state, hold.omega_radps, cfg),
-            "heading_backup",
+            hold.v_mps,
+            _rate_limited_omega(state, omega, cfg),
+            "fused_backup" if visual_ok else "heading_backup",
         )
 
     vision_ok = near_x_m is not None and math.isfinite(near_x_m)

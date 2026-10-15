@@ -1416,6 +1416,10 @@ def _run(args, parser) -> int:
                             align_cfg=junction_turn_cfg,
                             yaw_rad=progress.yaw_rad,
                             odom_valid=progress.is_fresh(time.monotonic()),
+                            near_x_m=follow_diag.near_x_m,
+                            visual_steering_gain=float(
+                                follow_cfg.get("steering_gain", 1.0)
+                            ),
                         )
                         if backup.phase == "done" and backup_before != "done":
                             if command.reason == "backup_done_at_entry":
