@@ -87,6 +87,7 @@ class JunctionTurn:
     branch_latched: bool = False
     approach_age: int = 0
     departure: str = "none"
+    quarters_remaining: int = 0
     suppress_cue: bool = False
     stop_started_s: float = 0.0
     stop_settle_s: float = 2.0
@@ -521,8 +522,15 @@ def _consume_notes(
                 state.phase = "fault"
         elif state.phase == "turning":
             if note == "TURN_DONE":
-                state.phase = "reacquire"
-                state.clear = 0
+                if state.quarters_remaining > 1:
+                    state.quarters_remaining -= 1
+                    if not send(f"turn {state.side}"):
+                        state.phase = "fault"
+                        state.fault_reason = "stop_action_fail"
+                else:
+                    state.quarters_remaining = 0
+                    state.phase = "reacquire"
+                    state.clear = 0
             elif note == "TURN_FAIL":
                 state.phase = "fault"
         elif state.phase == "stopping":
@@ -548,6 +556,14 @@ def _resume_departure(state: JunctionTurn, send) -> None:
             state.side = state.departure
         else:
             state.phase = "fault"
+        return
+    if state.departure == "uturn":
+        state.quarters_remaining = max(2, state.quarters_remaining)
+        if send(f"turn {state.side}"):
+            state.phase = "turning"
+        else:
+            state.phase = "fault"
+            state.fault_reason = "stop_action_fail"
         return
     if state.departure == "straight":
         state.phase = "follow"

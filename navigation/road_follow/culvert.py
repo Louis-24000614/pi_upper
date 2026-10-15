@@ -28,8 +28,10 @@ class CulvertConfig:
     stable_position_m: float = 0.01
     stable_yaw_rad: float = 0.03
     task_s: float = 5.0
+    # Retained for old configurations; entering no longer has a timeout fault.
     enter_extra_s: float = 2.0
     reacquire_frames: int = 3
+    # Retained for old configurations; road recovery no longer has a timeout fault.
     reacquire_timeout_s: float = 5.0
     entry_distance_bias_m: float = 0.0
 
@@ -153,8 +155,6 @@ class CulvertController:
         self.executor = executor or PauseTask(config.task_s)
         self.phase = "idle"
         self.target = None
-        self.started_s = 0.0
-        self.deadline_s = 0.0
         self.stop_requested_s = None
         self.stop_ack_s = None
         self.clear = 0
@@ -177,8 +177,6 @@ class CulvertController:
         if self.records.discover(target) is False:
             return False
         self.target = target
-        self.started_s = now
-        self.deadline_s = now + max(0, target.target_s_m - current_s) / near_speed + self.config.enter_extra_s
         self.stop_requested_s = self.stop_ack_s = None
         self.clear = 0
         self._transition("entering", now, target_s_m=target.target_s_m)
@@ -214,8 +212,6 @@ class CulvertController:
                 self.fault("edge_changed", now)
             elif not self.history.fresh(now):
                 self.fault("odom_stale", now)
-            elif not visual_ok:
-                self.fault("vision_unsafe", now)
             elif "STOP_FAIL" in notes:
                 self.fault("stop_failed", now)
         stop = VelocityCommand(0.0, 0.0, "stop_culvert_" + self.phase)
@@ -230,16 +226,14 @@ class CulvertController:
                     self._transition("stopping", now, remaining_m=remaining)
                 else:
                     self.fault("stop_submit_failed", now)
-            elif now >= self.deadline_s:
-                self.fault("enter_timeout", now)
             else:
+                # A visual stop pauses entry without cancelling the inspection task.
+                if not visual_ok or command.v_mps <= 0:
+                    return CulvertOutcome(stop, True)
                 # Lower speed and steering together to retain the same curvature.
                 speed = min(command.v_mps, near_speed)
-                if speed <= 0:
-                    self.fault("road_lost", now)
-                else:
-                    omega = command.omega_radps * speed / command.v_mps
-                    return CulvertOutcome(VelocityCommand(speed, omega, "culvert_enter"), True)
+                omega = command.omega_radps * speed / command.v_mps
+                return CulvertOutcome(VelocityCommand(speed, omega, "culvert_enter"), True)
         elif self.phase == "stopping":
             if "STOP_DONE" in notes:
                 self.stop_ack_s = now
@@ -277,20 +271,21 @@ class CulvertController:
                         self.records.complete_inspection(target.edge_id, current_s-target.target_s_m, inspection)
                     else:
                         self.records.complete(target.edge_id, current_s-target.target_s_m)
-                    self.deadline_s = now + cfg.reacquire_timeout_s
-                    self.last_reacquire_s = frame_s
+                    self.last_reacquire_s = (
+                        frame_s if frame_s is not None and math.isfinite(frame_s) and frame_s <= now
+                        else None)
                     self._transition("reacquire", now)
             elif result != "running":
                 self.fault("invalid_task_result", now)
         elif self.phase == "reacquire":
-            if frame_s is not None and (self.last_reacquire_s is None or frame_s > self.last_reacquire_s):
+            if not visual_ok:
+                self.clear = 0
+            elif frame_s is not None and (self.last_reacquire_s is None or frame_s > self.last_reacquire_s):
                 self.last_reacquire_s = frame_s
                 self.clear = self.clear + 1 if command.v_mps > 0 else 0
             if self.clear >= cfg.reacquire_frames:
                 self._transition("idle", now)
                 self.target = None
                 return CulvertOutcome(VelocityCommand(0, 0, "culvert_resume"), True, True, True)
-            if now >= self.deadline_s:
-                self.fault("reacquire_timeout", now)
         return CulvertOutcome(VelocityCommand(0, 0, "stop_culvert_" + self.phase), True,
                               self.phase == "reacquire")

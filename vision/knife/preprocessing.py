@@ -136,14 +136,7 @@ def segment_foreground(image: np.ndarray) -> np.ndarray:
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = _largest_component(mask)
-    # 白纸被并入前景，或局部框选只留下深色刀柄时，使用刀柄种子补回浅色刀刃。
-    mask_ratio = float(np.count_nonzero(mask)) / float(mask.size)
-    if mask_ratio < 0.10 or mask_ratio > 0.50:
-        recovered = _scene_grabcut(bgr)
-        if recovered is not None:
-            return recovered
-    return mask
+    return _largest_component(mask)
 
 
 def _rotate_bound(image: np.ndarray, angle: float, interpolation: int) -> np.ndarray:

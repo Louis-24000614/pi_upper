@@ -73,12 +73,12 @@ class CulvertControlTest(unittest.TestCase):
         self.assertTrue(self.step(7.7).resumed)
         self.assertEqual(self.control.phase,"idle")
 
-    def test_arrival_takes_priority_at_or_after_enter_deadline(self):
+    def test_arrival_stops_at_or_after_former_enter_timeout(self):
         for delay in (0, .1):
             for remaining in (.009, 0, -.004):
                 with self.subTest(delay=delay,remaining=remaining):
                     self.setUp(); self.start()
-                    now = self.control.deadline_s + delay
+                    now = (self.target.target_s_m-.5)/.05 + self.config.enter_extra_s + delay
                     position = self.target.target_s_m - remaining
                     self.sample(now,position)
                     outcome = self.step(now,position)
@@ -90,29 +90,47 @@ class CulvertControlTest(unittest.TestCase):
                     self.assertFalse(outcome.send_velocity)
                     self.assertFalse(self.records.done(KEY[0]))
 
-    def test_enter_timeout_still_faults_when_not_arrived(self):
+    def test_entry_past_former_timeout_keeps_driving_and_stops_at_target(self):
         self.start()
-        now = self.control.deadline_s
+        former_timeout = (self.target.target_s_m-.5)/.05 + self.config.enter_extra_s
         position = self.target.target_s_m - self.config.stop_margin_m - .001
-        self.sample(now,position)
-        outcome = self.step(now,position)
-        self.assertEqual(self.control.phase,"fault")
-        self.assertEqual(self.control.fault_reason,"enter_timeout")
+        for now in (former_timeout,former_timeout+60):
+            self.sample(now,position)
+            outcome = self.step(now,position)
+            self.assertEqual(self.control.phase,"entering")
+            self.assertIsNone(self.control.fault_reason)
+            self.assertEqual(self.sent,[])
+            self.assertAlmostEqual(outcome.command.v_mps,.05)
+            self.assertTrue(outcome.send_velocity)
+            self.assertFalse(self.records.done(KEY[0]))
+        self.sample(now+.1)
+        outcome = self.step(now+.1)
+        self.assertEqual(self.control.phase,"stopping")
         self.assertEqual(self.sent,["stop"])
         self.assertFalse(outcome.send_velocity)
-        self.assertFalse(self.records.done(KEY[0]))
 
-    def test_not_arrived_before_deadline_keeps_entering(self):
-        self.start()
-        now = self.control.deadline_s - .1
-        position = self.target.target_s_m - self.config.stop_margin_m - .001
-        self.sample(now,position)
-        outcome = self.step(now,position)
-        self.assertEqual(self.control.phase,"entering")
-        self.assertIsNone(self.control.fault_reason)
-        self.assertEqual(self.sent,[])
-        self.assertAlmostEqual(outcome.command.v_mps,.05)
-        self.assertTrue(outcome.send_velocity)
+    def test_entry_visual_pause_resumes_without_resetting_target_or_progress(self):
+        for command in (VelocityCommand(0,0,"stop_lookahead"),self.command):
+            with self.subTest(command=command.reason):
+                self.setUp(); self.start()
+                target = self.control.target
+                self.command = command
+                self.sample(.1,.5)
+                outcome = self.step(.1,.5,visual=False)
+                self.assertEqual(self.control.phase,"entering")
+                self.assertIsNone(self.control.fault_reason)
+                self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+                self.assertTrue(outcome.send_velocity)
+                self.assertEqual(self.sent,[])
+                self.command = VelocityCommand(.08,.16,"follow")
+                self.sample(60,.52)
+                outcome = self.step(60,.52)
+                self.assertEqual(self.control.phase,"entering")
+                self.assertIs(self.control.target,target)
+                self.assertEqual(self.history.samples[-1][1],.52)
+                self.assertAlmostEqual(outcome.command.v_mps,.05)
+                self.assertAlmostEqual(outcome.command.omega_radps,.10)
+                self.assertEqual(self.sent,[])
 
     def test_stop_failure_does_not_complete(self):
         self.start(); self.sample(.1); self.step(.1)
@@ -131,11 +149,56 @@ class CulvertControlTest(unittest.TestCase):
         self.sample(2.11); self.step(2.11)
         self.assertEqual(self.control.fault_reason,"stop_ack_timeout")
 
-    def test_odom_stale_and_road_lost_stop(self):
-        self.start(); self.step(.6,.5)
+    def test_odom_stale_still_stops(self):
+        self.start(); outcome=self.step(.6,.5)
         self.assertEqual(self.control.fault_reason,"odom_stale")
-        self.setUp(); self.start(); self.step(.1,.5,visual=False)
-        self.assertEqual(self.control.fault_reason,"vision_unsafe")
+        self.assertEqual(self.sent,["stop"])
+        self.assertFalse(outcome.send_velocity)
+
+    def test_task_survives_visual_loss_and_resumes_after_long_road_recovery(self):
+        self.parked()
+        steps, cancellations = [], []
+        self.control.executor = SimpleNamespace(
+            step=lambda now:steps.append(now) or "running",cancel=cancellations.append)
+        self.command = VelocityCommand(0,0,"stop_lookahead")
+        self.sample(2.4)
+        outcome = self.step(2.4,visual=False)
+        self.assertEqual(self.control.phase,"task")
+        self.assertEqual(steps,[2.4])
+        self.assertEqual(cancellations,[])
+        self.assertFalse(outcome.send_velocity)
+        self.control.executor.step = lambda now:"done"
+        self.sample(2.5)
+        self.step(2.5,visual=False)
+        self.assertEqual(self.control.phase,"reacquire")
+        self.assertTrue(self.records.done(KEY[0]))
+        now = 2.5+self.config.reacquire_timeout_s+60
+        self.sample(now)
+        outcome = self.step(now,visual=False)
+        self.assertEqual(self.control.phase,"reacquire")
+        self.assertIsNone(self.control.fault_reason)
+        self.assertEqual(outcome.command.v_mps,0)
+        self.command = VelocityCommand(.08,.16,"follow")
+        self.sample(now+.1)
+        self.assertFalse(self.step(now+.1).resumed)
+        self.assertFalse(self.step(now+.1).resumed)  # The same frame cannot count twice.
+        self.assertEqual(self.control.clear,1)
+        self.sample(now+.2)
+        self.assertFalse(self.step(now+.2,visual=False).resumed)
+        self.assertEqual(self.control.clear,0)
+        for t in (now+.3,now+.4):
+            self.sample(t)
+            self.assertFalse(self.step(t).resumed)
+        self.sample(now+.5)
+        outcome = self.step(now+.5)
+        self.assertTrue(outcome.resumed)
+        self.assertEqual(self.control.phase,"idle")
+        self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+        outcome = self.step(now+.6)
+        self.assertFalse(outcome.owns)
+        self.assertEqual(outcome.command,self.command)
+        self.assertEqual(cancellations,[])
+        self.assertEqual(self.sent,["stop"])
 
     def test_edge_change_stops_without_completing(self):
         self.start(); self.step(.1,.5,key=("c__d","c","d"))

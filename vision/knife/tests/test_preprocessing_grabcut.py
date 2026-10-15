@@ -1,4 +1,4 @@
-"""用合成刀具和退化输入检查实拍 GrabCut 补偿，不依赖模型或相机。"""
+"""检查停用 GrabCut 后的前景分割及保留的辅助函数，不依赖模型或相机。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from vision.knife import preprocessing
 
 
 def knife_scene() -> np.ndarray:
-    """固定背景、深色刀柄和浅色刀刃，刀刃不应被颜色阈值漏掉。"""
+    """固定背景、深色刀柄和浅色刀刃，用于复现低前景场景。"""
     image = np.full((180, 300, 3), 250, dtype=np.uint8)
     image[80:105, 60:140] = 45
     image[83:102, 140:200] = 220
@@ -29,26 +29,29 @@ class GrabCutPreprocessingTests(unittest.TestCase):
         # GrabCut 的 GMM 初始化使用 OpenCV RNG，固定种子使回归测试可复现。
         cv2.setRNGSeed(12)
 
-    def test_low_contrast_blade_is_recovered_without_background(self):
+    def test_low_contrast_scene_keeps_legacy_mask_without_recovery(self):
         image = knife_scene()
-        with patch.object(preprocessing, "_scene_grabcut", return_value=None):
-            legacy = preprocessing.segment_foreground(image)
-        mask = preprocessing.segment_foreground(image)
+        with patch.object(preprocessing, "_scene_grabcut", side_effect=AssertionError("GrabCut 已停用")) as recovery:
+            mask = preprocessing.segment_foreground(image)
+        recovery.assert_not_called()
 
-        # 独立已知几何区域检查真实恢复效果，不能仅检查补偿函数被调用。
+        # 保持旧颜色分割结果，不再用 GrabCut 扩大浅色刀刃区域。
         blade = np.s_[86:99, 145:195]
-        self.assertEqual(np.count_nonzero(legacy[blade]), 0)
-        self.assertGreater(float(np.mean(mask[blade] > 0)), 0.95)
+        handle = np.s_[85:100, 65:135]
+        self.assertEqual(np.count_nonzero(mask[blade]), 0)
+        self.assertGreater(float(np.mean(mask[handle] > 0)), 0.95)
         self.assertEqual(np.count_nonzero(mask[:50]), 0)
-        self.assertGreater(np.count_nonzero(mask), np.count_nonzero(legacy))
+        self.assertLess(float(np.mean(mask > 0)), 0.10)
         self.assertEqual(mask.shape, image.shape[:2])
         self.assertEqual(mask.dtype, np.uint8)
 
-    def test_recovered_mask_reaches_existing_alignment_pipeline(self):
-        rgb, mask, metadata = preprocessing.preprocess_bgr(knife_scene())
+    def test_legacy_mask_reaches_existing_alignment_pipeline(self):
+        with patch.object(preprocessing, "_scene_grabcut", side_effect=AssertionError("GrabCut 已停用")):
+            rgb, mask, metadata = preprocessing.preprocess_bgr(knife_scene())
         self.assertEqual(rgb.shape, (448, 448, 3))
         self.assertEqual(mask.shape, (448, 448))
-        self.assertGreater(metadata.foreground_pixels, 2800)
+        self.assertGreater(metadata.foreground_pixels, 1500)
+        self.assertLess(metadata.foreground_pixels, 2500)
         self.assertLess(metadata.foreground_ratio, 0.10)
         self.assertTrue(np.isfinite(preprocessing.normalize_rgb(rgb)).all())
 
@@ -83,14 +86,13 @@ class GrabCutPreprocessingTests(unittest.TestCase):
             self.assertIsNone(preprocessing._scene_grabcut(np.zeros((20, 40, 3), np.uint8)))
         grabcut.assert_not_called()
 
-    def test_opencv_failure_falls_back_to_legacy_mask(self):
+    def test_segmentation_does_not_reach_opencv_grabcut(self):
         image = knife_scene()
-        with patch.object(preprocessing, "_scene_grabcut", return_value=None):
-            expected = preprocessing.segment_foreground(image)
         with patch.object(cv2, "grabCut", side_effect=cv2.error("synthetic failure")) as grabcut:
             mask = preprocessing.segment_foreground(image)
-        grabcut.assert_called_once()
-        np.testing.assert_array_equal(mask, expected)
+        grabcut.assert_not_called()
+        self.assertGreater(np.count_nonzero(mask[85:100, 65:135]), 0)
+        self.assertEqual(np.count_nonzero(mask[86:99, 145:195]), 0)
 
     def test_implausibly_large_recovery_is_rejected(self):
         # 验证质量门槛：背景被 GrabCut 全部判为前景时应保留原流程结果。

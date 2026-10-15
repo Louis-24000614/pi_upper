@@ -142,6 +142,7 @@ def step_rfid_arrival(
     forward_depth_m: float | None = None,
     imu_full_edge: bool = False,
     early_heading_lock: bool = False,
+    live_align: bool = False,
     handoff_start_m: float | None = None,
     near_x_m: float | None = None,
     lane_heading_rad: float | None = None,
@@ -183,6 +184,23 @@ def step_rfid_arrival(
     if state.phase == "heading_lock_stopped":
         if current_s - state.heading_stop_started_s < cfg.early_lock_stop_settle_s:
             return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+        if not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
+            state.phase = "fault"
+            state.fault_reason = "stop_heading_lock_invalid"
+            return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+        if live_align:
+            state.heading_lock_frozen = True
+            if lane_heading_rad is None or not math.isfinite(lane_heading_rad):
+                return _begin_heading_hold(
+                    state, progress_m, odom_valid, cfg, yaw_rad,
+                    step_mm=_hold_step_mm(cfg, remaining_edge_m),
+                    target_yaw_rad=None,
+                )
+            state.phase = "align"
+            state.align_started_s = current_s
+            state.align_stable = 0
+            state.anchor = HeadingAnchorGate(started_s=current_s)
+            return state, VelocityCommand(0.0, 0.0, "align")
         target = recover_visual_heading_from_history(state, cfg)
         if target is None or not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
             state.phase = "fault"
@@ -246,25 +264,34 @@ def step_rfid_arrival(
                 confirmed
                 and state.odom_handoff_frames >= max(1, odom_stable_frames)
             )
-        if at_handoff and state.locked_heading_yaw_rad is None:
-            if not send("stop"):
-                state.phase = "fault"
-                state.fault_reason = "stop_action_fail"
-                return state, VelocityCommand(0.0, 0.0, state.fault_reason)
-            state.phase = "heading_lock_stop"
-            return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
-        if state.locked_heading_yaw_rad is not None and (
-            (at_handoff and confirmed) or blocked_fallback
-        ):
-            target = state.locked_heading_yaw_rad
-            state.heading_lock_frozen = True
-            return _begin_heading_hold(
-                state, progress_m, odom_valid, cfg, yaw_rad,
-                step_mm=_hold_step_mm(cfg, remaining_edge_m),
-                target_yaw_rad=target,
-            )
-        if at_handoff:
-            return state, visual
+        if live_align:
+            if at_handoff:
+                if not send("stop"):
+                    state.phase = "fault"
+                    state.fault_reason = "stop_action_fail"
+                    return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+                state.phase = "heading_lock_stop"
+                return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+        else:
+            if at_handoff and state.locked_heading_yaw_rad is None:
+                if not send("stop"):
+                    state.phase = "fault"
+                    state.fault_reason = "stop_action_fail"
+                    return state, VelocityCommand(0.0, 0.0, state.fault_reason)
+                state.phase = "heading_lock_stop"
+                return state, VelocityCommand(0.0, 0.0, "stop_heading_lock_wait")
+            if state.locked_heading_yaw_rad is not None and (
+                (at_handoff and confirmed) or blocked_fallback
+            ):
+                target = state.locked_heading_yaw_rad
+                state.heading_lock_frozen = True
+                return _begin_heading_hold(
+                    state, progress_m, odom_valid, cfg, yaw_rad,
+                    step_mm=_hold_step_mm(cfg, remaining_edge_m),
+                    target_yaw_rad=target,
+                )
+            if at_handoff:
+                return state, visual
 
     if state.phase == "follow" and imu_full_edge:
         if not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
@@ -299,10 +326,14 @@ def step_rfid_arrival(
         return _step_heading_hold(state, progress_m, odom_valid, cfg, yaw_rad)
 
     def advance_anchor():
-        heading = _alignment_heading(
-            state, yaw_rad, lane_heading_rad, early_heading_lock,
+        heading = (
+            lane_heading_rad if live_align else _alignment_heading(
+                state, yaw_rad, lane_heading_rad, early_heading_lock,
+            )
         )
-        if not early_heading_lock or state.locked_heading_yaw_rad is None:
+        if not live_align and (
+            not early_heading_lock or state.locked_heading_yaw_rad is None
+        ):
             _, heading = _forward_strip_view(
                 state, cfg, visual, heading, arrival_mode,
                 centerline_points, road_pixels, follow,
@@ -320,7 +351,7 @@ def step_rfid_arrival(
             return _begin_heading_hold(
                 state, progress_m, odom_valid, cfg, yaw_rad,
                 step_mm=_hold_step_mm(cfg, remaining_edge_m),
-                target_yaw_rad=state.locked_heading_yaw_rad,
+                target_yaw_rad=None if live_align else state.locked_heading_yaw_rad,
             )
         return state, result
 
@@ -329,23 +360,25 @@ def step_rfid_arrival(
 
     if state.phase == "align":
         if current_s - state.align_started_s >= cfg.align_timeout_s:
-            if early_heading_lock:
+            if early_heading_lock and not live_align:
                 state.phase = "fault"
                 state.fault_reason = "stop_align_timeout"
                 return state, VelocityCommand(0.0, 0.0, state.fault_reason)
             return _begin_heading_hold(
                 state, progress_m, odom_valid, cfg, yaw_rad,
                 step_mm=_hold_step_mm(cfg, remaining_edge_m),
+                target_yaw_rad=None if live_align else state.locked_heading_yaw_rad,
             )
         # 摆正开始后做完。检测带回升只说明车头转进了旁边的路，不能退回循迹。
-        lane_heading_rad = _alignment_heading(
-            state, yaw_rad, lane_heading_rad, early_heading_lock,
-        )
-        if not early_heading_lock or state.locked_heading_yaw_rad is None:
-            _, lane_heading_rad = _forward_strip_view(
-                state, cfg, visual, lane_heading_rad, arrival_mode,
-                centerline_points, road_pixels, follow,
+        if not live_align:
+            lane_heading_rad = _alignment_heading(
+                state, yaw_rad, lane_heading_rad, early_heading_lock,
             )
+            if not early_heading_lock or state.locked_heading_yaw_rad is None:
+                _, lane_heading_rad = _forward_strip_view(
+                    state, cfg, visual, lane_heading_rad, arrival_mode,
+                    centerline_points, road_pixels, follow,
+                )
         ready, state.align_stable = align_ready_to_creep(
             lane_heading_rad,
             state.align_started_s,
@@ -365,7 +398,7 @@ def step_rfid_arrival(
         return _begin_heading_hold(
                 state, progress_m, odom_valid, cfg, yaw_rad,
                 step_mm=_hold_step_mm(cfg, remaining_edge_m),
-                target_yaw_rad=state.locked_heading_yaw_rad,
+                target_yaw_rad=None if live_align else state.locked_heading_yaw_rad,
             )
 
     visual, lane_heading_rad = _forward_strip_view(

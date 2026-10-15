@@ -13,7 +13,6 @@ from road_follow.junction_turn import (
     JunctionCue, road_end_turn_cue, step_junction_turn,
 )
 from road_follow.rfid_arrival import (
-    recover_visual_heading_from_history,
     step_rfid_arrival,
     update_visual_heading_lock,
 )
@@ -24,8 +23,8 @@ if TYPE_CHECKING:
     from road_follow.rfid_arrival import RfidArrivalConfig
 
 
-# 标准 0.99 m 格网边统一在 0.68 m 交接，锁住航向后补齐约 0.31 m。
-# 短边不使用这组数。
+# 标准 0.99 m 格网边：十字路口视觉走到边长。其它到点在 0.68 m 停车，
+# 按当时可见走廊摆正，再按剩余里程走到 0.99 m。短边不用这组数。
 _GRID_LENGTH_M = 0.99
 _GRID_HANDOFF_M = 0.68
 _GRID_FINAL_M = 0.31
@@ -141,6 +140,25 @@ def resolve_arrival_policy(
     )
 
 
+def _is_grid_cross(policy) -> bool:
+    """目标点同时还有正前、左、右三条路，才是要直穿的十字。"""
+    return {"forward", "left", "right"} <= set(policy.expected_openings)
+
+
+def _fresh_align(policy, trusted_odom_handoff: bool) -> bool:
+    """非十字的 0.99 m 边：停车后对准当时走廊，不用行进中锁住的航向。"""
+    return (
+        policy.early_heading_lock
+        and not _is_grid_cross(policy)
+        and not trusted_odom_handoff
+    )
+
+
+def _remaining_forward_mm(policy, progress_m: float, min_forward_mm: int) -> int:
+    remaining_m = max(min_forward_mm / 1000.0, policy.edge_length_m - progress_m)
+    return int(round(remaining_m * 1000.0))
+
+
 def expected_side_cue(policy, reading, opening) -> JunctionCue:
     """任一符合地图的侧向开口即可；距离/多帧证据由状态机继续检查。"""
     for side in ("left", "right"):
@@ -170,17 +188,37 @@ def step_route_arrival(
     forward_depth_m=None,
     trusted_odom_handoff=False,
 ):
-    """共享地图选择和 ODOM 新鲜度检查。贯通点按边长保护，尽头巡检点仍等墙。"""
+    """共享地图选择和 ODOM 新鲜度检查。十字走到边长，其它格网边先摆正。"""
+    grid_cross = (
+        policy.early_heading_lock
+        and _is_grid_cross(policy)
+        and not trusted_odom_handoff
+    )
+    fresh_align = _fresh_align(policy, trusted_odom_handoff)
     approaching = state.phase in ("follow", "approach") and (
         not patrol or patrol_state.phase == "follow"
     )
     if approaching:
+        # 涵洞恢复已清空支路证据；可信里程必须覆盖巡检点，不能等开口才越过边末端。
+        trusted_arrival = trusted_odom_handoff and policy.mode == "visual_odom"
+        if (
+            (grid_cross or trusted_arrival) and odom_valid
+            and progress_m + 1e-6 >= policy.edge_length_m
+        ):
+            if patrol:
+                patrol_state.phase = "arrived"
+            state.phase = "arrived"
+            reason = "rfid_arrived" if patrol else "arrived"
+            source = "culvert_odom_handoff" if trusted_arrival else "grid_visual"
+            return state, patrol_state, VelocityCommand(0.0, 0.0, reason), source
         # 尽头巡检点的墙可能晚于边长，不能用固定距离截断。
-        # 贯通点正前方还有路，超过边长保护仍未交接就停车。
+        # 十字和摆正交接自己走到边长，不再在保护距离提前停车。
         if (
             (not patrol or policy.mode == "visual_odom")
             and odom_valid
             and not trusted_odom_handoff
+            and not grid_cross
+            and not fresh_align
             and progress_m + 1e-6 >= policy.guard_progress_m
         ):
             if patrol:
@@ -193,6 +231,8 @@ def step_route_arrival(
             patrol_state.odom_handoff_frames = 0
             patrol_state.road_end_missing_frames = 0
             return state, patrol_state, VelocityCommand(0.0, 0.0, "stop_odom_stale"), "odom_stale"
+    if grid_cross and approaching:
+        return state, patrol_state, command, ""
 
     side_cue = expected_side_cue(policy, reading, opening)
 
@@ -249,7 +289,11 @@ def step_route_arrival(
             forward_band_ratio=reading.forward_band_ratio,
             visual_safe=visual_safe,
             arrival_mode=policy.mode,
-            odom_handoff=(progress_m + 1e-6 >= policy.handoff_progress_m and is_visual_follow(command)),
+            odom_handoff=(
+                not grid_cross
+                and progress_m + 1e-6 >= policy.handoff_progress_m
+                and is_visual_follow(command)
+            ),
             odom_stable_frames=junction_cfg.stable_frames,
             near_x_m=near_x_m,
             lane_heading_rad=lane_heading_rad,
@@ -266,10 +310,11 @@ def step_route_arrival(
             remaining_edge_m=remaining_edge_m,
             forward_depth_m=forward_depth_m,
             imu_full_edge=policy.imu_full_edge,
-            early_heading_lock=policy.early_heading_lock,
+            early_heading_lock=policy.early_heading_lock and not grid_cross,
+            live_align=fresh_align,
             handoff_start_m=policy.handoff_progress_m,
         )
-        if before in ("follow", "align", "anchor_wait") and patrol_state.phase == "heading_hold":
+        if before in ("follow", "align", "anchor_wait", "heading_lock_stopped") and patrol_state.phase == "heading_hold":
             if policy.imu_full_edge:
                 source = "imu_full_edge"
             elif policy.early_heading_lock:
@@ -290,11 +335,9 @@ def step_route_arrival(
     cue = side_cue
     if policy.mode == "visual_odom":
         if (
-            policy.early_heading_lock
+            fresh_align
             and state.phase in ("follow", "approach")
             and progress_m + 1e-6 >= policy.handoff_progress_m
-            and patrol_state.locked_heading_yaw_rad is None
-            and not trusted_odom_handoff
         ):
             if not send("stop"):
                 state.phase = "fault"
@@ -302,19 +345,26 @@ def step_route_arrival(
                 return state, patrol_state, VelocityCommand(
                     0.0, 0.0, state.fault_reason
                 ), "stop_action_fail"
+            state.forward_mm = _remaining_forward_mm(
+                policy, progress_m, junction_cfg.min_forward_mm,
+            )
             state.phase = "heading_lock_stop"
             return state, patrol_state, VelocityCommand(
                 0.0, 0.0, "stop_heading_lock_wait"
             ), "heading_lock_stop"
         blocked_handoff = (
-            policy.early_heading_lock
+            not grid_cross
+            and not fresh_align
+            and policy.early_heading_lock
             and patrol_state.locked_heading_yaw_rad is not None
             and patrol_state.early_lock_blocked_count
             >= patrol_cfg.early_lock_blocked_frames
             and progress_m + 1e-6 >= patrol_cfg.early_lock_fallback_min_m
         )
         normal_handoff = (
-            state.branch_latched and odom_valid
+            not grid_cross
+            and not fresh_align
+            and state.branch_latched and odom_valid
             and (
                 (
                     is_visual_follow(command)
@@ -354,9 +404,10 @@ def step_route_arrival(
         if end_cue.detected:
             cue = end_cue
     before = state.phase
+    # 摆正和最后一段用停车后的航向。行进中锁住的道路航向不再作为目标。
     target_yaw_rad = (
-        patrol_state.locked_heading_yaw_rad
-        if policy.early_heading_lock else None
+        None if fresh_align or grid_cross or not policy.early_heading_lock
+        else patrol_state.locked_heading_yaw_rad
     )
     alignment_heading_rad = lane_heading_rad
     if (
@@ -378,26 +429,32 @@ def step_route_arrival(
     if state.phase == "heading_lock_stopped":
         current_s = time.monotonic() if now_s is None else now_s
         if current_s - state.stop_started_s >= patrol_cfg.early_lock_stop_settle_s:
-            recovered = recover_visual_heading_from_history(patrol_state, patrol_cfg)
-            if recovered is None or not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
+            if not odom_valid or yaw_rad is None or not math.isfinite(yaw_rad):
                 state.phase = "fault"
                 state.fault_reason = "stop_heading_lock_invalid"
                 return state, patrol_state, VelocityCommand(0.0, 0.0, state.fault_reason), "heading_lock_invalid"
-            if not state.branch_latched:
-                state.phase = "fault"
-                state.fault_reason = "stop_junction_unconfirmed"
-                return state, patrol_state, VelocityCommand(0.0, 0.0, state.fault_reason), "junction_unconfirmed"
-            patrol_state.locked_heading_yaw_rad = recovered
             patrol_state.heading_lock_frozen = True
-            state.forward_mm = int(round(max(
-                junction_cfg.min_forward_mm / 1000.0,
-                policy.edge_length_m - progress_m,
-            ) * 1000.0))
+            state.forward_mm = _remaining_forward_mm(
+                policy, progress_m, junction_cfg.min_forward_mm,
+            )
+            if lane_heading_rad is None or not math.isfinite(lane_heading_rad):
+                state.phase = "heading_hold"
+                state.hold_start_m = None
+                state.hold_yaw_rad = None
+                cfg = replace(cfg, turn_forward_m=state.forward_mm / 1000.0)
+                state, command = step_junction_turn(
+                    state, cue, command, notes, send, cfg, near_x_m=near_x_m,
+                    progress_m=progress_m, odom_valid=odom_valid,
+                    lane_heading_rad=None, yaw_rad=yaw_rad, target_yaw_rad=None,
+                    frame_captured_s=frame_captured_s, odom_received_s=odom_received_s,
+                    anchor_notes=anchor_notes, now_s=now_s, visual_safe=visual_safe,
+                )
+                return state, patrol_state, command, "live_align"
             state.phase = "align"
             state.align_started_s = current_s
             state.align_stable = 0
             state.anchor = HeadingAnchorGate(started_s=current_s)
-            return state, patrol_state, VelocityCommand(0.0, 0.0, "align"), "heading_lock_recovered"
+            return state, patrol_state, VelocityCommand(0.0, 0.0, "align"), "live_align"
     if (
         cue.source == "odom_handoff"
         and normal_handoff
@@ -408,7 +465,12 @@ def step_route_arrival(
         # 真正进入交接状态时冻结；确认帧期间仍可更新视觉候选航向。
         patrol_state.heading_lock_frozen = True
     if before in ("follow", "approach", "align", "anchor_wait") and state.phase == "heading_hold":
-        source = "culvert_odom_handoff" if trusted_odom_handoff else cue.source
+        if fresh_align:
+            source = "live_align"
+        elif trusted_odom_handoff:
+            source = "culvert_odom_handoff"
+        else:
+            source = cue.source
     else:
         source = ""
     return state, patrol_state, command, source

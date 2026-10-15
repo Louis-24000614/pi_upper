@@ -125,6 +125,40 @@ class JunctionTurnTest(unittest.TestCase):
         self.assertEqual(state.phase, "follow")
         self.assertEqual(command.reason, "follow")
 
+    def test_uturn_waits_for_two_turn_done_notes(self) -> None:
+        state = JunctionTurn(phase="arrived")
+        state = apply_departure(state, "uturn", self.send, stop_settle_s=0.0)
+        self.assertEqual(state.phase, "stopping")
+        self.notes.put("STOP_DONE")
+        state, _ = step_junction_turn(
+            state, JunctionCue(False), self.follow, self.notes, self.send,
+            self.cfg, now_s=10.0,
+        )
+        state, _ = step_junction_turn(
+            state, JunctionCue(False), self.follow, self.notes, self.send,
+            self.cfg, now_s=10.0,
+        )
+        self.assertEqual(state.phase, "turning")
+        self.assertEqual(state.quarters_remaining, 2)
+        self.assertEqual(self.sent, ["stop", "turn left"])
+
+        self.notes.put("TURN_DONE")
+        state, _ = step_junction_turn(
+            state, JunctionCue(False), self.follow, self.notes, self.send,
+            self.cfg,
+        )
+        self.assertEqual(state.phase, "turning")
+        self.assertEqual(state.quarters_remaining, 1)
+        self.assertEqual(self.sent, ["stop", "turn left", "turn left"])
+
+        self.notes.put("TURN_DONE")
+        state, _ = step_junction_turn(
+            state, JunctionCue(False), self.follow, self.notes, self.send,
+            self.cfg,
+        )
+        self.assertEqual(state.phase, "reacquire")
+        self.assertEqual(state.quarters_remaining, 0)
+
     def test_out_of_window_does_not_start_action(self) -> None:
         state = JunctionTurn()
         cue = JunctionCue(True, "right", 0.80)

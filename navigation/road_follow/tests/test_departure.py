@@ -147,6 +147,31 @@ class DepartureTest(unittest.TestCase):
         self.assertEqual(state.departure, "backup")
         self.assertEqual(sent, ["stop"])
 
+    def test_reverse_arrival_opposite_edge_plans_uturn(self) -> None:
+        sent: list[str] = []
+        agent = SimpleNamespace(
+            state=SimpleNamespace(from_node="3_1", to_node="3_2"),
+            node_reached=lambda node_id: FollowEdge("3_2__3_3", "3_2", "3_3"),
+        )
+        self.assertEqual(
+            departure_maneuver(
+                NODES, "3_1", "3_2", "3_3", reverse_arrival=True
+            ),
+            "uturn",
+        )
+        state = handoff_arrival(
+            JunctionTurn(phase="arrived"),
+            agent,
+            NODES,
+            lambda line: sent.append(line) or True,
+            reverse_arrival=True,
+        )
+        self.assertEqual(state.phase, "stopping")
+        self.assertEqual(state.departure, "uturn")
+        self.assertEqual(state.side, "left")
+        self.assertEqual(state.quarters_remaining, 2)
+        self.assertEqual(sent, ["stop"])
+
     def test_mission_complete_does_not_turn(self) -> None:
         sent: list[str] = []
         agent = SimpleNamespace(
