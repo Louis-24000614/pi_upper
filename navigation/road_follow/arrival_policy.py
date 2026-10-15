@@ -199,12 +199,18 @@ def step_route_arrival(
         not patrol or patrol_state.phase == "follow"
     )
     if approaching:
-        if grid_cross and odom_valid and progress_m + 1e-6 >= policy.edge_length_m:
+        # 涵洞恢复已清空支路证据；可信里程必须覆盖巡检点，不能等开口才越过边末端。
+        trusted_arrival = trusted_odom_handoff and policy.mode == "visual_odom"
+        if (
+            (grid_cross or trusted_arrival) and odom_valid
+            and progress_m + 1e-6 >= policy.edge_length_m
+        ):
             if patrol:
                 patrol_state.phase = "arrived"
             state.phase = "arrived"
             reason = "rfid_arrived" if patrol else "arrived"
-            return state, patrol_state, VelocityCommand(0.0, 0.0, reason), "grid_visual"
+            source = "culvert_odom_handoff" if trusted_arrival else "grid_visual"
+            return state, patrol_state, VelocityCommand(0.0, 0.0, reason), source
         # 尽头巡检点的墙可能晚于边长，不能用固定距离截断。
         # 十字和摆正交接自己走到边长，不再在保护距离提前停车。
         if (

@@ -382,6 +382,127 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.step(policy, 0.99, trusted_odom_handoff=True)
         self.assertEqual(self.state.phase, "arrived")
 
+    def _culvert_patrol_without_side_evidence(self):
+        policy = self.policy("2_1", "3_1", 0.99)
+        closed = replace(self.reading, left=False, right=False, kind=KIND_STRAIGHT)
+        for progress in (0.40, 0.50):
+            self.step(
+                policy, progress, patrol=True, reading=closed,
+                trusted_odom_handoff=True,
+            )
+        self.assertIsNotNone(self.patrol_state.locked_heading_yaw_rad)
+        self.assertFalse(self.patrol_state.edge_latched)
+        return policy, closed
+
+    def test_culvert_patrol_reaches_node_without_late_side_evidence(self):
+        for first_at_node in (0.99, 1.01):
+            with self.subTest(first_at_node=first_at_node):
+                self.setUp()
+                policy, closed = self._culvert_patrol_without_side_evidence()
+                self.assertEqual(policy.expected_openings, ("forward", "left"))
+                for progress in (0.55, 0.68, 0.94, 0.989):
+                    cmd, trigger = self.step(
+                        policy, progress, patrol=True, reading=closed,
+                        trusted_odom_handoff=True,
+                    )
+                    self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "follow"))
+                    self.assertEqual((cmd, trigger), (self.command, ""))
+                cmd, trigger = self.step(
+                    policy, first_at_node, patrol=True, reading=closed,
+                    trusted_odom_handoff=True,
+                )
+                self.assertEqual((self.state.phase, self.patrol_state.phase), ("arrived", "arrived"))
+                self.assertEqual((cmd.v_mps, cmd.omega_radps), (0.0, 0.0))
+                self.assertEqual(trigger, "culvert_odom_handoff")
+                self.assertFalse(self.patrol_state.edge_latched)
+                self.assertEqual(self.sent, [])
+
+                agent = RouteAgent(self.graph)
+                agent.start()
+                for _ in range(len(agent.state.route_edges)):
+                    if (agent.state.from_node, agent.state.to_node) == ("2_1", "3_1"):
+                        break
+                    agent.node_reached(agent.state.to_node)
+                self.assertEqual((agent.state.from_node, agent.state.to_node), ("2_1", "3_1"))
+                xy = {key: (node.x, node.y) for key, node in self.graph.nodes.items()}
+                handoff_arrival(self.state, agent, xy, self.send)
+                self.assertEqual((agent.state.from_node, agent.state.to_node), ("3_1", "3_2"))
+                self.assertIn("2_1__3_1", agent.state.covered_edges)
+                self.assertEqual((self.state.phase, self.state.departure), ("stopping", "left"))
+                self.assertEqual(self.sent, ["stop"])
+
+    def test_culvert_patrol_stale_odometry_stops_and_recovers_at_node(self):
+        for progress in (0.94, 0.99, 1.01):
+            with self.subTest(progress=progress):
+                self.setUp()
+                policy, closed = self._culvert_patrol_without_side_evidence()
+                cmd, trigger = self.step(
+                    policy, progress, patrol=True, reading=closed,
+                    trusted_odom_handoff=True, odom_valid=False,
+                )
+                self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "follow"))
+                self.assertEqual((cmd.v_mps, cmd.omega_radps, trigger), (0.0, 0.0, "odom_stale"))
+                cmd, trigger = self.step(
+                    policy, progress, patrol=True, reading=closed,
+                    trusted_odom_handoff=True,
+                )
+                if progress < policy.edge_length_m:
+                    self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "follow"))
+                    self.assertEqual((cmd, trigger), (self.command, ""))
+                else:
+                    self.assertEqual((self.state.phase, self.patrol_state.phase), ("arrived", "arrived"))
+                    self.assertEqual((cmd.v_mps, cmd.omega_radps, trigger), (0.0, 0.0, "culvert_odom_handoff"))
+                self.assertEqual(self.sent, [])
+
+    def test_culvert_patrol_at_node_does_not_require_visual_follow(self):
+        stopped = VelocityCommand(0.0, 0.0, "stop_road")
+        for progress in (0.99, 1.01):
+            with self.subTest(progress=progress):
+                self.setUp()
+                policy, closed = self._culvert_patrol_without_side_evidence()
+                cmd, trigger = self.step(
+                    policy, progress, patrol=True, reading=closed,
+                    trusted_odom_handoff=True, command=stopped, visual_safe=False,
+                )
+                self.assertEqual((self.state.phase, self.patrol_state.phase), ("arrived", "arrived"))
+                self.assertEqual((cmd.v_mps, cmd.omega_radps, trigger), (0.0, 0.0, "culvert_odom_handoff"))
+                self.assertEqual(self.sent, [])
+
+    def test_culvert_handoff_preserves_normal_alignment_and_visual_end(self):
+        policy = self.policy("2_1", "3_1", 0.99)
+        closed = replace(self.reading, left=False, right=False, kind=KIND_STRAIGHT)
+        cmd, trigger = self.step(
+            policy, 0.68, patrol=True, reading=closed, trusted_odom_handoff=False,
+        )
+        self.assertEqual((self.patrol_state.phase, cmd.reason, trigger), ("heading_lock_stop", "stop_heading_lock_wait", ""))
+        self.assertEqual(self.sent, ["stop"])
+
+        self.setUp()
+        dead_end = self.policy("3_2", "3_1", 0.80)
+        self.assertEqual(dead_end.mode, "visual_end")
+        for progress in (0.79, 0.80, 1.01):
+            cmd, trigger = self.step(
+                dead_end, progress, patrol=True, reading=closed,
+                trusted_odom_handoff=True,
+            )
+            self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "follow"))
+            self.assertEqual((cmd, trigger), (self.command, ""))
+        self.assertEqual(self.sent, [])
+
+    def test_culvert_patrol_distance_handoff_does_not_interrupt_departure(self):
+        for phase in ("turning", "reacquire"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                policy = self.policy("2_1", "3_1", 0.99)
+                self.state.phase = phase
+                cmd, trigger = self.step(
+                    policy, 1.01, patrol=True, trusted_odom_handoff=True,
+                    command=VelocityCommand(0.0, 0.0, "stop_road"), visual_safe=False,
+                )
+                self.assertEqual((self.state.phase, self.patrol_state.phase), (phase, "follow"))
+                self.assertEqual((cmd.v_mps, cmd.omega_radps, trigger), (0.0, 0.0, ""))
+                self.assertEqual(self.sent, [])
+
     def test_no_branch_or_wrong_map_side_cannot_fake_arrival(self):
         policy = self.policy("3_2", "3_1", 0.80)
         # 向西驶入3_1只有右侧向北和左侧向南，两侧都关闭时不能锁存。
