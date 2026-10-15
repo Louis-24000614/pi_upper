@@ -34,6 +34,8 @@ _GRID_ALIGN_STABLE_FRAMES = 8
 _GRID_ALIGN_OMEGA_SCALE = 0.75
 _IMU_FULL_EDGES = frozenset({("0_J", "1_2")})
 _IMU_FULL_EDGE_EXTRA_M = 0.07
+# 返回顶端丁字口的两条短边，与格网十字一样按配置边长交接。
+_ODOM_RETURN_EDGES = frozenset({("1_3", "0_J"), ("1_2", "0_J")})
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,10 @@ def step_route_arrival(
         and _is_grid_cross(policy)
         and not trusted_odom_handoff
     )
+    short_return = (
+        policy.mode == "visual_odom"
+        and (policy.from_node, policy.to_node) in _ODOM_RETURN_EDGES
+    )
     fresh_align = _fresh_align(policy, trusted_odom_handoff)
     approaching = state.phase in ("follow", "approach") and (
         not patrol or patrol_state.phase == "follow"
@@ -203,22 +209,26 @@ def step_route_arrival(
         # 涵洞恢复已清空支路证据；可信里程必须覆盖巡检点，不能等开口才越过边末端。
         trusted_arrival = trusted_odom_handoff and policy.mode == "visual_odom"
         if (
-            (grid_cross or trusted_arrival) and odom_valid
+            (grid_cross or trusted_arrival or short_return) and odom_valid
             and progress_m + 1e-6 >= policy.edge_length_m
         ):
             if patrol:
                 patrol_state.phase = "arrived"
             state.phase = "arrived"
             reason = "rfid_arrived" if patrol else "arrived"
-            source = "culvert_odom_handoff" if trusted_arrival else "grid_visual"
+            source = (
+                "short_edge_odom" if short_return
+                else "culvert_odom_handoff" if trusted_arrival else "grid_visual"
+            )
             return state, patrol_state, VelocityCommand(0.0, 0.0, reason), source
         # 尽头巡检点的墙可能晚于边长，不能用固定距离截断。
-        # 十字和摆正交接自己走到边长，不再在保护距离提前停车。
+        # 十字、返程短边和摆正交接自己走到边长，不再在保护距离提前停车。
         if (
             (not patrol or policy.mode == "visual_odom")
             and odom_valid
             and not trusted_odom_handoff
             and not grid_cross
+            and not short_return
             and not fresh_align
             and progress_m + 1e-6 >= policy.guard_progress_m
         ):
@@ -235,7 +245,7 @@ def step_route_arrival(
         if patrol and trusted_arrival:
             # 涵洞恢复后沿本边视觉循迹到末端，不重新等待航向或支路证据。
             return state, patrol_state, command, ""
-    if grid_cross and approaching:
+    if (grid_cross or short_return) and approaching:
         return state, patrol_state, command, ""
 
     side_cue = expected_side_cue(policy, reading, opening)

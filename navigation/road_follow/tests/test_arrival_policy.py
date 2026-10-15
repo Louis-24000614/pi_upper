@@ -574,6 +574,112 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertIn("1_2__2_2", agent.state.covered_edges)
         self.assertNotEqual(agent.state.to_node, "2_2")
 
+    def test_short_returns_reach_edge_length_without_any_branch(self):
+        closed = replace(self.reading, left=False, right=False, kind=KIND_STRAIGHT)
+        for source in ("1_3", "1_2"):
+            for first_arrival in (0.40, 0.42):
+                with self.subTest(source=source, first_arrival=first_arrival):
+                    self.setUp()
+                    policy = self.policy(source, "0_J", 0.40)
+                    for progress in (0.0, 0.20, 0.35, 0.37, 0.399):
+                        cmd, trigger = self.step(policy, progress, reading=closed)
+                        self.assertEqual((self.state.phase, cmd, trigger), ("follow", self.command, ""))
+                        self.assertFalse(self.state.branch_latched)
+                    cmd, trigger = self.step(policy, first_arrival, reading=closed)
+                    self.assertEqual((self.state.phase, cmd.reason, trigger), ("arrived", "arrived", "short_edge_odom"))
+                    self.assertEqual((cmd.v_mps, cmd.omega_radps), (0.0, 0.0))
+                    self.assertEqual(self.sent, [])
+
+    def test_short_returns_do_not_handoff_early_when_a_branch_is_visible(self):
+        for source in ("1_3", "1_2"):
+            with self.subTest(source=source):
+                self.setUp()
+                policy = self.policy(source, "0_J", 0.40)
+                for progress in (0.20, 0.20, 0.30, 0.35, 0.399):
+                    cmd, trigger = self.step(policy, progress)
+                    self.assertEqual((self.state.phase, cmd, trigger), ("follow", self.command, ""))
+                cmd, trigger = self.step(policy, 0.40)
+                self.assertEqual((self.state.phase, cmd.reason, trigger), ("arrived", "arrived", "short_edge_odom"))
+                self.assertEqual(self.sent, [])
+
+    def test_short_return_stale_odom_stops_and_recovers_without_branch(self):
+        for source in ("1_3", "1_2"):
+            with self.subTest(source=source):
+                self.setUp()
+                policy = self.policy(source, "0_J", 0.40)
+                closed = replace(self.reading, left=False, right=False, kind=KIND_STRAIGHT)
+                for progress in (0.35, 0.40):
+                    cmd, trigger = self.step(policy, progress, odom_valid=False, reading=closed)
+                    self.assertEqual((self.state.phase, cmd.reason, trigger), ("follow", "stop_odom_stale", "odom_stale"))
+                    self.assertEqual((cmd.v_mps, cmd.omega_radps), (0.0, 0.0))
+                cmd, trigger = self.step(policy, 0.37, reading=closed)
+                self.assertEqual((self.state.phase, cmd, trigger), ("follow", self.command, ""))
+                cmd, trigger = self.step(policy, 0.40, reading=closed)
+                self.assertEqual((self.state.phase, cmd.reason, trigger), ("arrived", "arrived", "short_edge_odom"))
+                self.assertEqual(self.sent, [])
+
+    def test_short_return_does_not_override_fault_or_departure(self):
+        for source in ("1_3", "1_2"):
+            for phase in ("fault", "stopping", "stopped", "turning", "backup", "done", "odom_wait"):
+                with self.subTest(source=source, phase=phase):
+                    self.setUp()
+                    policy = self.policy(source, "0_J", 0.40)
+                    self.state.phase = phase
+                    self.state.stop_started_s = 1.0
+                    cmd, trigger = self.step(policy, 0.42, now_s=1.1)
+                    self.assertEqual(self.state.phase, phase)
+                    self.assertEqual((cmd.v_mps, cmd.omega_radps, trigger), (0.0, 0.0, ""))
+                    self.assertEqual(self.sent, [])
+
+    def test_short_return_preserves_visual_stop_before_the_edge_end(self):
+        for source in ("1_3", "1_2"):
+            with self.subTest(source=source):
+                self.setUp()
+                policy = self.policy(source, "0_J", 0.40)
+                stopped = VelocityCommand(0.0, 0.0, "stop_road")
+                cmd, trigger = self.step(policy, 0.37, command=stopped, visual_safe=False)
+                self.assertEqual((self.state.phase, cmd, trigger), ("follow", stopped, ""))
+                self.assertEqual(self.sent, [])
+
+    def test_short_returns_stop_and_turn_toward_home_once_after_full_length(self):
+        for source, turn in (("1_3", "right"), ("1_2", "left")):
+            with self.subTest(source=source):
+                self.setUp()
+                node_ids = {source, "0_J", "0_0"}
+                edge_ids = {f"0_J__{source}", "0_0__0_J"}
+                graph = replace(self.graph, meta={},
+                    nodes={k: v for k, v in self.graph.nodes.items() if k in node_ids},
+                    edges={k: v for k, v in self.graph.edges.items() if k in edge_ids},
+                    blocked=set(), arrival_overrides={})
+                agent = RouteAgent(graph)
+                agent.start()
+                for _ in range(len(agent.state.route_edges)):
+                    if (agent.state.from_node, agent.state.to_node) == (source, "0_J"):
+                        break
+                    agent.node_reached(agent.state.to_node)
+                self.assertEqual((agent.state.from_node, agent.state.to_node), (source, "0_J"))
+                policy = self.policy(source, "0_J", 0.40)
+                closed = replace(self.reading, left=False, right=False, kind=KIND_STRAIGHT)
+                xy = {k: (v.x, v.y) for k, v in graph.nodes.items()}
+                index = agent.state.route_index
+                self.step(policy, 0.37, reading=closed)
+                handoff_arrival(self.state, agent, xy, self.send)
+                self.assertEqual(agent.state.route_index, index)
+                self.assertEqual(self.sent, [])
+                self.step(policy, 0.40, reading=closed)
+                handoff_arrival(self.state, agent, xy, self.send)
+                self.assertEqual((self.state.phase, self.state.departure), ("stopping", turn))
+                self.assertEqual((agent.state.from_node, agent.state.to_node), ("0_J", "0_0"))
+                self.assertEqual(self.sent, ["stop"])
+                handoff_arrival(self.state, agent, xy, self.send)
+                self.assertEqual(agent.state.route_index, index + 1)
+                self.notes.put("STOP_DONE")
+                self.step(policy, 0.40, reading=closed, now_s=1.0)
+                self.assertEqual(self.state.phase, "stopped")
+                self.step(policy, 0.40, reading=closed, now_s=3.1)
+                self.assertEqual(self.state.phase, "turning")
+                self.assertEqual(self.sent, ["stop", f"turn {turn}"])
+
     def test_patrol_stale_odom_still_stops_beyond_old_guard(self):
         policy = self.policy("3_2", "3_1", 0.80)
         for _ in range(2):
