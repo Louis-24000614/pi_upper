@@ -212,12 +212,13 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(state.phase,"done")
         self.assertEqual(command.reason,"backup_done")
 
-    def test_no_vision_with_no_progress_times_out(self) -> None:
+    def test_no_vision_with_no_progress_continues_after_former_timeout(self) -> None:
         state, _ = self.step(Backup(), triggered=True)
         self.step(state, near_x_m=None, now_s=1.1)
         _, command = self.step(state, near_x_m=None, now_s=3.11)
-        self.assertEqual(state.phase,"fault")
-        self.assertEqual(command.reason,"stop_backup_no_vision_timeout")
+        self.assertEqual(state.phase,"backing")
+        self.assertEqual(command.reason,"heading_backup")
+        self.assertLess(command.v_mps, 0)
 
     def test_stale_odom_cannot_reverse_or_fake_node_arrival(self) -> None:
         for triggered, progress in ((True,.42),(False,.42),(False,0)):
@@ -231,14 +232,17 @@ class BackupTest(unittest.TestCase):
                 self.assertEqual(command.reason,"stop_backup_odom_stale")
                 self.assertEqual(command.v_mps,0)
 
-    def test_no_vision_heading_correction_and_deviation_guard(self) -> None:
+    def test_no_vision_large_heading_deviation_keeps_correcting(self) -> None:
         state, _ = self.step(Backup(),triggered=True,yaw_rad=math.pi-.01)
         _, command=self.step(state,near_x_m=None,yaw_rad=-math.pi+.01,now_s=1.1)
         self.assertEqual(command.reason,"heading_backup")
         self.assertAlmostEqual(command.omega_radps,-.08)
         _, command=self.step(state,near_x_m=None,yaw_rad=-math.pi+.15,now_s=1.2)
-        self.assertEqual(state.phase,"fault")
-        self.assertEqual(command.reason,"stop_backup_heading_error")
+        self.assertEqual(state.phase,"backing")
+        self.assertEqual(command.reason,"heading_backup")
+        self.assertLess(command.v_mps, 0)
+        self.assertLess(command.omega_radps, 0)
+        self.assertLessEqual(abs(command.omega_radps), self.cfg.max_abs_omega)
 
     def test_invalid_current_heading_stops_no_vision_reverse(self) -> None:
         for yaw in (None,float("nan"),float("inf")):
@@ -254,16 +258,16 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(command.reason,"heading_backup")
         self.assertTrue(math.isfinite(command.omega_radps))
 
-    def test_timeout_and_distance_limit_do_not_fake_arrival(self) -> None:
+    def test_distance_limit_remains_and_visual_reverse_has_no_total_timeout(self) -> None:
         state, _ = self.step(Backup(), triggered=True, progress_s_m=1.30)
         state, command = self.step(state, progress_s_m=0.10, now_s=2.0)
         self.assertEqual(state.phase, "fault")
         self.assertEqual(command.reason, "stop_backup_distance_limit")
 
         state, _ = self.step(Backup(), triggered=True, progress_s_m=0.50)
-        state, command = self.step(state, progress_s_m=0.40, now_s=6.0)
-        self.assertEqual(state.phase, "fault")
-        self.assertEqual(command.reason, "stop_backup_timeout")
+        state, command = self.step(state, progress_s_m=0.40, now_s=30.0)
+        self.assertEqual(state.phase, "backing")
+        self.assertLess(command.v_mps, 0)
 
     def test_near_lane_heading_uses_direction_not_offset(self) -> None:
         parallel = [(0.06, 0.22), (0.06, 0.28), (0.06, 0.34)]

@@ -25,9 +25,10 @@ class BackupConfig:
     near_y_max_m: float = 0.35
     done_progress_m: float = 0.0
     max_distance_m: float = 1.10
-    max_duration_s: float = 16.0
+    max_duration_s: float = 16.0  # Only planned heading-only reverse uses this timeout.
     max_missing_frames: int = 3
     max_no_vision_distance_m: float = 0.15
+    # Legacy fields retained for callers; visual reverse no longer stops on these limits.
     max_no_vision_duration_s: float = 2.0
     max_no_vision_heading_rad: float = 0.10
     heading_hold_gain: float = 4.0
@@ -314,7 +315,7 @@ def step_backup(
     if state.reverse_distance_m >= cfg.max_distance_m:
         state.phase = "fault"
         return state, _stop("stop_backup_distance_limit")
-    if now_s - state.started_s >= cfg.max_duration_s:
+    if state.heading_only and now_s - state.started_s >= cfg.max_duration_s:
         state.phase = "fault"
         return state, _stop("stop_backup_timeout")
 
@@ -364,17 +365,9 @@ def step_backup(
             if used_m >= cfg.max_no_vision_distance_m - 1e-9:
                 state.phase = "fault"
                 return state, _stop("stop_backup_no_vision_distance")
-            if now_s - state.no_vision_started_s >= cfg.max_no_vision_duration_s:
-                state.phase = "fault"
-                return state, _stop("stop_backup_no_vision_timeout")
             if yaw_rad is None or not math.isfinite(yaw_rad):
                 state.phase = "fault"
                 return state, _stop("stop_backup_heading_invalid")
-            error = math.atan2(math.sin(state.hold_yaw_rad - yaw_rad),
-                               math.cos(state.hold_yaw_rad - yaw_rad))
-            if abs(error) > cfg.max_no_vision_heading_rad:
-                state.phase = "fault"
-                return state, _stop("stop_backup_heading_error")
             hold = heading_hold_command(-abs(cfg.reverse_speed_mps), yaw_rad,
                                         state.hold_yaw_rad, cfg.heading_hold_gain,
                                         cfg.max_abs_omega)
