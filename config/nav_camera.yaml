@@ -42,9 +42,9 @@ uart:
 heading_anchor:
   enabled: false
 
-# 启用 --turn-at-junction 时：前进 15 cm 到 0_J、停稳、按 Agent 下一条边原地转向。
+# 启用 --turn-at-junction 时：前进 20 cm 到 0_J、停稳、按 Agent 下一条边原地转向。
 entrance:
-  forward_mm: 150
+  forward_mm: 200
   forward_speed_mmps: 50
   stop_settle_ms: 2000
   reacquire_frames: 3
@@ -65,10 +65,17 @@ follow:
   # 实车录像中道路中心已经向左移，但原 +3 cm 偏置抵消了大部分左转纠偏。
   x_bias_m: 0.00
   # 增强视觉纠偏；仍受 max_abs_omega 限制。
-  steering_gain: 2.0
+  steering_gain: 1.5
   # 固定 25 cm 预瞄越过可见路面后，仍利用近处道路低速纠偏，不要过早盲走。
   min_lookahead_m: 0.12
   near_mps: 0.05
+
+# 转向完成后原地视觉修正 1 秒；只纠正车头方向，不带前进速度。
+post_turn:
+  duration_s: 1.0
+  gain: 2.0
+  max_abs_omega: 0.5
+  max_abs_heading_rad: 0.05
 
 # 拐弯口卡墙时的局部脱困。仅拓扑循迹启用，不封闭当前边、不改变规划节点。
 wall_escape:
@@ -161,9 +168,9 @@ rfid_turn:
   # 最后 20 cm 由 IMU 锁定上电基准维护出的当前方向档位；完成后直接按
   # 当前拓扑节点推进，不再等待 UID。
   search_speed_mmps: 50
-  # 所有 0.99 m 标准边：前段视觉循迹并持续更新绝对道路航向；
+  # 所有 0.98 m 标准边：前段视觉循迹并持续更新绝对道路航向；
   # 0.68 m 若航向仍未锁定，停车后只根据前半段保存的方向样本摆正。
-  # 样本仍不可靠则保持停车；后段按实际交接里程补齐到 0.99 m。
+  # 样本仍不可靠则保持停车；后段按实际交接里程补齐到 0.98 m。
   early_lock_sample_start_m: 0.35
   early_lock_min_depth_m: 0.18
   early_lock_frames: 3

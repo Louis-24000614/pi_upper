@@ -23,14 +23,15 @@ if TYPE_CHECKING:
     from road_follow.rfid_arrival import RfidArrivalConfig
 
 
-# 标准 0.99 m 格网边：十字路口视觉走到边长。其它到点在 0.68 m 停车，
-# 按当时可见走廊摆正，再按剩余里程走到 0.99 m。短边不用这组数。
-_GRID_LENGTH_M = 0.99
+# 标准 0.98 m 格网边：十字路口视觉走到边长。其它到点在 0.68 m 停车，
+# 按当时可见走廊摆正，再按剩余里程走到 0.98 m。短边不用这组数。
+_GRID_LENGTH_M = 0.98
 _GRID_HANDOFF_M = 0.68
-_GRID_FINAL_M = 0.31
+_GRID_FINAL_M = 0.30
 _GRID_ARRIVAL_M = _GRID_HANDOFF_M + _GRID_FINAL_M
-_GRID_ALIGN_TIMEOUT_S = 3.0
+_GRID_ALIGN_TIMEOUT_S = 2.0
 _GRID_ALIGN_STABLE_FRAMES = 8
+_GRID_ALIGN_OMEGA_SCALE = 0.75
 _IMU_FULL_EDGES = frozenset({("0_J", "1_2")})
 _IMU_FULL_EDGE_EXTRA_M = 0.07
 
@@ -146,7 +147,7 @@ def _is_grid_cross(policy) -> bool:
 
 
 def _fresh_align(policy, trusted_odom_handoff: bool) -> bool:
-    """非十字的 0.99 m 边：停车后对准当时走廊，不用行进中锁住的航向。"""
+    """非十字的 0.98 m 边：停车后对准当时走廊，不用行进中锁住的航向。"""
     return (
         policy.early_heading_lock
         and not _is_grid_cross(policy)
@@ -323,6 +324,10 @@ def step_route_arrival(
                 source = policy.mode
         else:
             source = ""
+        if fresh_align and command.reason == "align":
+            command = replace(
+                command, omega_radps=command.omega_radps * _GRID_ALIGN_OMEGA_SCALE,
+            )
         return state, patrol_state, command, source
 
     cfg = replace(
@@ -387,7 +392,7 @@ def step_route_arrival(
                 "left",
             )
             cue = JunctionCue(True, side, policy.final_forward_m, "odom_handoff")
-            # 按实际交接位置补齐到拓扑边末端，不能再走固定 0.31 m。
+            # 按实际交接位置补齐到拓扑边末端，不能再走固定 0.30 m。
             remaining_m = max(
                 junction_cfg.min_forward_mm / 1000.0,
                 policy.edge_length_m - progress_m,
@@ -426,6 +431,10 @@ def step_route_arrival(
         frame_captured_s=frame_captured_s, odom_received_s=odom_received_s,
         anchor_notes=anchor_notes, now_s=now_s, visual_safe=visual_safe,
     )
+    if fresh_align and command.reason == "align":
+        command = replace(
+            command, omega_radps=command.omega_radps * _GRID_ALIGN_OMEGA_SCALE,
+        )
     if state.phase == "heading_lock_stopped":
         current_s = time.monotonic() if now_s is None else now_s
         if current_s - state.stop_started_s >= patrol_cfg.early_lock_stop_settle_s:

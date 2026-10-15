@@ -1,8 +1,8 @@
 # 仅 --culvert-stop 使用，同时识别障碍物与涵洞。新模型类别顺序由用户确认不变。
 model:
-  id: best
+  id: bisaidetect
   path: models/obstacle/best.rknn
-  sha256: 4217e7cf1728f0a77ed80c64b66b2ab139112ac44c2fd30304f0f2410739feb4
+  sha256: 102863be9092a6e6eaadbb12d9e61e97faaecf5740ff85dd9d2f825717997947
   verify_sha256: true
   task: detect
   core_mask: "0"  # 此处填核编号；加载器转成位掩码 1，SEG 使用核 1、2。
@@ -31,7 +31,7 @@ hard_block:
   min_track_iou: 0.20
 class_mapping:
   verified: true
-  model_sha256: 4217e7cf1728f0a77ed80c64b66b2ab139112ac44c2fd30304f0f2410739feb4
+  model_sha256: 102863be9092a6e6eaadbb12d9e61e97faaecf5740ff85dd9d2f825717997947
   culvert_class_id: 3
   hard_block_class_ids: [0, 1, 2]
   # 旧录像证据属于旧模型；本次映射依据用户确认。

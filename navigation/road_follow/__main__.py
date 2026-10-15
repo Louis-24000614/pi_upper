@@ -57,6 +57,11 @@ from road_follow.wall_escape import (
     wall_escape_config_from_mapping,
 )
 from road_follow.pipeline import BevProjector, command_from_mask_with_diagnostics, make_ipm
+from road_follow.post_turn import (
+    PostTurnAlignment,
+    post_turn_config_from_mapping,
+    turn_completed,
+)
 from road_follow.recording import VideoRecorder
 from road_follow.async_recording import AsyncVideoRecorder
 from road_follow.rfid_arrival import (
@@ -83,6 +88,7 @@ COMMAND_NAMES = {
     "follow": "视觉循迹",
     "follow_near": "近距离低速循迹",
     "align": "交接前摆正",
+    "post_turn_align": "转弯后原地修正",
     "entrance_forward": "出发区定距前进",
     "entrance_stop": "出发区停车",
     "entrance_stop_settle": "出发区等待停稳",
@@ -704,6 +710,8 @@ def _run(args, parser) -> int:
     junction_turn_cfg = junction_turn_config_from_mapping(cfg)
     backup = Backup()
     backup_cfg = BackupConfig()
+    post_turn = PostTurnAlignment()
+    post_turn_cfg = post_turn_config_from_mapping(cfg)
     wall_escape = WallEscape()
     wall_escape_cfg = wall_escape_config_from_mapping(cfg)
     progress = EdgeProgress()
@@ -908,6 +916,11 @@ def _run(args, parser) -> int:
                 infer_s = time.monotonic() - t0
             turn_states = (entrance, junction_turn, rfid_turn)
             turn_phases_before = tuple(state.phase for state in turn_states)
+            post_turn_states = tuple(
+                state for state in (*turn_states, obstacle_recovery, wall_escape)
+                if state is not None
+            )
+            post_turn_phases_before = tuple(state.phase for state in post_turn_states)
             # 投影仅当前帧复用；状态机和 EMA 仍在原来的单线程中按原帧序更新。
             projection = projector.project(mask, cfg) if projector else None
             command, follow_diag = command_from_mask_with_diagnostics(
@@ -955,7 +968,20 @@ def _run(args, parser) -> int:
                     progress.update(*sample)
                     if culvert_runtime is not None:
                         culvert_runtime.record_odom(sample, progress)
-            if turn_side is not None and bridge is not None and entrance.phase != "done":
+            post_turn_command = post_turn.step(
+                now_s=time.monotonic(),
+                frame_captured_s=captured_s,
+                lane_heading_rad=follow_diag.lane_heading_rad,
+                visual_safe=(
+                    follow_diag.bev_road_pixels >= int((cfg.get("follow", {}) or {}).get("min_road_pixels", 200))
+                    and follow_diag.output_points >= int((cfg.get("follow", {}) or {}).get("min_points", 8))
+                ),
+                cfg=post_turn_cfg,
+            )
+            if post_turn_command is not None:
+                # 修正期间暂停导航状态推进，不让起步、锁航向或新动作提前接管。
+                command = post_turn_command
+            elif turn_side is not None and bridge is not None and entrance.phase != "done":
                 entrance_before = entrance.phase
                 entrance, command = step_entrance_departure(
                     entrance,
@@ -1434,7 +1460,7 @@ def _run(args, parser) -> int:
                             f"定距={junction_turn.forward_mm} mm",
                         )
 
-            if args.turn_at_rfid is not None and bridge is not None:
+            if post_turn_command is None and args.turn_at_rfid is not None and bridge is not None:
                 detection = None
                 try:
                     detection = rfid_events.get_nowait()
@@ -1458,7 +1484,7 @@ def _run(args, parser) -> int:
                         f"标签={rfid_turn.card_number or '未读到'}",
                     )
 
-            if args.backup_on_obstacle:
+            if post_turn_command is None and args.backup_on_obstacle:
                 if backup.phase == "idle":
                     try:
                         rfid_events.get_nowait()
@@ -1505,11 +1531,20 @@ def _run(args, parser) -> int:
                         f"已倒车={backup.reverse_distance_m:.2f} m",
                     )
 
-            if segment_stream is not None and _invalidate_turn_frames(
-                    turn_phases_before, turn_states, segment_stream, smoother):
+            turn_frames_invalidated = segment_stream is not None and _invalidate_turn_frames(
+                turn_phases_before, turn_states, segment_stream, smoother)
+            if turn_frames_invalidated:
                 junctions = JunctionTracker()
                 lane_heading_history.clear()
                 command = VelocityCommand(0.0, 0.0, "reacquire")
+            if turn_completed(post_turn_phases_before, post_turn_states):
+                post_turn.start(time.monotonic())
+                smoother.reset()
+                junctions = JunctionTracker()
+                lane_heading_history.clear()
+                if segment_stream is not None and not turn_frames_invalidated:
+                    segment_stream.invalidate()
+                command = VelocityCommand(0.0, 0.0, "post_turn_align")
             line = f"{command.v_mps:.3f} {command.omega_radps:.3f}"
             status_signature = _status_signature(
                 command,

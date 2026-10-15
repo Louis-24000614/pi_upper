@@ -2,9 +2,9 @@
 # 权重由 RKNN-Toolkit2 2.3.2 导出，目标 rk3588。类别名不在 .rknn 里。
 
 model:
-  id: best
+  id: bisaidetect
   path: models/obstacle/best.rknn
-  sha256: 4217e7cf1728f0a77ed80c64b66b2ab139112ac44c2fd30304f0f2410739feb4
+  sha256: 102863be9092a6e6eaadbb12d9e61e97faaecf5740ff85dd9d2f825717997947
   task: detect
   # 检测配置填核编号 "0"；加载器转成位掩码 1。SEG 使用核 1、2。
   core_mask: "0"

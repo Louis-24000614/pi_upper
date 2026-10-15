@@ -13,10 +13,10 @@
     "sample_interval_s": 1.2,
     "request_timeout_s": 3.0,
     "roi": [
-      0.0021,
-      0.1434,
-      0.9887,
-      0.8
+      0.1,
+      0.14,
+      0.9,
+      0.73
     ]
   },
   "services": {
