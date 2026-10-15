@@ -36,6 +36,7 @@ class BackupTest(unittest.TestCase):
         odom_valid: bool = True,
         frame_captured_s: float | None = None,
         cfg: BackupConfig | None = None,
+        heading_only: bool = False,
     ) -> tuple[Backup, VelocityCommand]:
         return step_backup(
             state,
@@ -48,6 +49,7 @@ class BackupTest(unittest.TestCase):
             yaw_rad=yaw_rad,
             odom_valid=odom_valid,
             frame_captured_s=now_s if frame_captured_s is None else frame_captured_s,
+            heading_only=heading_only,
         )
 
     def test_progress_grows_forward_and_shrinks_in_reverse(self) -> None:
@@ -322,6 +324,73 @@ class BackupTest(unittest.TestCase):
         heading = forward_lane_heading(slanted)
         self.assertIsNotNone(heading)
         self.assertLess(heading, -0.1)
+
+    def test_planned_backup_ignores_vision_and_returns_the_whole_edge(self):
+        cfg = BackupConfig()
+        state, command = self.step(
+            Backup(), triggered=True, progress_s_m=0.98, yaw_rad=0.30,
+            heading_only=True, cfg=cfg,
+        )
+        self.assertEqual(command.reason, "stop_backup")
+        for now, progress, near_x in (
+            (1.1, 0.97, None), (4.0, 0.75, 0.50),
+            (8.0, 0.40, -0.50), (13.0, 0.01, None),
+        ):
+            state, command = self.step(
+                state, progress_s_m=progress, now_s=now, yaw_rad=0.30,
+                near_x_m=near_x, frame_captured_s=0.0, cfg=cfg,
+            )
+            self.assertEqual(state.phase, "backing")
+            self.assertEqual(command.reason, "heading_backup")
+            self.assertAlmostEqual(command.v_mps, -0.08)
+            self.assertAlmostEqual(command.omega_radps, 0.0)
+            self.assertAlmostEqual(state.hold_yaw_rad, 0.30)
+        state, command = self.step(state, progress_s_m=0.0, now_s=13.2, cfg=cfg)
+        self.assertEqual((state.phase, command.reason), ("done", "backup_done"))
+        self.assertAlmostEqual(state.reverse_distance_m, 0.98)
+
+    def test_planned_backup_holds_initial_yaw_across_pi_and_limits_omega(self):
+        state, _ = self.step(
+            Backup(), triggered=True, yaw_rad=math.pi - 0.01, heading_only=True,
+        )
+        _, command = self.step(state, yaw_rad=-math.pi + 0.01, now_s=1.1)
+        self.assertAlmostEqual(command.omega_radps, -0.08)
+        self.assertAlmostEqual(state.hold_yaw_rad, math.pi - 0.01)
+        _, command = self.step(state, yaw_rad=math.pi - 0.50, now_s=1.2)
+        self.assertAlmostEqual(command.omega_radps, 0.07)
+        for now in (1.3, 1.4, 1.5):
+            _, command = self.step(state, yaw_rad=math.pi - 0.50, now_s=now)
+        self.assertAlmostEqual(command.omega_radps, 0.4)
+
+    def test_planned_backup_requires_valid_initial_and_current_yaw(self):
+        for yaw in (None, float("nan"), float("inf")):
+            for initial in (True, False):
+                with self.subTest(yaw=yaw, initial=initial):
+                    state = Backup()
+                    if not initial:
+                        self.step(state, triggered=True, heading_only=True)
+                    _, command = self.step(
+                        state, triggered=initial, heading_only=True,
+                        yaw_rad=yaw, now_s=1.1,
+                    )
+                    self.assertEqual(state.phase, "fault")
+                    self.assertEqual(command.reason, "stop_backup_heading_invalid")
+                    self.assertEqual((command.v_mps, command.omega_radps), (0, 0))
+
+    def test_planned_backup_keeps_existing_odom_time_and_distance_checks(self):
+        for progress, now, fresh, reason in (
+            (0.0, 1.1, False, "stop_backup_odom_stale"),
+            (0.9, 6.1, True, "stop_backup_timeout"),
+            (0.1, 1.1, True, "stop_backup_distance_limit"),
+        ):
+            with self.subTest(reason=reason):
+                state, _ = self.step(
+                    Backup(), triggered=True, progress_s_m=1.3, heading_only=True,
+                )
+                _, command = self.step(
+                    state, progress_s_m=progress, now_s=now, odom_valid=fresh,
+                )
+                self.assertEqual((state.phase, command.reason), ("fault", reason))
 
     def test_idle_preserves_forward_command(self) -> None:
         state, command = self.step(Backup(), triggered=False)

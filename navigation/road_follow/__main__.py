@@ -1404,17 +1404,18 @@ def _run(args, parser) -> int:
                         )
                     if junction_turn.phase == "backup":
                         backup_before = backup.phase
+                        # 规划原路返回：锁住倒车前航向，用 IMU 和里程计倒回入口。
                         backup, command = step_backup(
                             backup,
                             backup.phase == "idle",
-                            follow_diag.near_x_m,
+                            None,
                             progress.s_m,
                             command,
                             time.monotonic(),
                             backup_cfg,
                             yaw_rad=progress.yaw_rad,
                             odom_valid=progress.is_fresh(time.monotonic()),
-                            frame_captured_s=captured_s,
+                            heading_only=True,
                         )
                         if backup.phase == "done" and backup_before != "done":
                             if command.reason == "backup_done_at_entry":

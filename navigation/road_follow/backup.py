@@ -1,4 +1,4 @@
-"""遇障后使用视觉闭环负速度，沿原路倒回上一个拓扑节点。"""
+"""规划返回用锁航向倒车；遇障保留视觉闭环，沿原路倒回上一个拓扑节点。"""
 
 from __future__ import annotations
 
@@ -79,9 +79,10 @@ class EdgeProgress:
 
 @dataclass
 class Backup:
-    """idle → backing → done；视觉或里程异常进入 fault。"""
+    """idle → backing → done；按倒车模式检查视觉或航向及里程。"""
 
     phase: str = "idle"
+    heading_only: bool = False
     started_s: float = 0.0
     start_progress_m: float = 0.0
     reverse_distance_m: float = 0.0
@@ -261,8 +262,9 @@ def step_backup(
     yaw_rad: float | None = None,
     odom_valid: bool = True,
     frame_captured_s: float | None = None,
+    heading_only: bool = False,
 ) -> tuple[Backup, VelocityCommand]:
-    """硬堵塞后以负 `CMD_VEL` 视觉倒车，沿边进度回到 0 才算回到路口中心。"""
+    """以负 CMD_VEL 倒回入口；规划返回锁住起始航向，不参与视觉纠偏。"""
     cfg = cfg or BackupConfig()
 
     if state.phase == "fault":
@@ -279,6 +281,10 @@ def step_backup(
         if progress_s_m <= cfg.done_progress_m:
             state.phase = "done"
             return state, _stop("backup_done_at_entry")
+        if heading_only and (yaw_rad is None or not math.isfinite(yaw_rad)):
+            state.phase = "fault"
+            return state, _stop("stop_backup_heading_invalid")
+        state.heading_only = heading_only
         state.phase = "backing"
         state.started_s = now_s
         state.start_progress_m = max(0.0, progress_s_m)
@@ -311,6 +317,20 @@ def step_backup(
     if now_s - state.started_s >= cfg.max_duration_s:
         state.phase = "fault"
         return state, _stop("stop_backup_timeout")
+
+    if state.heading_only:
+        if yaw_rad is None or not math.isfinite(yaw_rad):
+            state.phase = "fault"
+            return state, _stop("stop_backup_heading_invalid")
+        # 只使用倒车启动时锁住的航向，视觉丢失和侧向开口不改变倒车方向。
+        hold = heading_hold_command(
+            -abs(cfg.reverse_speed_mps), yaw_rad, state.hold_yaw_rad,
+            cfg.heading_hold_gain, cfg.max_abs_omega,
+        )
+        return state, VelocityCommand(
+            hold.v_mps, _rate_limited_omega(state, hold.omega_radps, cfg),
+            "heading_backup",
+        )
 
     vision_ok = near_x_m is not None and math.isfinite(near_x_m)
     if not vision_ok and state.no_vision_started_s is None and state.hold_yaw_rad is not None:
