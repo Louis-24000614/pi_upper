@@ -390,7 +390,7 @@ class ArrivalPolicyTest(unittest.TestCase):
                 policy, progress, patrol=True, reading=closed,
                 trusted_odom_handoff=True,
             )
-        self.assertIsNotNone(self.patrol_state.locked_heading_yaw_rad)
+        self.assertIsNone(self.patrol_state.locked_heading_yaw_rad)
         self.assertFalse(self.patrol_state.edge_latched)
         return policy, closed
 
@@ -713,6 +713,184 @@ class ArrivalPolicyTest(unittest.TestCase):
             self.graph.arrival_overrides[("1_2", "2_2")] = override
             with self.subTest(override=override), self.assertRaises(ValueError):
                 self.policy()
+
+
+class CulvertPatrolArrivalRegressionTest(unittest.TestCase):
+    def setUp(self):
+        self.graph = load_topology()
+        self.cfg = JunctionTurnConfig(heading_anchor_enabled=False)
+        self.patrol_cfg = RfidArrivalConfig(heading_anchor_enabled=False)
+        self.state = JunctionTurn()
+        self.patrol_state = RfidArrival()
+        self.notes = queue.Queue()
+        self.sent = []
+        self.command = VelocityCommand(0.08, 0.12, "follow")
+        self.reading = JunctionRead(
+            KIND_STRAIGHT, False, False, True, 0, None, None, 1.0, 0.85,
+        )
+        self.policy = resolve_arrival_policy(
+            self.graph, "4_4", "3_4", self.graph.edges["3_4__4_4"].length_m,
+            self.cfg, self.patrol_cfg,
+        )
+
+    def send(self, line):
+        self.sent.append(line)
+        return True
+
+    def step(self, progress, *, command=None, depth=0.14, odom_valid=True,
+             visual_safe=True, trusted=True, policy=None):
+        self.state, self.patrol_state, command, trigger = step_route_arrival(
+            self.policy if policy is None else policy,
+            patrol=True, state=self.state, patrol_state=self.patrol_state,
+            reading=self.reading, opening=self.reading.kind,
+            command=self.command if command is None else command,
+            progress_m=progress, odom_valid=odom_valid,
+            notes=self.notes, send=self.send, junction_cfg=self.cfg,
+            patrol_cfg=self.patrol_cfg, visual_safe=visual_safe,
+            lane_heading_rad=None, yaw_rad=0.10, forward_depth_m=depth,
+            trusted_odom_handoff=trusted,
+        )
+        return command, trigger
+
+    def assert_following_without_heading(self, command, trigger, expected):
+        self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "follow"))
+        self.assertEqual((command, trigger), (expected, ""))
+        self.assertEqual(self.patrol_state.heading_candidates, [])
+        self.assertEqual(self.patrol_state.heading_history, [])
+        self.assertIsNone(self.patrol_state.locked_heading_yaw_rad)
+        self.assertFalse(self.patrol_state.edge_latched)
+        self.assertEqual(self.sent, [])
+
+    def test_shallow_culvert_resume_reaches_3_4_and_advances_agent(self):
+        edge_length = self.policy.edge_length_m
+        for first_at_node in (edge_length, edge_length + 0.02):
+            with self.subTest(first_at_node=first_at_node):
+                self.setUp()
+                self.assertEqual(self.patrol_cfg.early_lock_frames, 3)
+                self.assertEqual(self.policy.mode, "visual_odom")
+                self.assertEqual(self.policy.expected_openings, ("forward", "left"))
+                agent = RouteAgent(self.graph)
+                agent.start()
+                for _ in range(len(agent.state.route_edges)):
+                    if (agent.state.from_node, agent.state.to_node) == ("4_4", "3_4"):
+                        break
+                    agent.node_reached(agent.state.to_node)
+                self.assertEqual((agent.state.from_node, agent.state.to_node), ("4_4", "3_4"))
+
+                for progress, depth in (
+                    (0.39, 0.14), (0.53, 0.15), (0.68, 0.14),
+                    (0.69, 0.15), (0.94, 0.14), (edge_length - 0.001, 0.15),
+                ):
+                    with self.subTest(progress=progress):
+                        command, trigger = self.step(progress, depth=depth)
+                        self.assert_following_without_heading(command, trigger, self.command)
+
+                command, trigger = self.step(first_at_node)
+                self.assertEqual((self.state.phase, self.patrol_state.phase), ("arrived", "arrived"))
+                self.assertEqual((command.v_mps, command.omega_radps, command.reason, trigger), (
+                    0.0, 0.0, "rfid_arrived", "culvert_odom_handoff",
+                ))
+                self.assertEqual(self.sent, [])
+                xy = {key: (node.x, node.y) for key, node in self.graph.nodes.items()}
+                handoff_arrival(self.state, agent, xy, self.send)
+                self.assertIn("3_4__4_4", agent.state.covered_edges)
+                self.assertEqual(agent.state.from_node, "3_4")
+                self.assertNotEqual(agent.state.to_node, "3_4")
+                self.assertEqual(self.state.phase, "stopping")
+                self.assertEqual(self.sent, ["stop"])
+
+    def test_visual_dropout_keeps_its_stop_and_resumes_without_heading_hold(self):
+        for reason in (
+            "stop_road", "stop_centerline", "stop_lookahead",
+            "stop_forward_strip", "stop_camera",
+        ):
+            with self.subTest(reason=reason):
+                self.setUp()
+                stopped = VelocityCommand(0.0, 0.0, reason)
+                for progress in (0.53, 0.68, 0.94):
+                    command, trigger = self.step(progress, command=stopped, visual_safe=False)
+                    self.assert_following_without_heading(command, trigger, stopped)
+                near = VelocityCommand(0.05, -0.20, "follow_near")
+                command, trigger = self.step(0.95, command=near)
+                self.assert_following_without_heading(command, trigger, near)
+                command, trigger = self.step(
+                    self.policy.edge_length_m, command=stopped, visual_safe=False,
+                )
+                self.assertEqual((self.state.phase, self.patrol_state.phase), ("arrived", "arrived"))
+                self.assertEqual((command.v_mps, command.omega_radps, trigger), (
+                    0.0, 0.0, "culvert_odom_handoff",
+                ))
+                self.assertEqual(self.sent, [])
+
+    def test_stale_odometry_stops_before_or_beyond_node_and_fresh_data_recovers(self):
+        edge_length = self.policy.edge_length_m
+        for progress in (0.53, 0.68, 0.94, edge_length, edge_length + 0.02):
+            with self.subTest(progress=progress):
+                self.setUp()
+                command, trigger = self.step(progress, odom_valid=False)
+                self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "follow"))
+                self.assertEqual((command.v_mps, command.omega_radps, command.reason, trigger), (
+                    0.0, 0.0, "stop_odom_stale", "odom_stale",
+                ))
+                command, trigger = self.step(progress)
+                if progress < self.policy.edge_length_m:
+                    self.assert_following_without_heading(command, trigger, self.command)
+                else:
+                    self.assertEqual((self.state.phase, self.patrol_state.phase), ("arrived", "arrived"))
+                    self.assertEqual((command.v_mps, command.omega_radps, trigger), (
+                        0.0, 0.0, "culvert_odom_handoff",
+                    ))
+                self.assertEqual(self.sent, [])
+
+    def test_without_culvert_trust_the_patrol_still_stops_for_alignment(self):
+        command, trigger = self.step(0.68, trusted=False)
+        self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "heading_lock_stop"))
+        self.assertEqual((command.v_mps, command.omega_radps, command.reason, trigger), (
+            0.0, 0.0, "stop_heading_lock_wait", "",
+        ))
+        self.assertEqual(self.sent, ["stop"])
+
+    def test_culvert_trust_does_not_replace_visual_end_arrival(self):
+        policy = resolve_arrival_policy(
+            self.graph, "3_2", "3_1", self.graph.edges["3_1__3_2"].length_m,
+            self.cfg, self.patrol_cfg,
+        )
+        self.assertEqual(policy.mode, "visual_end")
+        command, trigger = self.step(0.53, policy=policy)
+        self.assert_following_without_heading(command, trigger, self.command)
+        for progress in (policy.edge_length_m, policy.edge_length_m + 0.02):
+            command, trigger = self.step(progress, policy=policy)
+            self.assertEqual((self.state.phase, self.patrol_state.phase), ("follow", "heading_lock_stop"))
+            self.assertEqual((command.v_mps, command.omega_radps, command.reason, trigger), (
+                0.0, 0.0, "stop_heading_lock_wait", "",
+            ))
+            self.assertEqual(self.sent, ["stop"])
+
+    def test_trusted_distance_cannot_clear_faults_or_interrupt_departure(self):
+        for target in ("junction", "patrol"):
+            with self.subTest(target=target):
+                self.setUp()
+                state = self.state if target == "junction" else self.patrol_state
+                state.phase = "fault"
+                state.fault_reason = "stop_heading_lock_invalid"
+                command, trigger = self.step(self.policy.edge_length_m + 0.02)
+                self.assertEqual(state.phase, "fault")
+                self.assertEqual((command.v_mps, command.omega_radps, command.reason, trigger), (
+                    0.0, 0.0, "stop_heading_lock_invalid", "",
+                ))
+                self.assertEqual(self.sent, [])
+
+        for phase in ("turning", "reacquire"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.state.phase = phase
+                command, trigger = self.step(
+                    self.policy.edge_length_m + 0.02,
+                    command=VelocityCommand(0.0, 0.0, "stop_road"), visual_safe=False,
+                )
+                self.assertEqual((self.state.phase, self.patrol_state.phase), (phase, "follow"))
+                self.assertEqual((command.v_mps, command.omega_radps, trigger), (0.0, 0.0, ""))
+                self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":

@@ -232,6 +232,9 @@ def step_route_arrival(
             patrol_state.odom_handoff_frames = 0
             patrol_state.road_end_missing_frames = 0
             return state, patrol_state, VelocityCommand(0.0, 0.0, "stop_odom_stale"), "odom_stale"
+        if patrol and trusted_arrival:
+            # 涵洞恢复后沿本边视觉循迹到末端，不重新等待航向或支路证据。
+            return state, patrol_state, command, ""
     if grid_cross and approaching:
         return state, patrol_state, command, ""
 
