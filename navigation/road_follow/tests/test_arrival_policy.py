@@ -613,11 +613,11 @@ class ArrivalPolicyTest(unittest.TestCase):
         self.assertIn("1_2__2_2", agent.state.covered_edges)
         self.assertNotEqual(agent.state.to_node, "2_2")
 
-    def test_only_1_3_to_0_j_adds_three_cm_to_the_arrival_target(self):
+    def test_only_1_3_to_0_j_adds_five_cm_to_the_arrival_target(self):
         edge = self.graph.edges["0_J__1_3"]
         self.assertAlmostEqual(edge.length_m, 0.40)
         policy = self.policy("1_3", "0_J", edge.length_m)
-        self.assertAlmostEqual(policy.edge_length_m, 0.43)
+        self.assertAlmostEqual(policy.edge_length_m, 0.45)
         self.assertEqual(policy.mode, "visual_odom")
         self.assertEqual(policy.expected_openings, ("forward", "right"))
         self.assertAlmostEqual(policy.handoff_progress_m, 0.20)
@@ -631,16 +631,16 @@ class ArrivalPolicyTest(unittest.TestCase):
         ):
             with self.subTest(source=source, target=target):
                 self.assertAlmostEqual(self.policy(source, target, 0.40).edge_length_m, expected)
-        for progress in (0.40, 0.42, 0.429):
+        for progress in (0.40, 0.43, 0.449):
             cmd, trigger = self.step(policy, progress)
             self.assertEqual((self.state.phase, cmd, trigger), ("follow", self.command, ""))
-        cmd, trigger = self.step(policy, 0.43)
+        cmd, trigger = self.step(policy, 0.45)
         self.assertEqual((self.state.phase, cmd.reason, trigger), ("arrived", "arrived", "short_edge_odom"))
         self.assertEqual(self.sent, [])
 
     def test_short_returns_reach_edge_length_without_any_branch(self):
         closed = replace(self.reading, left=False, right=False, kind=KIND_STRAIGHT)
-        for source, arrival_m in (("1_3", 0.43), ("1_2", 0.40)):
+        for source, arrival_m in (("1_3", 0.45), ("1_2", 0.40)):
             for first_arrival in (arrival_m, arrival_m + 0.02):
                 with self.subTest(source=source, first_arrival=first_arrival):
                     self.setUp()

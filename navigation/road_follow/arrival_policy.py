@@ -37,8 +37,8 @@ _IMU_FULL_EDGES = frozenset({("0_J", "1_2")})
 _IMU_FULL_EDGE_EXTRA_M = 0.07
 # 返回顶端丁字口的两条短边，与格网十字一样按策略目标里程交接。
 _ODOM_RETURN_EDGES = frozenset({("1_3", "0_J"), ("1_2", "0_J")})
-# 仅 1_3→0_J 增加 3 cm 到点补偿，保留名义边长和原来的行路参数。
-_ODOM_RETURN_EDGE_EXTRA_M = {("1_3", "0_J"): 0.03}
+# 仅 1_3→0_J 增加 5 cm 到点补偿，保留名义边长和原来的行路参数。
+_ODOM_RETURN_EDGE_EXTRA_M = {("1_3", "0_J"): 0.05}
 
 
 @dataclass(frozen=True)
