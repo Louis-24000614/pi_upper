@@ -56,6 +56,24 @@ class WebTest(unittest.TestCase):
         saved, _ = Settings(self.settings.path).snapshot()
         self.assertEqual(saved["recognition"]["knife_threshold"], .6)
 
+    def test_saved_web_timeout_is_used_by_pair_task_and_persists(self):
+        from unittest.mock import Mock
+        from road_follow.inspection import SideInspection
+        from road_follow.tests.test_inspection import Pool, Servo, TARGET
+        for revision, seconds in ((0, 10), (1, 7)):
+            with self.post({"revision": revision, "values": {"side_timeout_s": seconds}}) as response:
+                self.assertEqual(json.load(response)["revision"], revision+1)
+            with self.get("/status") as response:
+                self.assertEqual(json.load(response)["settings"]["side_timeout_s"], seconds)
+            reloaded = Settings(self.settings.path)
+            task = SideInspection(reloaded, FrameHub(), Servo(), Mock(), pool=Pool(), pair_fallback=True)
+            try:
+                task.start(100, TARGET)
+                self.assertEqual(task.deadline_s, 100+seconds)
+                self.assertEqual(task.status()["effective_side_timeout_s"], seconds)
+            finally:
+                task.close()
+
     def test_invalid_input_and_stale_revision_do_not_overwrite(self):
         with self.assertRaises(HTTPError) as error:
             self.post({"revision": 0, "values": {"face_threshold": .1}})
@@ -156,7 +174,7 @@ class WebTest(unittest.TestCase):
         harness = r"""
 const vm=require('vm'),assert=require('assert');
 class Element{
- constructor(){this.children=[];this.style={};this.value='0';this.clientWidth=200;this.clientHeight=100;}
+ constructor(){this.children=[];this.style={};this.value='0';this.disabled=false;this.clientWidth=200;this.clientHeight=100;}
  append(...children){this.children.push(...children);}
  replaceChildren(...children){this.children=children;}
  get firstChild(){return this.children[0];}
@@ -173,12 +191,16 @@ const context={document:{getElementById(id){return elements[id]??=new Element();
 vm.createContext(context);
 vm.runInContext(SCRIPT,context);
 context.s={phase:'idle',valid_frames:0,side:'A',start_task_available:true,run_number:0,
- pair_fallback:true,effective_side_timeout_s:15,inferred_announcements:[],sides:[]};
-vm.runInContext('metrics(s);showResults(s);taskControls(s)',context);
+ pair_fallback:true,effective_side_timeout_s:10,inferred_announcements:[],sides:[]};
+vm.runInContext("$('side_timeout_s').value='10';metrics(s);showResults(s);taskControls(s)",context);
 assert.strictEqual(elements['task-controls'].hidden,false);
 assert.strictEqual(elements['start-task'].textContent,'开始涵洞任务');
-assert.strictEqual(elements['side_timeout_s'].disabled,true);
-assert.strictEqual(elements['side_timeout_s'].value,15);
+assert.strictEqual(elements['side_timeout_s'].disabled,false);
+assert.strictEqual(elements['side_timeout_s'].value,'10');
+assert(elements['pair-mode'].textContent.includes('10 秒'));
+elements['side_timeout_s'].value='7';
+vm.runInContext('taskControls(s)',context);
+assert.strictEqual(elements['side_timeout_s'].value,'7');
 context.s.phase='recognizing';context.s.run_number=1;
 vm.runInContext('metrics(s);showResults(s);taskControls(s)',context);
 assert.strictEqual(elements['start-task'].textContent,'重新开始涵洞任务');
@@ -186,14 +208,17 @@ context.s.phase='announcing';
 context.s.pending_announcement={record:{identity:'knife_07',source:'face_pair',based_on:'suspect_08'}};
 vm.runInContext('metrics(s);showResults(s);taskControls(s)',context);
 assert.strictEqual(elements.results.children.length,3);
-elements['start-task'].onclick().then(()=>{
+elements['start-task'].onclick().then(async()=>{
  const request=requests.find(x=>x[0]==='/start-task');
  assert(request);assert.strictEqual(request[1].method,'POST');assert.strictEqual(request[1].body,'{}');
  context.s.start_task_available=false;context.s.pair_fallback=false;
  vm.runInContext('taskControls(s)',context);
  assert.strictEqual(elements['task-controls'].hidden,true);
  assert.strictEqual(elements['side_timeout_s'].disabled,false);
- console.log('PASS button, restart, inference display, navigation hiding');
+ await elements['save'].onclick();
+ const saved=requests.find(x=>x[0]==='/settings');
+ assert(saved);assert.strictEqual(JSON.parse(saved[1].body).values.side_timeout_s,7);
+ console.log('PASS button, restart, inference display, navigation hiding, editable pair timeout save');
 }).catch(error=>{console.error(error);process.exitCode=1;});
 """
         harness = harness.replace("SCRIPT", json.dumps(script, ensure_ascii=True))

@@ -6,7 +6,7 @@ import threading
 import time
 
 from road_follow.inspection_io import FrameHub, Recognizer, ServoBridge, SideCamera
-from road_follow.inspection_pairs import paired_knife_identity, PAIR_TIMEOUT_S, PAIR_SPEECH_DELAY_S
+from road_follow.inspection_pairs import paired_knife_identity, PAIR_SPEECH_DELAY_S
 
 
 class SideInspection:
@@ -47,10 +47,7 @@ class SideInspection:
         self.count, self.identity, self.candidate = 0, None, None
 
     def _parameters(self):
-        parameters = deepcopy(self.config["recognition"])
-        if self.pair_fallback:
-            parameters["side_timeout_s"] = PAIR_TIMEOUT_S
-        return parameters
+        return deepcopy(self.config["recognition"])
 
     def _expected_knife(self):
         for record in self.sides:

@@ -25,6 +25,7 @@ class PairTest(unittest.TestCase):
         path = Path(temp.name)/"settings.json"
         path.write_bytes((Path(__file__).with_name("fixtures")/"culvert_inspection.json").read_bytes())
         self.settings = Settings(path)
+        self.settings.update({"side_timeout_s": 10})
         self.make_task()
 
     def make_task(self, paired=True):
@@ -62,6 +63,35 @@ class PairTest(unittest.TestCase):
     def audio_ids(self):
         return [int(line.split()[2]) for line in self.commands]
 
+    def test_pair_timeout_uses_saved_web_value_on_both_sides(self):
+        self.settings.update({"side_timeout_s": 7})
+        self.make_task()
+        self.assertEqual(self.task.deadline_s, 7)
+        self.assertEqual(self.task.status()["effective_side_timeout_s"], 7)
+        self.confirm("suspect_08")
+        self.flip(.12)
+        self.assertAlmostEqual(self.task.deadline_s, 10.13)
+        self.task.step(self.task.deadline_s)
+        self.assertEqual(self.audio_ids(), [20, 29])
+
+    def test_web_timeout_update_applies_next_side_and_survives_reload(self):
+        self.assertEqual(self.task.deadline_s, 10)
+        self.settings.update({"side_timeout_s": 6})
+        self.task.step(.2)
+        self.assertEqual(self.task.deadline_s, 10)
+        self.assertEqual(self.task.status()["effective_side_timeout_s"], 6)
+        config, _ = Settings(self.settings.path).snapshot()
+        self.assertEqual(config["recognition"]["side_timeout_s"], 6)
+        self.confirm("suspect_08", .3)
+        self.flip(.42)
+        self.assertAlmostEqual(self.task.deadline_s, 9.43)
+
+    def test_page_keeps_pair_timeout_editable_and_does_not_force_a_literal(self):
+        from road_follow.inspection_web import PAGE
+        self.assertNotIn("$('side_timeout_s').disabled", PAGE)
+        self.assertNotIn("计时15秒", PAGE)
+        self.assertNotIn("15秒未确认", PAGE)
+
     def test_all_ten_supplied_pairs(self):
         expected = {1: 8, 2: 6, 3: 5, 4: 3, 5: 2, 6: 1, 7: 4, 8: 7, 9: 9, 10: 10}
         self.assertEqual(FACE_KNIFE_PAIRS, expected)
@@ -70,7 +100,7 @@ class PairTest(unittest.TestCase):
         for identity in (None, "Unknown", "suspect_00", "suspect_11"):
             self.assertIsNone(paired_knife_identity(identity))
 
-    def test_face_first_all_pairs_wait_exactly_fifteen_seconds(self):
+    def test_face_first_all_pairs_wait_configured_ten_seconds(self):
         for person, knife in FACE_KNIFE_PAIRS.items():
             with self.subTest(person=person):
                 self.make_task()
@@ -78,7 +108,7 @@ class PairTest(unittest.TestCase):
                 self.assertEqual(self.audio_ids(), [12+person])
                 self.flip(.12)
                 deadline = self.task.deadline_s
-                self.assertAlmostEqual(deadline, 18.13)
+                self.assertAlmostEqual(deadline, 13.13)
                 self.task.step(deadline-.001)
                 self.assertEqual(self.audio_ids(), [12+person])
                 self.assertEqual(self.task.step(deadline), "done")
@@ -96,13 +126,13 @@ class PairTest(unittest.TestCase):
         for person, knife in FACE_KNIFE_PAIRS.items():
             with self.subTest(person=person):
                 self.make_task()
-                self.task.step(15)
-                self.flip(15.01)
-                self.confirm(f"suspect_{person:02d}", 18.03)
+                self.task.step(10)
+                self.flip(10.01)
+                self.confirm(f"suspect_{person:02d}", 13.03)
                 self.assertEqual(self.task.phase, "announcing")
                 self.assertEqual(self.audio_ids(), [12+person])
                 due = self.task.pending_announcement[0]
-                self.assertAlmostEqual(due, 21.131)
+                self.assertAlmostEqual(due, 16.131)
                 self.task.step(due-.001)
                 self.assertEqual(self.audio_ids(), [12+person])
                 self.assertEqual(self.task.step(due), "done")
@@ -133,11 +163,11 @@ class PairTest(unittest.TestCase):
         self.confirm("knife_05")
         self.assertEqual(self.task.phase, "recognizing")
         self.assertEqual(self.commands, [])
-        self.task.step(14.99)
+        self.task.step(9.99)
         self.assertEqual(self.task.phase, "recognizing")
-        self.task.step(15)
-        self.flip(15.01)
-        self.confirm("suspect_08", 18.03)
+        self.task.step(10)
+        self.flip(10.01)
+        self.confirm("suspect_08", 13.03)
         self.assertEqual(self.audio_ids(), [20])
         self.task.step(self.task.pending_announcement[0])
         self.assertEqual(self.audio_ids(), [20, 29])
@@ -147,9 +177,9 @@ class PairTest(unittest.TestCase):
     def test_knife_first_remembers_matching_confirmed_candidate_among_wrong_ones(self):
         self.confirm("knife_07")
         self.confirm("knife_05", 1)
-        self.task.step(15)
-        self.flip(15.01)
-        self.confirm("suspect_08", 18.03)
+        self.task.step(10)
+        self.flip(10.01)
+        self.confirm("suspect_08", 13.03)
         self.task.step(self.task.pending_announcement[0])
         self.assertEqual(self.audio_ids(), [20, 29])
         self.assertEqual(self.task.sides[0]["identity"], "knife_07")
@@ -166,8 +196,8 @@ class PairTest(unittest.TestCase):
             self.assertEqual(self.task.inferred_announcements, [])
 
     def test_no_face_never_creates_a_pair_inference(self):
-        self.task.step(15)
-        self.flip(15.01)
+        self.task.step(10)
+        self.flip(10.01)
         self.task.step(self.task.deadline_s)
         self.assertEqual(self.commands, [])
         self.assertEqual(self.task.inferred_announcements, [])
@@ -181,6 +211,7 @@ class PairTest(unittest.TestCase):
         self.assertEqual(self.audio_ids(), [20, 29])
 
     def test_disabled_flag_keeps_configured_deadline_and_real_results(self):
+        self.settings.update({"side_timeout_s": 45})
         self.make_task(paired=False)
         self.assertEqual(self.task.deadline_s, 45)
         self.confirm("suspect_08")
@@ -190,9 +221,9 @@ class PairTest(unittest.TestCase):
         self.assertEqual(self.task.inferred_announcements, [])
 
     def test_cancel_clears_delayed_announcement(self):
-        self.task.step(15)
-        self.flip(15.01)
-        self.confirm("suspect_08", 18.03)
+        self.task.step(10)
+        self.flip(10.01)
+        self.confirm("suspect_08", 13.03)
         due = self.task.pending_announcement[0]
         self.task.cancel()
         self.assertIsNone(self.task.pending_announcement)
@@ -201,11 +232,11 @@ class PairTest(unittest.TestCase):
 
     def test_restart_clears_delayed_announcement_and_all_evidence(self):
         self.confirm("knife_05")
-        self.task.step(15)
-        self.flip(15.01)
-        self.confirm("suspect_08", 18.03)
+        self.task.step(10)
+        self.flip(10.01)
+        self.confirm("suspect_08", 13.03)
         due = self.task.pending_announcement[0]
-        self.task.start(19, TARGET, initial_turn=True)
+        self.task.start(14, TARGET, initial_turn=True)
         self.assertIsNone(self.task.pending_announcement)
         self.assertEqual(self.task.knife_observations, {})
         self.assertEqual(self.task.inferred_announcements, [])
@@ -231,7 +262,7 @@ class PairTest(unittest.TestCase):
         self.settings.update({"knife_threshold": .6})
         self.task.step(.2)
         self.assertEqual(self.task.knife_observations, {})
-        self.assertEqual(self.task.deadline_s, 15)
+        self.assertEqual(self.task.deadline_s, 10)
 
     def test_only_explicit_correct_face_pair_is_allowed_for_inferred_speech(self):
         record = {"status": "inferred", "source": "face_pair", "category": "knife",

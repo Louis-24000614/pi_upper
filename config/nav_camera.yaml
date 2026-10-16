@@ -122,7 +122,7 @@ junction_turn:
   forward_speed_mmps: 50
   # 每次转弯交接后固定前进 20 cm，明确停车后再原地转。
   turn_forward_m: 0.20
-  stop_settle_ms: 2000
+  stop_settle_ms: 1000
   min_forward_mm: 50
   max_forward_mm: 650
   reacquire_frames: 3

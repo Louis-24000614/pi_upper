@@ -1,6 +1,5 @@
 """Optional, explicitly supplied face-to-knife correspondence."""
 FACE_KNIFE_PAIRS = {8: 7, 3: 5, 10: 10, 6: 1, 9: 9, 5: 2, 4: 3, 2: 6, 1: 8, 7: 4}
-PAIR_TIMEOUT_S = 15.0
 PAIR_SPEECH_DELAY_S = 3.0
 
 

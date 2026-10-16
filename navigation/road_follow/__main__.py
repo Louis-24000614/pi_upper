@@ -482,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--culvert-inspect", action="store_true", help="显式启用涵洞两侧识别和 PWM；替换 5 秒占位任务")
     parser.add_argument("--inspection-config", type=Path, default=ROOT / "config" / "culvert_inspection.json")
     parser.add_argument("-b", "--inspection-pair-fallback", action="store_true",
-                        help="刀具侧15秒未确认时，按已确认人脸补播对应刀号")
+                        help="刀具侧达到网页配置的识别期限仍未确认时，按已确认人脸补播对应刀号")
     parser.add_argument("--speech-config", type=Path, default=ROOT / "config" / "speech.json",
                         help="兼容原有语音配置；时长缺项不阻止播报，也不按时长等待")
     parser.add_argument("--inspection-web", action="store_true", help="导航期间推流侧视相机并允许网页持久化调参")

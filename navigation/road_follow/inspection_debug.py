@@ -200,7 +200,7 @@ def main(argv=None):
                         help="读取已有 UART 设备与波特率")
     parser.add_argument("--speech-bin", type=Path, default=ROOT/"build-turn/uart/uart_speak")
     parser.add_argument("-b", "--inspection-pair-fallback", action="store_true",
-                        help="刀具侧15秒未确认时，按已确认人脸补播对应刀号")
+                        help="刀具侧达到网页配置的识别期限仍未确认时，按已确认人脸补播对应刀号")
     args = parser.parse_args(argv)
     settings = Settings(args.config)
     stop = threading.Event()
