@@ -16,29 +16,76 @@
 识别开始前的连续停稳检查和任务完成时的中央位置检查保留。
 
 相同类型和身份连续 3 张不同采集帧达到相似度 0.5 即确认；两种模型均采用 0.5，
-刀具分差只显示。每侧姿态稳定后最多识别 45 秒，未确认后继续另一侧或恢复导航。
+刀具分差只显示。未加 -b 时，每侧姿态稳定后的期限读取识别 JSON（当前板端为 15 秒），未确认后继续另一侧或恢复导航。
 相似度不是成功概率。刀具模型没有经过验证的无刀/未知类拒识能力，不能把高分候选
 或超时结果解释为“安全”“无刀”。0.5 为用户选择的调试值，需正负样本验收。
 
-同一外层裁剪帧先请求人脸；明确无脸才请求刀具。未知/低分/多人脸以及人脸请求失败
-不当作无脸，也不采纳该帧刀具候选。刀具还须有有效内部自动取景结果。HTTP 与 JPEG
-编码在后台执行，每约 1.2 秒取最新帧，不积压任务、不阻塞导航主循环。
+同一外层裁剪帧只编码一次 JPEG，并行请求人脸和刀具。判定仍优先人脸：明确无脸才
+采纳同一帧刀具结果；未知/低分/多人脸以及人脸请求失败不当作无脸。人脸有结果时
+不等待刀具完成；上一刀具请求仍在途时不追加排队，也不会将旧帧结果配给新帧。
+刀具还须有有效内部自动取景结果。HTTP 与 JPEG 编码在后台执行，
+`sample_interval_s: 0` 表示上一轮完成后立即取最新的不同采集帧，无固定采样等待。
+每路最多一个在途请求，不积压任务、不阻塞导航主循环；连续 3 帧确认规则保留。
 
 ## 独立配置与硬件检查
 
-未接舵机时可先运行独立单侧调试，使用明确指定的 USB 相机，不连接 PWM/UART，
-不启动导航，也不把调试结果标记为真实两侧任务或写入任务地图：
+独立入口现在执行完整涵洞任务，包含两侧识别、舵机转向和语音播报。启动后先提供
+预览，等待网页按钮；不会自动开始识别或循环运行。请在项目根目录执行：
 
-```sh
-PYTHONPATH=navigation:vision:. /home/orangepi/miniconda3/envs/pi_upper/bin/python -u -B \
+~~~sh
+cd /home/orangepi/pi_upper
+PYTHONPATH=navigation:vision:. python3 -u -B \
   -m road_follow.inspection_debug \
-  --camera /dev/v4l/by-id/usb-RYS_USB_Camera_200901010001-video-index0
-```
+  --config config/culvert_inspection.json \
+  --camera /dev/v4l/by-id/usb-RYS_USB_Camera_200901010001-video-index0 \
+  -b
+~~~
 
-网页为 `http://<板端IP>:8081/`。每轮按原阈值、连续新帧和 45 秒期限检查当前
-相机方向，结果展示 5 秒后重新检测同一方向；页面明确显示 PWM 禁用。ROI 和阈值
-仍保存到独立 JSON，原导航入口的硬件检查保持有效。`--camera` 仅覆盖本次调试来源，
-不写入正式导航相机配置。Ctrl+C 或 SIGTERM 停止网页和相机。
+网页为 `http://192.168.33.33:8081/`。点击“开始涵洞任务”，先请求配置的初始方向，
+等待舵机写入回执和稳定时间，再检查第一侧、翻转并检查第二侧。完成后保留结果，
+等待下次点击。运行中点击“重新开始涵洞任务”，会清空本轮识别累计、旧结果和
+尚未提交的补播，从初始方向重新执行完整一轮；旧 HTTP 结果不会进入新一轮。
+舵机异常会保留网页供查看及按钮重试。已经送到下位机的音频不能撤回。
+
+`-b` 可删除；不带时只播报实际确认的身份。带 `-b` 时使用下面的固定对应补播规则。
+`--camera` 只覆盖本次相机来源，不改写 JSON。UART 设备与波特率从
+`config/nav_camera.yaml` 读取，可用 `--nav-config` 指定另一份已有配置。
+独立入口使用 `build-turn/uart/uart_speak` 发送语音，不启动导航或发送车辆运动命令；
+请单独运行，避免与正式导航同时占用相机、PWM、串口和网页端口。
+Ctrl+C/SIGTERM 关闭本进程的相机、PWM、网页和语音子进程。
+
+### 可选人脸对应补播：-b
+
+正式导航和独立入口均支持 `-b`，长参数为 `--inspection-pair-fallback`。
+固定对应关系仅用于开启该选项的本轮任务，不改动模型或识别阈值：
+
+| 已确认人脸 | 对应刀具 |
+| --- | --- |
+| 人8 | 刀7 |
+| 人3 | 刀5 |
+| 人10 | 刀10 |
+| 人6 | 刀1 |
+| 人9 | 刀9 |
+| 人5 | 刀2 |
+| 人4 | 刀3 |
+| 人2 | 刀6 |
+| 人1 | 刀8 |
+| 人7 | 刀4 |
+
+开启时每侧识别窗口固定为 15 秒，从该侧姿态稳定、开始取新帧时计时；转向和
+稳定等待不计入 15 秒。网页显示实际期限，禁用本模式下的期限编辑，不改写 JSON。
+人脸仍须满足已有阈值与连续新帧确认要求，未知/未确认/无映射的人脸不触发推断。
+
+- 先确认人脸：先发人的播报请求，转到刀具侧并稳定后识别最多 15 秒；对应刀号确认
+  则正常播报并结束，否则在 15 秒结束时补播对应刀。错误刀号不会提前结束或播出。
+- 先检查刀具侧：保留完整 15 秒窗口，暂存已确认刀号，不立即播报。随后确认人脸时
+  核对对应刀号；在人脸播报请求 3 秒后，播报已确认的对应刀，或补播未识别出的对应刀。
+  例如先报出刀5、后确认人8，最终播人8和刀7，不播刀5。
+- 超时补播标记为 `status=inferred, source=face_pair`，记录依据人脸；两侧视觉结果
+  仍如实保留，未识别的刀不会变成视觉已确认。仅补播完成时结果为 partial。
+- 重启、取消或舵机故障会清除尚未提交的补播；同一侧同一轮最多提交一次身份播报。
+  3 秒以提交人脸播报请求为起点；UART ACK 不提供实际音频起播/播完时间，不能据此
+  声称硬件声音恰好间隔 3 秒。
 
 `config/culvert_inspection.json` 保存 camera、recognition、services、servo、web、obstacle。
 当前板端侧视设备为 `/dev/v4l/by-id/usb-RYS_USB_Camera_200901010001-video-index0`
@@ -60,7 +107,8 @@ ctest --test-dir build -R servo_app --output-on-failure
 
 ```sh
 PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
-  --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right \
+  --config config/nav_camera.yaml --model models/road_yolo11n_seg.rknn \
+  --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right -b \
   --culvert-stop --culvert-estimated-camera --culvert-inspect --inspection-web \
   --inspection-config config/culvert_inspection.json --record-video
 ```
@@ -85,7 +133,8 @@ PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
 ```sh
 cd /home/orangepi/pi_upper
 PYTHONPATH=navigation:vision:. python3 -u -B -m road_follow \
-  --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right \
+  --config config/nav_camera.yaml --model models/road_yolo11n_seg.rknn \
+  --drive --uart-bin build-turn/uart/uart_vel --turn-at-junction right -b \
   --culvert-stop --culvert-estimated-camera --culvert-inspect --inspection-web \
   --inspection-config config/culvert_inspection.json --record-video
 ```
@@ -195,7 +244,8 @@ main 后，启动或重启识别程序即可从同一路径加载；归一化 RO
 本板正在运行的配置；网页后续保存仍需另行提交和推送，才能通过 Git 分享到其他机器。
 
 点击“应用并保存识别参数”原子保存识别参数；下次启动保留。另设障碍参数保存按钮。
-不开放相机、PWM、服务地址或运动控制。人脸阈值最低 0.45。
+不开放相机、PWM、服务地址或行驶控制参数。独立入口另提供完整涵洞任务启动/重启按钮。
+正式导航网页不提供该按钮。人脸阈值最低 0.45。
 修改后清空当前侧累计并丢弃旧配置请求，当前侧 deadline 不延长，新超时从下一侧生效。
 转向、请求失败、低分或身份变化也重计数。多个页面保存冲突会返回 409，需刷新。
 浏览器断开或慢客户端不影响任务；不接管导航相机。
@@ -247,10 +297,11 @@ obstacle_observation 与 obstacle_backup_control，可核对框归属、剩余�
 地图标注真实收到的标签号，接收时的拓扑里程位置为估计；不伪造 UID，也不让
 这些地图事件接管视觉路口转向。原始 UID 显示需后续明确修改下位机协议。
 
-本轮只发软件识别结果事件，speech_enabled=false，不发送语音命令。现有
-Session::RequestSpeech / SPEAK_AUDIO (0x14) 仅支持真实音频 1～12，尚无身份编号表；
-后续取得映射后复用导航串口会话，不能同时启动独占串口的 uart_speak。
-ACK_OK 仅接受请求，不表示播放完成。
+两种入口均通过已有语音身份表播报：人1～10对应音轨13～22，刀1～10对应音轨23～32。
+正式导航复用现有 UART 会话和语音队列；独立入口按队列异步调用 uart_speak，
+该程序不发送 ARM、速度或有限运动命令。按任务轮次、涵洞与侧去重。
+开启 -b 后，仅允许具有已知人脸依据且匹配上表的推断刀号进入补播。
+ACK_OK 仅表示下位机接受请求，不表示声音已经播放或播放完成。
 
 ## 离线验证与待验收
 
@@ -259,6 +310,7 @@ PYTHONPATH=navigation:vision:. python3 -B -m unittest discover \
   -s navigation/road_follow/tests -p 'test_inspection*.py'
 PYTHONPATH=navigation:vision:. python3 -B -m unittest discover \
   -s navigation/road_follow/tests -p 'test_culvert*.py'
+PYTHONPATH=navigation:vision:. python3 -B -m unittest road_follow.tests.test_speech
 ```
 
 新测试只使用合成相机、假 HTTP、假 PWM 与系统临时目录；网页测试监听本机随机端口。

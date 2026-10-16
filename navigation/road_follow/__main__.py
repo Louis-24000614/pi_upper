@@ -481,6 +481,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--culvert-config", type=Path, default=ROOT / "config" / "culvert.yaml")
     parser.add_argument("--culvert-inspect", action="store_true", help="显式启用涵洞两侧识别和 PWM；替换 5 秒占位任务")
     parser.add_argument("--inspection-config", type=Path, default=ROOT / "config" / "culvert_inspection.json")
+    parser.add_argument("-b", "--inspection-pair-fallback", action="store_true",
+                        help="刀具侧15秒未确认时，按已确认人脸补播对应刀号")
     parser.add_argument("--speech-config", type=Path, default=ROOT / "config" / "speech.json",
                         help="兼容原有语音配置；时长缺项不阻止播报，也不按时长等待")
     parser.add_argument("--inspection-web", action="store_true", help="导航期间推流侧视相机并允许网页持久化调参")
@@ -523,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("-d/--no-planned-reverse 需要 --drive 和拓扑任务 --turn-at-junction")
     args.inspection_settings = None
+    if args.inspection_pair_fallback and not args.culvert_inspect:
+        parser.error("-b/--inspection-pair-fallback 必须与 --culvert-inspect 一起使用")
     if args.inspection_web and not args.culvert_inspect:
         parser.error("--inspection-web 必须与 --culvert-inspect 一起使用")
     if args.culvert_inspect and not args.culvert_stop:
@@ -801,7 +805,7 @@ def _run(args, parser) -> int:
             culvert_runtime = CulvertRuntime(*args.culvert_setup, nav_config=cfg, agent=route_agent,
                 send=lambda line: write_velocity(bridge, line), event=_event, root=ROOT,
                 inspection_settings=args.inspection_settings, inspection_web=args.inspection_web,
-                speech_config=speech_config)
+                speech_config=speech_config, inspection_pair_fallback=args.inspection_pair_fallback)
         except BaseException as exc:
             _event("错误", f"涵洞初始化失败：{exc}")
             _stop_bridge(bridge)
