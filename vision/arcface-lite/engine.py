@@ -40,6 +40,8 @@ class FacialRecognition:
     def __init__(self, model_name="buffalo_sc"):
         self.model_name = model_name
         self.app = None
+        self._db_cache_key = None
+        self._db_cache = None
 
     def init_app(self, det_size=(320, 320), det_thresh=None):
         """Prepare FaceAnalysis on CPU."""
@@ -63,7 +65,7 @@ class FacialRecognition:
             areas.append((x2 - x1) * (y2 - y1))
         return faces[int(np.argmax(areas))]
 
-    def recognize_from_frame(self, color_img, db_path, threshold=0.45):
+    def recognize_from_frame(self, color_img, db_path, threshold=0.45, draw=True):
         """
         Run recognition on a BGR numpy frame (H, W, 3).
 
@@ -78,7 +80,7 @@ class FacialRecognition:
 
         names, db_embs = self.load_db(db_path)
 
-        img = color_img.copy()
+        img = color_img.copy() if draw else color_img
 
         faces = self.app.get(img)
         faces = self.sort_faces_left_to_right(faces)
@@ -95,16 +97,17 @@ class FacialRecognition:
             bbox_cx = (x1 + x2) / 2.0
             direction_px = round(img_cx - bbox_cx, 1)
 
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(
-                img,
-                f"{who} {score:.2f}",
-                (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2,
-            )
+            if draw:
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    img,
+                    f"{who} {score:.2f}",
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 0),
+                    2,
+                )
 
             results.append({"name": who, "score": float(score), "bbox": (x1, y1, x2, y2), "direction_px": direction_px})
 
@@ -297,11 +300,18 @@ class FacialRecognition:
         return sorted(faces, key=cx)
 
     def load_db(self, db_path):
-        data = np.load(db_path, allow_pickle=True)
-        names = data["names"]
-        embs = data["embs"].astype(np.float32)
+        path = os.path.abspath(db_path)
+        stat = os.stat(path)
+        key = (path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        if key == self._db_cache_key:
+            return self._db_cache
+        with np.load(path, allow_pickle=True) as data:
+            names = data["names"]
+            embs = data["embs"].astype(np.float32)
         embs = np.stack([l2_normalize(e) for e in embs], axis=0).astype(np.float32)
-        return names, embs
+        self._db_cache_key = key
+        self._db_cache = (names, embs)
+        return self._db_cache
 
     def list_faces(self, db_path):
         """Return list of registered names from the database."""

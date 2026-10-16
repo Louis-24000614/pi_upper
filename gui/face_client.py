@@ -48,6 +48,7 @@ class _FaceRequest(QThread):
 class FaceClient(QObject):
     result_ready = Signal(dict)
     request_failed = Signal(dict)
+    request_finished = Signal()
 
     def __init__(self, endpoint: str = "http://127.0.0.1:20004/api/v1/recognize",
                  timeout_ms: int = 3000, parent: QObject | None = None) -> None:
@@ -79,6 +80,7 @@ class FaceClient(QObject):
         self._worker = None
         if worker is not None:
             worker.deleteLater()
+            self.request_finished.emit()
 
     def shutdown(self, timeout_ms: int = 4500) -> bool:
         worker = self._worker

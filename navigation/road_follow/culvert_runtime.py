@@ -74,7 +74,8 @@ def drain_notes(notes):
 
 class CulvertRuntime:
     def __init__(self, mapping, config, calibration, *, nav_config, agent, send, event, root, prefix=None,
-                 inspection_settings=None, inspection_web=False, speech_config=None):
+                 inspection_settings=None, inspection_web=False, speech_config=None,
+                 inspection_pair_fallback=False):
         self.inspection_settings = inspection_settings
         self.obstacle_revision = None
         self.obstacle_judge_revisions = {}
@@ -96,7 +97,8 @@ class CulvertRuntime:
             if inspection_settings is not None:
                 from road_follow.inspection import create_inspection
                 executor = create_inspection(inspection_settings, root, web_enabled=inspection_web, event=self.event,
-                                             notify=self.speech.request, speech_enabled=self.speech.enabled)
+                                             notify=self.speech.request, speech_enabled=self.speech.enabled,
+                                             pair_fallback=inspection_pair_fallback)
                 if executor.web is not None:
                     executor.web.map_status = self.records.topology_snapshot
                     executor.web.map_svg = self.records.svg

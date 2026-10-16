@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 import cv2
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -169,6 +169,8 @@ class MainWindow(QMainWindow):
         self.recognition_frame_at = 0.0
         self.navigation_frame_at = 0.0
         self.pending_knife_id: str | None = None
+        self.last_knife_frame: tuple[int, int] | None = None
+        self.last_face_frame: tuple[int, int] | None = None
         self.pending_face_id: str | None = None
         self.face_results: list[dict] = []
         self.face_seen_at = 0.0
@@ -187,9 +189,8 @@ class MainWindow(QMainWindow):
         self.knife_client.request_failed.connect(self._on_knife_error)
         self.face_client.result_ready.connect(self._on_face_result)
         self.face_client.request_failed.connect(self._on_face_error)
-        self.recognition_timer = QTimer(self)
-        self.recognition_timer.setInterval(1200)
-        self.recognition_timer.timeout.connect(self._recognition_tick)
+        self.knife_client.request_finished.connect(self._recognition_tick)
+        self.face_client.request_finished.connect(self._recognition_tick)
         self.showMaximized()
         self._discover_and_start_cameras()
 
@@ -786,6 +787,7 @@ class MainWindow(QMainWindow):
             self.recognition_frame_at = time.monotonic()
             if self.display_role == "recognition_camera":
                 self._show_frame(self.recognition_view, frame, self._current_face_boxes())
+            self._recognition_tick()
         if path == self.role_sources["navigation_camera"] and self.display_role == "navigation_camera":
             self._show_frame(self.navigation_view, frame)
         self._update_camera_ui()
@@ -914,6 +916,7 @@ class MainWindow(QMainWindow):
         self.camera_epoch += 1
         self.pending_knife_id = None
         self.pending_face_id = None
+        self.last_knife_frame = self.last_face_frame = None
         self.face_results = []
         self.face_seen_at = 0.0
         self.recognition_frame_at = 0.0
@@ -935,7 +938,6 @@ class MainWindow(QMainWindow):
         self._last_knife_message = ""
         self._last_face_message = ""
         self._invalidate_recognition()
-        self.recognition_timer.start()
         self._log("测试1已启动：刀具和人脸服务并行处理识别摄像头画面。")
         self._recognition_tick()
 
@@ -943,7 +945,6 @@ class MainWindow(QMainWindow):
         if not self.test1_running:
             return
         self.test1_running = False
-        self.recognition_timer.stop()
         self._invalidate_recognition()
         self._set_knife_status("未启动")
         self._set_face_status("未启动")
@@ -966,8 +967,10 @@ class MainWindow(QMainWindow):
             return
         frame_id = self.recognition_frame_id
         epoch = self.camera_epoch
+        frame_key = (epoch, frame_id)
         captured_ns = time.monotonic_ns()
-        if not self.knife_client.busy:
+        if not self.knife_client.busy and self.last_knife_frame != frame_key:
+            self.last_knife_frame = frame_key
             knife_frame = frame
             if self.knife_roi is not None:
                 x0, y0, x1, y1 = self.knife_roi
@@ -976,7 +979,8 @@ class MainWindow(QMainWindow):
             self.pending_knife_id = request_id
             self.knife_client.submit(knife_frame, request_id, frame_id, epoch, captured_ns,
                                      roi_selected=self.knife_roi is not None)
-        if not self.face_client.busy:
+        if not self.face_client.busy and self.last_face_frame != frame_key:
+            self.last_face_frame = frame_key
             request_id = f"test1-{epoch}-face-{frame_id}"
             self.pending_face_id = request_id
             self.face_client.submit(frame, request_id)

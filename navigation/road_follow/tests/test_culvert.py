@@ -149,6 +149,37 @@ class CulvertControlTest(unittest.TestCase):
         self.sample(2.11); self.step(2.11)
         self.assertEqual(self.control.fault_reason,"stop_ack_timeout")
 
+    def test_long_settling_keeps_stopped_and_starts_task_only_after_stability(self):
+        for motion in ("position", "yaw"):
+            with self.subTest(motion=motion):
+                self.setUp(); self.start()
+                started = []
+                self.control.executor = SimpleNamespace(
+                    start=lambda now,target:started.append((now,target)),
+                    step=lambda now:"running")
+                self.sample(.1); self.step(.1)
+                self.sample(.2); self.step(.2,notes=["STOP_DONE"])
+                for i in range(3,72):
+                    x = .635+(.02 if i%2 else 0) if motion == "position" else .635
+                    yaw = (.04 if i%2 else 0) if motion == "yaw" else 0
+                    self.sample(i/10,x=x,yaw=yaw)
+                    outcome = self.step(i/10)
+                    self.assertEqual(self.control.phase,"settling")
+                    self.assertIsNone(self.control.fault_reason)
+                    self.assertEqual((outcome.command.v_mps,outcome.command.omega_radps),(0,0))
+                    self.assertFalse(outcome.send_velocity)
+                self.assertEqual(started,[])
+                self.assertEqual(self.sent,["stop"])
+                self.assertEqual(self.records.entries[KEY[0]]["status"],"discovered")
+                for i in range(72,96):
+                    self.sample(i/10)
+                    self.step(i/10)
+                self.assertEqual(self.control.phase,"task")
+                self.assertEqual(len(started),1)
+                self.assertGreaterEqual(started[0][0]-7.2,self.config.settle_s)
+                self.assertIs(started[0][1],self.target)
+                self.assertEqual(self.sent,["stop"])
+
     def test_odom_stale_still_stops(self):
         self.start(); outcome=self.step(.6,.5)
         self.assertEqual(self.control.fault_reason,"odom_stale")
@@ -280,9 +311,14 @@ class CulvertControlTest(unittest.TestCase):
 
     def test_configuration_rejects_invalid_limits(self):
         for mapping in ({"near_mps":.05},{"length_m":0},{"confirm_frames":2.5},
-                        {"stop_error_m":.2},{"min_distance_m":.7},{"settle_timeout_s":1}):
+                        {"stop_error_m":.2},{"min_distance_m":.7}):
             with self.subTest(mapping=mapping),self.assertRaises(ValueError):
                 CulvertConfig.from_mapping(mapping)
+
+    def test_legacy_settle_timeout_does_not_limit_stability_window(self):
+        config=CulvertConfig.from_mapping({"settle_timeout_s":1,"settle_s":2})
+        self.assertEqual(config.settle_s,2)
+        self.assertEqual(config.settle_timeout_s,1)
 
     def test_entry_distance_bias_defaults_to_zero_and_accepts_signed_finite_values(self):
         self.assertEqual(CulvertConfig.from_mapping({}).entry_distance_bias_m,0)

@@ -6,7 +6,7 @@
     "knife_threshold": 0.5,
     "confirm_frames": 3,
     "side_timeout_s": 45.0,
-    "sample_interval_s": 1.2,
+    "sample_interval_s": 0,
     "request_timeout_s": 3.0,
     "roi": [0.0, 0.0, 1.0, 1.0]
   },

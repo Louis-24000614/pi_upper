@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import re
 
+from road_follow.inspection_pairs import paired_knife_identity
+
 
 _EVENT_ID = re.compile(r"[A-Za-z0-9_.:-]{1,96}\Z")
 _KINDS = {"SPEECH_QUEUED", "SPEECH_REJECT", "SPEECH_SENT", "SPEECH_RESULT"}
@@ -46,7 +48,13 @@ class SpeechConfig:
 
 
 def inspection_audio_id(record):
-    if not isinstance(record, dict) or record.get("status") != "confirmed":
+    if not isinstance(record, dict):
+        return None
+    inferred = (record.get("status") == "inferred" and record.get("source") == "face_pair"
+                and record.get("category") == "knife"
+                and paired_knife_identity(record.get("based_on")) == record.get("identity")
+                and record.get("identity") is not None)
+    if record.get("status") != "confirmed" and not inferred:
         return None
     category, identity = record.get("category"), record.get("identity")
     if not isinstance(identity, str):
@@ -87,7 +95,7 @@ class InspectionSpeech:
         return True
 
     def request(self, record):
-        if not isinstance(record, dict) or record.get("status") != "confirmed":
+        if not isinstance(record, dict) or record.get("status") not in ("confirmed", "inferred"):
             return False
         audio_id = inspection_audio_id(record)
         edge_id, side = record.get("edge_id"), record.get("direction")
@@ -101,7 +109,8 @@ class InspectionSpeech:
         token = json.dumps(key, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         event_id = "inspect-" + hashlib.sha256(token).hexdigest()
         details = {"event_id": event_id, "audio_id": audio_id, "session_id": self.session_id,
-                   "edge_id": edge_id, "side": side, "identity": record["identity"]}
+                   "edge_id": edge_id, "side": side, "identity": record["identity"],
+                   "source": record.get("source", "vision"), "based_on": record.get("based_on")}
         self.requests[event_id] = {**details, "state": "submitted"}
         try:
             submitted = self.send(f"speech {event_id} {audio_id}")

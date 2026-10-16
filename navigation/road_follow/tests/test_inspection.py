@@ -115,6 +115,26 @@ class InspectionTest(unittest.TestCase):
         self.confirm(10)
         self.assertEqual(self.servo.angles, [180, 0])
 
+    def test_zero_interval_accepts_three_fresh_frames_without_fixed_wait(self):
+        for t in (0, .04, .08):
+            self.vote(t)
+        self.assertEqual(self.task.phase, "turning")
+        self.assertEqual(self.task.sides[0]["valid_frames"], 3)
+        self.assertLess(self.task.sides[0]["confirmed_s"], .1)
+
+    def test_busy_round_keeps_only_latest_frame(self):
+        self.pool.manual = True
+        self.hub.publish(np.zeros((20, 30, 3), np.uint8), 0)
+        self.task.step(0)
+        for t in (.04, .08, .12):
+            self.hub.publish(np.zeros((20, 30, 3), np.uint8), t)
+            self.task.step(t)
+        self.assertEqual(len(self.pool.jobs), 1)
+        self.pool.finish()
+        self.task.step(.13)
+        self.assertEqual(len(self.pool.jobs), 2)
+        self.assertEqual(self.pool.jobs[-1][2][0].sequence, 4)
+
     def test_repeated_capture_frame_never_votes_twice(self):
         self.vote(0)
         for t in (.1, .2, .3, .9):
@@ -243,72 +263,148 @@ class RecognizerTest(unittest.TestCase):
         self.rec = json.loads(FIXTURE.read_text())["recognition"]
         self.rec["roi"] = [.1, .2, .9, .8]
         self.frame = SideFrame(np.zeros((100, 200, 3), np.uint8), 1, 1, 0, "A")
-        self.request = Mock()
+        self.responses = {"face": {"results": []}, "knife": {
+            "top1_class": "knife_03", "top1_score": .5, "quality_ok": True,
+            "roi_source": "light_surface", "roi_xyxy": [2, 3, 70, 40], "margin": .001}}
+        self.request = Mock(side_effect=lambda endpoint, *args: self.responses[endpoint])
         self.service = Recognizer({"face": "face", "knife": "knife"}, self.request)
+        self.addCleanup(self.service.close)
 
-    def test_outer_crop_affects_both_models_and_maps_boxes_to_original(self):
-        self.request.side_effect = [{"results": []}, {"top1_class": "knife_03", "top1_score": .5,
-                    "quality_ok": True, "roi_source": "light_surface", "roi_xyxy": [2, 3, 70, 40], "margin": .001}]
-        result = self.service.recognize(self.frame, self.rec)
+    def recognize(self):
+        try:
+            return self.service.recognize(self.frame, self.rec)
+        finally:
+            if self.service.knife_future is not None:
+                self.service.knife_future.exception(timeout=3)
+
+    def test_outer_crop_shared_jpeg_and_original_coordinates(self):
+        import cv2
+        with patch("road_follow.inspection_io.cv2.imencode", wraps=cv2.imencode) as encode:
+            result = self.recognize()
         self.assertTrue(result["accepted"])
         self.assertEqual(result["bbox"], [22, 23, 90, 60])
-        self.assertEqual(self.request.call_args_list[0].args[1].shape, (60, 160, 3))
-        fields = self.request.call_args_list[1].args[2]
-        self.assertEqual(fields["roi_selected"], "false")
-        self.assertEqual(fields["frame_id"], 1)
+        self.assertEqual(encode.call_count, 1)
+        calls = {call.args[0]: call.args for call in self.request.call_args_list}
+        self.assertIs(calls["face"][1], calls["knife"][1])
+        image = cv2.imdecode(np.frombuffer(calls["knife"][1], np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(image.shape, (60, 160, 3))
+        self.assertEqual(calls["knife"][2]["roi_selected"], "false")
+        self.assertEqual(calls["knife"][2]["frame_id"], 1)
 
-    def test_registered_face_wins_and_knife_not_requested(self):
-        self.request.return_value = {"results": [{"name": "suspect_02", "score": .5, "bbox": [1, 2, 20, 30]}]}
-        result = self.service.recognize(self.frame, self.rec)
+    def test_registered_face_wins_over_parallel_knife(self):
+        self.responses["face"] = {"results": [{"name": "suspect_02", "score": .5, "bbox": [1, 2, 20, 30]}]}
+        result = self.recognize()
         self.assertTrue(result["accepted"])
+        self.assertEqual(result["category"], "suspect")
         self.assertEqual(result["bbox"], [21, 22, 40, 50])
-        self.assertEqual(self.request.call_count, 1)
+        self.assertEqual(self.request.call_count, 2)
 
     def test_numeric_registered_ids_match_task_ids_without_changing_response(self):
         for number in range(1, 11):
             with self.subTest(number=number):
-                self.request.reset_mock()
                 response = {"results": [{"name": str(number), "score": .5, "bbox": [1, 2, 20, 30]}]}
-                self.request.return_value = response
-                result = self.service.recognize(self.frame, self.rec)
+                self.responses["face"] = response
+                result = self.recognize()
                 self.assertTrue(result["accepted"])
                 self.assertEqual(result["identity"], f"suspect_{number:02d}")
                 self.assertEqual(response["results"][0]["name"], str(number))
-                self.assertEqual(self.request.call_count, 1)
 
-    def test_numeric_aliases_keep_low_and_unknown_faces_rejected(self):
-        for label, score in [("1", .49), ("0", .9), ("11", .9), ("01", .9), (1, .9)]:
+    def test_unknown_low_multiple_and_invalid_faces_never_accept_parallel_knife(self):
+        for label, score in [("1", .49), ("0", .9), ("11", .9), ("01", .9), (1, .9),
+                             ("Unknown", .7), ("suspect_01", .49)]:
             with self.subTest(label=label):
-                self.request.reset_mock()
-                self.request.return_value = {"results": [{"name": label, "score": score}]}
-                self.assertFalse(self.service.recognize(self.frame, self.rec)["accepted"])
-                self.assertEqual(self.request.call_count, 1)
-
-    def test_unknown_or_low_face_never_falls_back_to_knife(self):
-        for label, score in [("Unknown", .7), ("suspect_01", .49)]:
-            self.request.reset_mock()
-            self.request.return_value = {"results": [{"name": label, "score": score}]}
-            self.assertFalse(self.service.recognize(self.frame, self.rec)["accepted"])
-            self.assertEqual(self.request.call_count, 1)
+                self.responses["face"] = {"results": [{"name": label, "score": score}]}
+                self.assertFalse(self.recognize()["accepted"])
+        self.responses["face"] = {"results": [{"name": "1", "score": .9}] * 2}
+        self.assertFalse(self.recognize()["accepted"])
+        self.responses["face"] = {}
+        with self.assertRaises(ValueError):
+            self.recognize()
 
     def test_face_failure_is_not_no_face(self):
-        self.request.side_effect = TimeoutError()
+        def request(endpoint, *args):
+            if endpoint == "face":
+                raise TimeoutError("face")
+            return self.responses[endpoint]
+        self.request.side_effect = request
         with self.assertRaises(TimeoutError):
-            self.service.recognize(self.frame, self.rec)
-        self.assertEqual(self.request.call_count, 1)
+            self.recognize()
 
     def test_knife_needs_automatic_roi_and_score(self):
+        baseline = self.responses["knife"].copy()
         for override in [{"roi_source": None}, {"top1_score": .49}, {"quality_ok": False}, {"roi_xyxy": None}]:
-            knife = {"top1_class": "knife_01", "top1_score": .9, "quality_ok": True,
-                     "roi_source": "foreground", "roi_xyxy": [0, 0, 40, 40], **override}
-            self.request.side_effect = [{"results": []}, knife]
-            self.assertFalse(self.service.recognize(self.frame, self.rec)["accepted"])
+            self.responses["knife"] = {**baseline, **override}
+            self.assertFalse(self.recognize()["accepted"])
 
     def test_rotation_remedy_not_rejected_by_foreground_ratio(self):
-        self.request.side_effect = [{"results": []}, {"top1_class": "knife_01", "top1_score": .9,
-            "quality_ok": True, "roi_source": "foreground", "roi_xyxy": [0, 0, 40, 40],
-            "recognition_mode": "raw_roi_rotation", "preprocess": {"foreground_ratio": .01}}]
-        self.assertTrue(self.service.recognize(self.frame, self.rec)["accepted"])
+        self.responses["knife"].update(recognition_mode="raw_roi_rotation", preprocess={"foreground_ratio": .01})
+        self.assertTrue(self.recognize()["accepted"])
+
+    def test_requests_overlap(self):
+        from threading import Barrier
+        barrier = Barrier(2, timeout=3)
+        def request(endpoint, *args):
+            barrier.wait()
+            return self.responses[endpoint]
+        self.request.side_effect = request
+        self.assertTrue(self.recognize()["accepted"])
+
+    def test_fast_faces_do_not_wait_for_or_queue_slow_knife(self):
+        from threading import Event
+        started, release = Event(), Event()
+        self.responses["face"] = {"results": [{"name": "1", "score": .9}]}
+        def request(endpoint, *args):
+            if endpoint == "knife":
+                started.set()
+                if not release.wait(3):
+                    raise TimeoutError("test knife release")
+            return self.responses[endpoint]
+        self.request.side_effect = request
+        try:
+            first = self.service.recognize(self.frame, self.rec)
+            self.assertTrue(started.wait(1))
+            second = self.service.recognize(self.frame, self.rec)
+            self.assertTrue(first["accepted"] and second["accepted"])
+            self.assertFalse(self.service.knife_future.done())
+            self.assertEqual([c.args[0] for c in self.request.call_args_list].count("knife"), 1)
+        finally:
+            release.set()
+            self.service.knife_future.result(timeout=3)
+
+    def test_old_knife_cannot_be_matched_to_new_no_face_frame(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        started, release, second_face = Event(), Event(), Event()
+        knife_frames, face_calls = [], [0]
+        def request(endpoint, image, fields, timeout):
+            if endpoint == "face":
+                face_calls[0] += 1
+                if face_calls[0] == 1:
+                    return {"results": [{"name": "1", "score": .9}]}
+                second_face.set()
+                return {"results": []}
+            knife_frames.append(fields["frame_id"])
+            if fields["frame_id"] == 1:
+                started.set()
+                if not release.wait(3):
+                    raise TimeoutError("test knife release")
+            return {**self.responses["knife"], "top1_class": f"knife_{fields['frame_id']:02d}"}
+        self.request.side_effect = request
+        try:
+            self.assertTrue(self.service.recognize(self.frame, self.rec)["accepted"])
+            self.assertTrue(started.wait(1))
+            frame = SideFrame(self.frame.image, 2, 2, 1, "B")
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(self.service.recognize, frame, self.rec)
+                try:
+                    self.assertTrue(second_face.wait(1))
+                    self.assertEqual(knife_frames, [1])
+                finally:
+                    release.set()
+                self.assertEqual(result.result(timeout=3)["identity"], "knife_02")
+            self.assertEqual(knife_frames, [1, 2])
+        finally:
+            release.set()
 
     def test_generation_rejects_frame_captured_before_turn(self):
         hub = FrameHub()
@@ -318,9 +414,8 @@ class RecognizerTest(unittest.TestCase):
         self.assertIsNone(hub.latest(1))
 
     def test_nonfinite_scores_cannot_be_confirmed_or_break_status_json(self):
-        self.request.side_effect = [{"results": []}, {"top1_class": "knife_01", "top1_score": float("nan"),
-            "margin": float("nan"), "quality_ok": True, "roi_source": "foreground", "roi_xyxy": [0, 0, 40, 40]}]
-        result = self.service.recognize(self.frame, self.rec)
+        self.responses["knife"].update(top1_score=float("nan"), margin=float("nan"))
+        result = self.recognize()
         self.assertFalse(result["accepted"])
         json.dumps(result, allow_nan=False)
 

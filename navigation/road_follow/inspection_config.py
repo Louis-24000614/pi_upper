@@ -51,7 +51,7 @@ def validate(config):
     if not isinstance(rec["confirm_frames"], int):
         raise ValueError("连续帧数必须是整数")
     number(rec["side_timeout_s"], "每侧超时", 1, 600)
-    number(rec["sample_interval_s"], "采样间隔", .1, 60)
+    number(rec["sample_interval_s"], "采样间隔（0 为完成后立即取新帧）", 0, 60)
     number(rec["request_timeout_s"], "HTTP 超时", .1, 30)
     roi = rec["roi"]
     if not isinstance(roi, list) or len(roi) != 4:
@@ -146,14 +146,14 @@ def pwm14m0_selected(chip, dt_root=Path("/sys/firmware/devicetree/base")):
     return pinctrl.is_file() and route.is_file() and pinctrl.read_bytes() == route.read_bytes()
 
 
-def preflight(settings, root, navigation_device):
+def preflight(settings, root, navigation_device=None, *, camera_device=None):
     """仅检查路径与明确确认项；不打开相机、不导出 PWM、不发送命令。"""
     config, _ = settings.snapshot()
     camera, servo = config["camera"], config["servo"]
-    device = camera["device"]
+    device = camera["device"] if camera_device is None else camera_device
     if not isinstance(device, str) or not device.strip():
         raise ValueError("必须明确配置侧视相机 device，不能猜测设备号")
-    if Path(device).resolve() == Path(navigation_device).resolve():
+    if navigation_device is not None and Path(device).resolve() == Path(navigation_device).resolve():
         raise ValueError("侧视相机不能与导航相机占用同一个设备")
     if not Path(device).exists():
         raise ValueError("侧视相机设备不存在")

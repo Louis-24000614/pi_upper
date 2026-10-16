@@ -86,10 +86,11 @@ class CulvertRuntimeTest(unittest.TestCase):
                 self.mapping, self.runtime.config, self.runtime.calibration,
                 nav_config=self.runtime.nav_config, agent=self.agent,
                 send=lambda line: self.sent.append(line) or True, event=lambda *_: None,
-                root=ROOT, prefix=prefix, inspection_settings=NS())
+                root=ROOT, prefix=prefix, inspection_settings=NS(), inspection_pair_fallback=True)
         self.addCleanup(runtime.close)
         callback = factory.call_args.kwargs["notify"]
         self.assertTrue(factory.call_args.kwargs["speech_enabled"])
+        self.assertTrue(factory.call_args.kwargs["pair_fallback"])
         self.assertTrue(callback(dict(status="confirmed", category="suspect",
                                       identity="suspect_10", edge_id="4_3__5_3", direction="A")))
         verb, event_id, audio_id = self.sent[-1].split()

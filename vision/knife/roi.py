@@ -28,7 +28,33 @@ def _largest(mask: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int], i
     return np.where(labels == index, 255, 0).astype(np.uint8), (x, y, width, height), area
 
 
-def _light_surface_roi(image: np.ndarray) -> tuple[int, int, int, int] | None:
+def _directional_roi(mask: np.ndarray, reverse: bool = False) -> tuple[int, int, int, int] | None:
+    """沿已选连通域的长轴延伸，先朝下，反向请求朝上。"""
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 20:
+        return None
+    points = np.column_stack((xs, ys)).astype(np.float32)
+    _, eigenvectors = cv2.PCACompute(points, mean=None, maxComponents=2)
+    axis = eigenvectors[0]
+    # 图像 y 轴向下；接近水平时用向左作为稳定的首选。
+    if axis[1] < 0 or (abs(axis[1]) < 1e-6 and axis[0] > 0):
+        axis = -axis
+    if reverse:
+        axis = -axis
+    projection = points @ axis
+    length = max(20.0, float(np.max(projection) - np.min(projection)))
+    dx, dy = axis * (2.0 * length)
+    pad = max(12.0, 0.25 * length)
+    height, width = mask.shape
+    return (
+        max(0, int(np.floor(xs.min() + min(0.0, dx) - pad))),
+        max(0, int(np.floor(ys.min() + min(0.0, dy) - pad))),
+        min(width, int(np.ceil(xs.max() + 1 + max(0.0, dx) + pad))),
+        min(height, int(np.ceil(ys.max() + 1 + max(0.0, dy) + pad))),
+    )
+
+
+def _light_surface_roi(image: np.ndarray, reverse: bool = False) -> tuple[int, int, int, int] | None:
     """先找浅色纸面，再用局部对比找到刀柄或深色刀身。
 
     局部亮度差能忽略纸张的大面积阴影；直接对整张纸做全局阈值容易把纸边
@@ -41,7 +67,7 @@ def _light_surface_roi(image: np.ndarray) -> tuple[int, int, int, int] | None:
     paper = _largest(paper_seed)
     if paper is None or paper[2] < 0.18 * paper_seed.size:
         return None
-    paper_mask, (px, py, pw, ph), _ = paper
+    paper_mask, _, _ = paper
     contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     paper_mask[:] = 0
     cv2.drawContours(paper_mask, [max(contours, key=cv2.contourArea)], -1, 255, cv2.FILLED)
@@ -55,50 +81,23 @@ def _light_surface_roi(image: np.ndarray) -> tuple[int, int, int, int] | None:
     object_region = _largest(ink)
     if object_region is None or object_region[2] < 0.005 * ink.size:
         return None
-    _, (ix, iy, iw, ih), _ = object_region
-
-    ratio = ih / max(iw, 1)
-    if ratio >= 1.35:
-        # 细长或面积较大的连通域通常已包含刀身，只需小幅留边。
-        target_width, target_height = 1.2 * iw, 1.12 * ih
-        cx, cy = ix + iw / 2, iy + ih / 2
-    elif iw >= 150:
-        # 较宽的连通域可能仅是横向刀柄；使用纸面范围留出浅色刀刃的位置。
-        target_width = min(max(2.4 * iw, 0.53 * pw), 0.82 * pw)
-        target_height = min(max(2.4 * ih, 0.80 * ph), 0.95 * ph)
-        # 纸上浅色刀刃通常位于刀柄右侧，轻微右移可避免把刀刃尖端截掉。
-        cx = 0.55 * (ix + iw / 2) + 0.45 * (px + pw / 2) + 25
-        cy = 0.55 * (iy + ih / 2) + 0.45 * (py + ph / 2)
-    else:
-        # 小而近方形的深色区域多为刀柄，朝纸面中心扩张以纳入刀刃。
-        target_width, target_height = 3.0 * iw, 2.4 * ih
-        cx = ix + iw / 2 + np.clip((px + pw / 2 - ix - iw / 2) * .4, -55, 55)
-        # 刀柄常在刀刃右下侧，方形刀柄向上留出刀刃，比向纸面中心更可靠。
-        cy = iy + ih / 2 - 50
-    x0 = max(0, round(cx - target_width / 2))
-    y0 = max(0, round(cy - target_height / 2))
-    x1 = min(image.shape[1], round(cx + target_width / 2))
-    y1 = min(image.shape[0], round(cy + target_height / 2))
-    return x0, y0, x1, y1
+    return _directional_roi(object_region[0], reverse)
 
 
-def _simple_foreground_roi(image: np.ndarray) -> tuple[int, int, int, int] | None:
+def _simple_foreground_roi(image: np.ndarray, reverse: bool = False) -> tuple[int, int, int, int] | None:
     """无浅色纸面时，尝试从相对均匀的背景上找最大前景。"""
     mask = segment_foreground(image)
     object_region = _largest(mask)
     if object_region is None:
         return None
-    _, (x, y, width, height), area = object_region
+    mask, _, area = object_region
     ratio = area / mask.size
     if not 0.005 <= ratio <= 0.50:
         return None
-    pad = max(12, round(max(width, height) * 0.25))
-    return (max(0, x - pad), max(0, y - pad),
-            min(image.shape[1], x + width + pad),
-            min(image.shape[0], y + height + pad))
+    return _directional_roi(mask, reverse)
 
 
-def select_knife_roi(frame: np.ndarray) -> KnifeRoi | None:
+def select_knife_roi(frame: np.ndarray, reverse: bool = False) -> KnifeRoi | None:
     """返回原图中的自动单刀框；证据不足时返回None并保留原始整帧。
 
     最长边缩至640像素，避免GUI每次送1280×720帧时在CPU上做全分辨率分割。
@@ -112,10 +111,10 @@ def select_knife_roi(frame: np.ndarray) -> KnifeRoi | None:
     scale = min(1.0, 640.0 / max(width, height))
     small_width, small_height = round(width * scale), round(height * scale)
     small = cv2.resize(frame[:, :, :3], (small_width, small_height), interpolation=cv2.INTER_AREA)
-    box = _light_surface_roi(small)
+    box = _light_surface_roi(small, reverse)
     source = "light_surface"
     if box is None:
-        box = _simple_foreground_roi(small)
+        box = _simple_foreground_roi(small, reverse)
         source = "foreground"
     if box is None:
         return None

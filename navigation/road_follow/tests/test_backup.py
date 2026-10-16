@@ -381,10 +381,36 @@ class BackupTest(unittest.TestCase):
                     self.assertEqual(command.reason, "stop_backup_heading_invalid")
                     self.assertEqual((command.v_mps, command.omega_radps), (0, 0))
 
-    def test_planned_backup_keeps_existing_odom_time_and_distance_checks(self):
+    def test_planned_backup_has_no_total_timeout_and_stops_at_entry(self):
+        cfg = BackupConfig(reverse_speed_mps=.05)
+        for gain in (0.0, 1.0):
+            with self.subTest(visual_steering_gain=gain):
+                state, command = step_backup(
+                    Backup(), True, 0.0, .99, self.follow, 1.0, cfg,
+                    yaw_rad=.30, heading_only=True,
+                )
+                self.assertEqual(command.reason,"stop_backup")
+                for now, progress in ((17,.25),(21,.05),(61,.01)):
+                    state, command = step_backup(
+                        state, False, 0.0, progress, self.follow, now, cfg,
+                        yaw_rad=.30, frame_captured_s=now,
+                        visual_steering_gain=gain,
+                    )
+                    self.assertEqual(state.phase,"backing")
+                    self.assertEqual(command.reason,"fused_backup" if gain else "heading_backup")
+                    self.assertAlmostEqual(command.v_mps,-.05)
+                    self.assertAlmostEqual(state.hold_yaw_rad,.30)
+                state, command = step_backup(
+                    state, False, 0.0, 0.0, self.follow, 61.1, cfg,
+                    yaw_rad=.30, frame_captured_s=61.1,
+                    visual_steering_gain=gain,
+                )
+                self.assertEqual((state.phase,command.reason),("done","backup_done"))
+                self.assertEqual((command.v_mps,command.omega_radps),(0,0))
+
+    def test_planned_backup_keeps_existing_odom_and_distance_checks(self):
         for progress, now, fresh, reason in (
             (0.0, 1.1, False, "stop_backup_odom_stale"),
-            (0.9, 6.1, True, "stop_backup_timeout"),
             (0.1, 1.1, True, "stop_backup_distance_limit"),
         ):
             with self.subTest(reason=reason):

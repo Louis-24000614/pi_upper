@@ -1,4 +1,5 @@
 """共享侧视帧、既有 HTTP 服务与常驻 PWM 桥；不依赖 Qt。"""
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 import json
 import math
@@ -8,6 +9,7 @@ import secrets
 import subprocess
 import threading
 import time
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import cv2
@@ -131,15 +133,19 @@ def offset_box(box, offset):
 
 
 def post_image(endpoint, image, fields, timeout):
-    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ok:
-        raise ValueError("识别图像编码失败")
+    if isinstance(image, bytes):
+        encoded = image
+    else:
+        ok, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise ValueError("识别图像编码失败")
+        encoded = jpeg.tobytes()
     boundary = "----culvert"+secrets.token_hex(12)
     chunks = []
     for name, value in fields.items():
         chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode())
     chunks.extend([(f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="frame.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode(),
-                   encoded.tobytes(), (f"\r\n--{boundary}--\r\n").encode()])
+                   encoded, (f"\r\n--{boundary}--\r\n").encode()])
     request = Request(endpoint, data=b"".join(chunks), headers={"Content-Type": "multipart/form-data; boundary="+boundary}, method="POST")
     with urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read(2*1024*1024))
@@ -151,10 +157,64 @@ def post_image(endpoint, image, fields, timeout):
 class Recognizer:
     def __init__(self, services, request=post_image):
         self.services, self.request = services, request
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="culvert-knife")
+        self.knife_future = None
+
+    def close(self):
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+    def _recognize_knife(self, image, fields, timeout, threshold):
+        """首方向低于任务阈值才重试反向；两次都低时保留较高候选。"""
+        def score(candidate):
+            value = candidate.get("top1_score")
+            return value if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                             and math.isfinite(value)) else -math.inf
+
+        def attempt(candidate, direction):
+            value = score(candidate)
+            return {"direction": direction, "score": value if math.isfinite(value) else None,
+                    "roi_xyxy": offset_box(candidate.get("roi_xyxy"), (0, 0))}
+
+        attempts = []
+        try:
+            data = self.request(self.services["knife"], image, fields, timeout)
+        except HTTPError as error:
+            if error.code != 422:
+                raise
+            data = None
+            attempts.append({"direction": "down", "error": "HTTP 422"})
+        else:
+            attempts.append(attempt(data, "down"))
+        if data is None or score(data) < threshold:
+            reverse_fields = {**fields, "roi_reverse": "true",
+                              "request_id": fields["request_id"] + "-reverse"}
+            try:
+                reverse = self.request(self.services["knife"], image, reverse_fields, timeout)
+            except (OSError, ValueError):
+                if data is None:
+                    raise
+                attempts.append({"direction": "up", "error": "request_failed"})
+            else:
+                attempts.append(attempt(reverse, "up"))
+                if data is None or score(reverse) > score(data):
+                    data = reverse
+        return {**data, "roi_attempts": attempts, "roi_threshold": threshold}
 
     def recognize(self, frame, rec):
         image, offset = crop(frame.image, rec["roi"])
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise ValueError("识别图像编码失败")
+        image = encoded.tobytes()
         timeout = rec["request_timeout_s"]
+        fields = {"roi_selected": "false", "frame_id": frame.sequence,
+                  "camera_epoch": frame.epoch, "captured_monotonic_ns": int(frame.captured_s*1e9),
+                  "request_id": f"culvert-{frame.epoch}-{frame.sequence}"}
+        # 两路使用同一 JPEG 并行请求。上一张刀具仍在途时不排队，先处理本帧人脸。
+        knife_future = None
+        if self.knife_future is None or self.knife_future.done():
+            knife_future = self.knife_future = self.pool.submit(
+                self._recognize_knife, image, fields, timeout, rec["knife_threshold"])
         data = self.request(self.services["face"], image, {}, timeout)
         faces = data.get("results")
         if not isinstance(faces, list):
@@ -174,10 +234,12 @@ class Recognizer:
             return {"accepted": bool(valid), "category": "suspect", "identity": label,
                     "score": score, "bbox": offset_box(candidate.get("bbox"), offset), "margin": None,
                     "reason": "accepted" if valid else "face_unknown_low_score_or_multiple"}
-        fields = {"roi_selected": "false", "frame_id": frame.sequence,
-                  "camera_epoch": frame.epoch, "captured_monotonic_ns": int(frame.captured_s*1e9),
-                  "request_id": f"culvert-{frame.epoch}-{frame.sequence}"}
-        data = self.request(self.services["knife"], image, fields, timeout)
+        if knife_future is None:
+            # 只等待旧请求释放名额，绝不将旧帧刀具结果配给本帧人脸结果。
+            wait((self.knife_future,))
+            knife_future = self.knife_future = self.pool.submit(
+                self._recognize_knife, image, fields, timeout, rec["knife_threshold"])
+        data = knife_future.result()
         score, label = data.get("top1_score"), data.get("top1_class")
         if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
             score = None
@@ -190,6 +252,8 @@ class Recognizer:
         valid = valid and isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score) and score >= rec["knife_threshold"]
         return {"accepted": bool(valid), "category": "knife", "identity": label, "score": score,
                 "margin": margin, "bbox": box, "roi_source": data.get("roi_source"),
+                "roi_direction": data.get("roi_direction"), "roi_attempts": data.get("roi_attempts"),
+                "roi_threshold": data.get("roi_threshold"),
                 "recognition_mode": data.get("recognition_mode"), "reason": "accepted" if valid else "knife_low_score_or_unreliable_roi"}
 
 

@@ -36,9 +36,10 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Knife recognition", version="1", lifespan=lifespan)
 
 
-def _recognize_frame(frame: np.ndarray, request_id: str, roi_selected: bool) -> tuple[dict, dict]:
+def _recognize_frame(frame: np.ndarray, request_id: str, roi_selected: bool,
+                     roi_reverse: bool = False) -> tuple[dict, dict]:
     """默认自动取景；调用方已裁剪时直接识别，避免重复裁剪刀具。"""
-    roi = None if roi_selected else select_knife_roi(frame)
+    roi = None if roi_selected else select_knife_roi(frame, reverse=roi_reverse)
     if roi is not None:
         x0, y0, x1, y1 = roi.xyxy
         frame = frame[y0:y1, x0:x1]
@@ -48,6 +49,7 @@ def _recognize_frame(frame: np.ndarray, request_id: str, roi_selected: bool) -> 
         "roi_selected": roi_selected or roi is not None,
         "roi_xyxy": list(roi.xyxy) if roi is not None else None,
         "roi_source": "manual" if roi_selected else (roi.source if roi is not None else None),
+        "roi_direction": None if roi is None else ("up" if roi_reverse else "down"),
     }
 
 
@@ -70,6 +72,7 @@ async def recognize(
     camera_epoch: int = Form(0),
     captured_monotonic_ns: int = Form(0),
     roi_selected: bool = Form(False),
+    roi_reverse: bool = Form(False),
 ) -> dict:
     """串行处理一张PNG/JPEG；忙时立即返回409，避免积压过期相机帧。"""
     if _engine is None:
@@ -87,7 +90,8 @@ async def recognize(
         raise HTTPException(status_code=413, detail="decoded_image_too_large")
     try:
         async with _inference_lock:
-            data, roi_info = await asyncio.to_thread(_recognize_frame, frame, request_id, roi_selected)
+            data, roi_info = await asyncio.to_thread(
+                _recognize_frame, frame, request_id, roi_selected, roi_reverse)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:

@@ -24,6 +24,7 @@ class CulvertConfig:
     stop_error_m: float = 0.05
     stop_ack_timeout_s: float = 2.0
     settle_s: float = 2.0
+    # Retained for old configurations; settling no longer has a timeout fault.
     settle_timeout_s: float = 5.0
     stable_position_m: float = 0.01
     stable_yaw_rad: float = 0.03
@@ -56,8 +57,6 @@ class CulvertConfig:
                 raise ValueError(f"{name} 必须是整数")
         if config.min_distance_m >= config.max_distance_m or config.stop_error_m >= config.length_m / 2:
             raise ValueError("涵洞距离窗或停车误差不合法")
-        if config.settle_timeout_s < config.settle_s:
-            raise ValueError("停稳超时不能短于停稳窗口")
         return config
 
 
@@ -252,8 +251,6 @@ class CulvertController:
                         self.event("culvert_task_error", error=str(exc))
                     else:
                         self._transition("task", now)
-            elif now - self.stop_ack_s >= cfg.settle_timeout_s:
-                self.fault("settle_timeout", now)
         elif self.phase == "task":
             try:
                 result = self.executor.step(now)

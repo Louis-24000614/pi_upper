@@ -15,7 +15,7 @@ Point2D = tuple[float, float]
 class BackupConfig:
     """视觉倒车速度、纠偏限制和安全停止条件。"""
 
-    reverse_speed_mps: float = 0.08
+    reverse_speed_mps: float = 0.05
     lookahead_y_m: float = 0.28
     max_abs_omega: float = 0.4
     # 死区和帧间变化率限制：压住倒车时近带中心线抖动直接打轮的蛇形。
@@ -25,7 +25,8 @@ class BackupConfig:
     near_y_max_m: float = 0.35
     done_progress_m: float = 0.0
     max_distance_m: float = 1.10
-    max_duration_s: float = 16.0  # Only planned heading-only reverse uses this timeout.
+    # Retained for old callers; reverse no longer has a total timeout.
+    max_duration_s: float = 16.0
     max_missing_frames: int = 3
     max_no_vision_distance_m: float = 0.15
     # Legacy fields retained for callers; visual reverse no longer stops on these limits.
@@ -320,10 +321,6 @@ def step_backup(
     if state.reverse_distance_m >= cfg.max_distance_m:
         state.phase = "fault"
         return state, _stop("stop_backup_distance_limit")
-    if state.heading_only and now_s - state.started_s >= cfg.max_duration_s:
-        state.phase = "fault"
-        return state, _stop("stop_backup_timeout")
-
     if state.heading_only:
         if yaw_rad is None or not math.isfinite(yaw_rad):
             state.phase = "fault"

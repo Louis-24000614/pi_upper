@@ -53,6 +53,32 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class TestTest1Recognition(unittest.TestCase):
+    def test_new_frames_trigger_immediately_and_same_frame_is_not_repeated(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with patch("main_window.list_cameras", return_value=[]):
+            window = MainWindow()
+        try:
+            window.role_sources["recognition_camera"] = "synthetic"
+            frame = np.zeros((80, 80, 3), dtype=np.uint8)
+            with patch.object(window.knife_client, "submit", return_value=True) as knife, \
+                    patch.object(window.face_client, "submit", return_value=True) as face:
+                window._on_frame_ready("synthetic", frame, 30.0)
+                window._start_test1()
+                window._on_frame_ready("synthetic", frame, 30.0)
+                window._recognition_tick()
+                self.assertEqual((knife.call_count, face.call_count), (1, 1))
+                window._on_frame_ready("synthetic", frame, 30.0)
+                self.assertEqual((knife.call_count, face.call_count), (2, 2))
+                window.knife_client.request_finished.emit()
+                window.face_client.request_finished.emit()
+                self.assertEqual((knife.call_count, face.call_count), (2, 2))
+                window._stop_test1()
+                window._on_frame_ready("synthetic", frame, 30.0)
+                self.assertEqual((knife.call_count, face.call_count), (2, 2))
+            app.processEvents()
+        finally:
+            window.close()
+
     def test_close_knife_candidates_are_visible(self) -> None:
         app = QApplication.instance() or QApplication([])
         with patch("main_window.list_cameras", return_value=[]):
@@ -134,16 +160,19 @@ class TestTest1Recognition(unittest.TestCase):
             window._on_frame_ready("synthetic", frame, 30.0)
             window._start_test1()
             window._on_frame_ready("synthetic", frame, 30.0)
+            window._on_frame_ready("synthetic", frame, 30.0)
             window._recognition_tick()
             deadline = time.monotonic() + 6
             while time.monotonic() < deadline:
                 app.processEvents()
-                if "knife_03" in window.run_knife.text() and "tester" in window.run_face.text():
+                if ("knife_03" in window.run_knife.text() and "tester" in window.run_face.text()
+                        and not window.knife_client.busy and not window.face_client.busy
+                        and len(_Handler.requests) == 4):
                     break
                 time.sleep(0.02)
             self.assertIn("knife_03", window.run_knife.text())
             self.assertIn("tester", window.run_face.text())
-            self.assertEqual(len(_Handler.requests), 2)
+            self.assertEqual(len(_Handler.requests), 4)
             types = {path: content_type for path, content_type in _Handler.requests}
             self.assertIn("multipart/form-data", types["/api/v1/knife/recognize"])
             self.assertIn("multipart/form-data", types["/api/v1/recognize"])

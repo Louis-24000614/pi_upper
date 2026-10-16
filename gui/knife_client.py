@@ -97,6 +97,7 @@ class KnifeClient(QObject):
 
     result_ready = Signal(dict)
     request_failed = Signal(dict)
+    request_finished = Signal()
     busy_changed = Signal(bool)
 
     def __init__(
@@ -152,6 +153,7 @@ class KnifeClient(QObject):
         self.busy_changed.emit(False)
         if worker is not None:
             worker.deleteLater()
+            self.request_finished.emit()
 
     def shutdown(self, timeout_ms: int = 3500) -> bool:
         """停止接收新请求并等待当前请求结束；不会强杀服务进程。"""

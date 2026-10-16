@@ -124,7 +124,7 @@ async def ws_recognize(ws: WebSocket) -> None:
             async with _inference_lock:
 
                 def _run():
-                    _, results = _face.recognize_from_frame(bgr, DB_PATH, threshold=THRESHOLD)
+                    _, results = _face.recognize_from_frame(bgr, DB_PATH, threshold=THRESHOLD, draw=False)
                     return results
 
                 results = await asyncio.to_thread(_run)
@@ -190,7 +190,7 @@ async def recognize(image: UploadFile = File(...)):
     async with _inference_lock:
 
         def _run():
-            _, results = _face.recognize_from_frame(bgr, DB_PATH, threshold=THRESHOLD)
+            _, results = _face.recognize_from_frame(bgr, DB_PATH, threshold=THRESHOLD, draw=False)
             return results
 
         results = await asyncio.to_thread(_run)
