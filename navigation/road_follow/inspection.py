@@ -69,6 +69,7 @@ class SideInspection:
         with self.lock:
             if self.closed or getattr(self.servo, "closed", False):
                 raise RuntimeError("侧视任务或 PWM 桥已关闭")
+            resume_after_obstacle = self.failure_reason == "hard_obstacle"
             self.generation += 1
             self.config, self.revision = self.settings.snapshot()
             self.target, self.sides, self.result = target, [], None
@@ -80,6 +81,9 @@ class SideInspection:
                 self.future = self.job = None
             if initial_turn:
                 self._turn_to(self.config["servo"]["initial_side"], now_s)
+            elif resume_after_obstacle:
+                # 中断可能发生在翻转途中，先恢复已确认方向并等待稳定。
+                self._turn_to(self.side, now_s)
             else:
                 self._begin_side(now_s)
 
@@ -284,7 +288,8 @@ class SideInspection:
             self._reset_count()
             if self.future is not None:
                 self.future.cancel()
-            if self.servo is not None:
+            # 遇障只是中断当前涵洞；故障和退出仍关闭 PWM 桥。
+            if self.servo is not None and reason != "hard_obstacle":
                 self.servo.close()
 
     def status(self):
