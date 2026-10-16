@@ -23,12 +23,13 @@ if TYPE_CHECKING:
     from road_follow.rfid_arrival import RfidArrivalConfig
 
 
-# 标准 0.98 m 格网边：十字路口视觉走到边长。其它到点在 0.68 m 停车，
-# 按当时可见走廊摆正，再按剩余里程走到 0.98 m。短边不用这组数。
+# 标准 0.98 m 格网边仍按原策略识别：十字持续视觉循迹，其它到点在 0.68 m
+# 停车并按当时可见走廊摆正。仅到点目标减 1 cm，余程按该目标动态计算；
+# 保留名义交接/定距/保护参数，短边不用这组数。
 _GRID_LENGTH_M = 0.98
 _GRID_HANDOFF_M = 0.68
 _GRID_FINAL_M = 0.30
-_GRID_ARRIVAL_M = _GRID_HANDOFF_M + _GRID_FINAL_M
+_GRID_ARRIVAL_M = _GRID_LENGTH_M - 0.01
 _GRID_ALIGN_TIMEOUT_S = 2.0
 _GRID_ALIGN_STABLE_FRAMES = 8
 _GRID_ALIGN_OMEGA_SCALE = 0.75
